@@ -41,7 +41,7 @@
     "playwright": "1.63.0",
     "storybook": "10.6.0",
     "storybook-solidjs-vite": "10.7.1",
-    "typescript": "5.9.3",
+    "typescript": "7.0.2",
     "vite": "8.2.2",
     "vite-plugin-solid": "3.0.0-next.27",
     "vitest": "5.0.0"
