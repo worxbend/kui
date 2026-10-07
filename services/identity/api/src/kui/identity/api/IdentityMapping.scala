@@ -38,6 +38,7 @@ object IdentityMapping {
       },
       resource = granted.permission.resource.wire,
       value = granted.permission.value.map(_.raw),
-      actions = granted.permission.actions.map(_.wire).toList.sorted
+      actions = granted.permission.actions.map(_.wire).toList.sorted,
+      defaultRole = granted.defaultRole
     )
 }

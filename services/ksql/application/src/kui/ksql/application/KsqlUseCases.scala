@@ -11,6 +11,7 @@ import kui.kernel.ClusterId
 import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
 import kui.ksql.domain.*
 import kui.security.Principal
+import kui.security.audit.MutationOutcome
 
 /** What the object read produced for one cluster.
   *
@@ -31,10 +32,8 @@ object KsqlListing {
 /** What running this statement would do, and the confirmation it needs if it needs one.
   *
   * @param warnings
-  *   sentences for the person about to confirm, in the order they should be read. **A warning that cannot
-  *   name a figure says so in words**: a `DROP … DELETE TOPIC` whose object this cluster's ksqlDB does not
-  *   list produces *"KUI could not find … so it cannot say which Kafka topic would be deleted"* rather than a
-  *   warning about a topic whose name was guessed.
+  *   sentences for the person about to confirm, in the order they should be read. Destructive plans are
+  *   refused unless the exact object kind, name and backing topic can be identified and signed.
   * @param token
   *   `None` when nothing needs confirming, which is every statement that is not destructive.
   */
@@ -159,20 +158,22 @@ object KsqlUseCases {
               case Right(profile) if !profile.configured =>
                 notConfigured(cluster).asLeft[StatementPlan].pure[F]
               case Right(_) =>
-                for {
-                  now <- Clock[F].realTimeInstant
-                  described <- describe(cluster, statement)
-                  minted <-
-                    if statement.destructive then
-                      tokens.mint(cluster, statement.canonical, now.plus(KsqlPlanToken.Ttl)).map(Some(_))
-                    else none[String].pure[F]
-                } yield StatementPlan(
-                  statement = statement,
-                  warnings = described,
-                  token = minted,
-                  expiresAt = minted.as(now.plus(KsqlPlanToken.Ttl)),
-                  computedAt = now
-                ).asRight[KuiError]
+                describe(cluster, statement).flatMap {
+                  case Left(error) => error.asLeft[StatementPlan].pure[F]
+                  case Right((warnings, binding)) =>
+                    for {
+                      now <- Clock[F].realTimeInstant
+                      minted <- binding
+                        .traverse(value => tokens.mint(cluster, value, now.plus(KsqlPlanToken.Ttl)))
+                    } yield StatementPlan(
+                      statement,
+                      warnings,
+                      minted,
+                      minted.as(now.plus(KsqlPlanToken.Ttl)),
+                      now
+                    )
+                      .asRight[KuiError]
+                }
             }
         }
 
@@ -195,7 +196,17 @@ object KsqlUseCases {
               .pure[F]
 
           case Right(statement) =>
-            guard.guard(principal, cluster, statement, KsqlPlanToken.Operation) {
+            guard.guard[ExecutedStatement](
+              principal,
+              cluster,
+              statement,
+              KsqlPlanToken.Operation,
+              executed =>
+                executed.outcome match {
+                  case StatementOutcome.Pending(_, _) => MutationOutcome.Unknown
+                  case _ => MutationOutcome.Succeeded
+                }
+            ) {
               profiles.profileOf(cluster).flatMap {
                 case Left(error) => error.asLeft[ExecutedStatement].pure[F]
 
@@ -267,40 +278,55 @@ object KsqlUseCases {
       /** The plan's warnings, and the one figure it goes and looks up.
         *
         * A destructive statement's whole content is *which topic disappears*, so the object it names is
-        * looked up in the cluster's own listing and the topic behind it is quoted. When the lookup fails —
-        * the server did not answer, or does not know the object — the warning says exactly that instead of
-        * naming a topic nobody measured.
+        * looked up in the cluster's own listing and the topic behind it is quoted. Failed or ambiguous
+        * lookups cannot authorize deletion. The same identity is re-read and checked before execution.
         */
-      private def describe(cluster: ClusterId, statement: KsqlStatement): F[List[String]] =
-        if !statement.destructive then (if statement.push then List(PushQueryElsewhere) else Nil).pure[F]
+      private def describe(
+          cluster: ClusterId,
+          statement: KsqlStatement
+      ): F[Either[KuiError, (List[String], Option[String])]] =
+        if !statement.destructive then
+          ((if statement.push then List(PushQueryElsewhere) else Nil), none[String]).asRight[KuiError].pure[F]
         else
           profiles.client(cluster).flatMap {
-            case None => List(cannotName(statement, "KUI has no client for this cluster's ksqlDB")).pure[F]
+            case None => notWired(cluster).asLeft[(List[String], Option[String])].pure[F]
             case Some(client) =>
-              client.objects.map {
-                case Left(error) =>
-                  List(cannotName(statement, s"the ksqlDB cluster did not answer: ${error.message}"))
-                case Right(objects) =>
-                  topicOf(objects, statement.target) match {
-                    case Some(topic) =>
+              client.objects.map(_.flatMap { objects =>
+                val matches = objects.items.filter(item =>
+                  statement.target.contains(item.name) && statement.targetKind.contains(item.kind)
+                )
+                val identified = matches match {
+                  case (item @ KsqlObject.Stream(_, topic, format)) :: Nil =>
+                    Some((item, topic, format.toList))
+                  case (item @ KsqlObject.Table(_, topic, format, windowed)) :: Nil =>
+                    Some((item, topic, windowed.toString :: format.toList))
+                  case _ => None
+                }
+                identified
+                  .toRight(
+                    ApplicationError.Invalid(
+                      "KUI cannot identify the exact ksqlDB object and Kafka topic to delete; refresh the objects and plan again",
+                      Nil
+                    ): KuiError
+                  )
+                  .map { case (item, topic, properties) =>
+                    val fields = List(
+                      "ksql-delete-v2",
+                      statement.canonical,
+                      item.kind.wire,
+                      item.name,
+                      topic
+                    ) ++ properties
+                    val binding = fields.map(value => s"${value.length}:$value").mkString
+                    (
                       List(
-                        s"This deletes the Kafka topic '$topic' and every record in it. Nothing in KUI " +
-                          "can undo it."
-                      )
-                    case None =>
-                      List(
-                        cannotName(
-                          statement,
-                          "this cluster's ksqlDB does not list an object by that name"
-                        )
-                      )
+                        s"This deletes the Kafka topic '$topic' and every record in it. Nothing in KUI can undo it."
+                      ),
+                      Some(binding)
+                    )
                   }
-              }
+              })
           }
-
-      private def cannotName(statement: KsqlStatement, why: String): String =
-        s"This deletes the Kafka topic behind ${statement.target.getOrElse("the object it names")} and " +
-          s"every record in it. KUI cannot say which topic that is: $why."
 
       /** The confirmation, checked only for the statements that need one.
         *
@@ -326,7 +352,16 @@ object KsqlUseCases {
                 .asLeft[Unit]
                 .pure[F]
             case Some(value) =>
-              Clock[F].realTimeInstant.flatMap(now => tokens.verify(cluster, statement.canonical, value, now))
+              describe(cluster, statement).flatMap {
+                case Left(error) => error.asLeft[Unit].pure[F]
+                case Right((_, Some(binding))) =>
+                  Clock[F].realTimeInstant.flatMap(now => tokens.verify(cluster, binding, value, now))
+                case _ =>
+                  ApplicationError
+                    .Invalid("the destructive target could not be verified; plan again", Nil)
+                    .asLeft[Unit]
+                    .pure[F]
+              }
           }
     }
 
@@ -353,12 +388,4 @@ object KsqlUseCases {
         "for it"
     )
 
-  /** The Kafka topic behind the stream or table a `DROP` named, if this listing has one. */
-  private def topicOf(objects: KsqlObjects, target: Option[String]): Option[String] =
-    target.flatMap(name =>
-      objects.items.collectFirst {
-        case KsqlObject.Stream(objectName, topic, _) if objectName.equalsIgnoreCase(name) => topic
-        case KsqlObject.Table(objectName, topic, _, _) if objectName.equalsIgnoreCase(name) => topic
-      }
-    )
 }

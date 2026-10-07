@@ -89,6 +89,7 @@ import {
 import { createAlertFeedCache } from "./data/alertCache.js";
 import { createAppearanceSync } from "./data/appearance.js";
 import { createMessageBrowserSync } from "./data/messageBrowser.js";
+import { createClusterWritePolicy } from "./data/writePolicy.js";
 import { brokerStorageOf, createClusterStore } from "./data/clusterStore.js";
 import {
   SEARCH_DEBOUNCE_MS,
@@ -138,6 +139,7 @@ export function App() {
     invalidateCsrf: () => csrf.invalidate(),
   });
   let clearPrivateBrowserState = (): Promise<void> => Promise.resolve();
+  let reauthenticationRequested = false;
 
   const api: KuiApiClient = createApiClient({
     bootstrap,
@@ -146,8 +148,16 @@ export function App() {
     // The gateway said the session lapsed. Emptying it here rather than at the call site means no
     // write control survives that moment even for the length of a reload.
     onUnauthorized: () => {
+      // An anonymous identity is a genuine session, including the CSRF token needed to log in.
+      // Protected reads beneath the overlay can be refused without expiring that session again.
+      if (session.identity()?.principal.kind === "anonymous" || reauthenticationRequested) return false;
+      reauthenticationRequested = true;
       session.markExpired();
       void clearPrivateBrowserState();
+      // If expiry races start-up's settings read, joining that old flight cannot refresh /me.
+      // Queue exactly one fresh session after it; concurrent 401s share this episode.
+      void (sessionFlight ?? Promise.resolve()).then(() => startUp());
+      return true;
     },
   });
 
@@ -194,6 +204,13 @@ export function App() {
   });
 
   const cluster = createCurrentCluster({ storage: safeLocalStorage() });
+  const writePolicy = createClusterWritePolicy(api, session);
+  createEffect(() => session.identity(), () => writePolicy.refresh());
+  onSettled(() => {
+    const timer = setInterval(() => writePolicy.refresh(), 30_000);
+    return () => clearInterval(timer);
+  });
+  onCleanup(() => writePolicy.dispose());
 
   /**
    * The cluster the *address* names — the first paint's answer, and then every navigation's.
@@ -393,7 +410,10 @@ export function App() {
    * fetches nothing — which is what lets every state of that screen, including the ones that only
    * happen when a service is down, be rendered in a story and a test with no server.
    */
-  const [overview, setOverview] = createStore<{ data: OverviewData }>({ data: loadingData() });
+  const [overview, setOverview] = createStore<{ cluster: string | undefined; data: OverviewData }>({
+    cluster: undefined, data: loadingData(),
+  });
+  const overviewData = () => overview.cluster === clusterForFrame() ? overview.data : loadingData();
 
   createEffect(
     () => clusterForFrame(),
@@ -404,6 +424,7 @@ export function App() {
         const next = await fetchOverview(api, selected);
         if (cancelled) return;
         setOverview((draft) => {
+          draft.cluster = selected;
           draft.data = next;
         });
       })();
@@ -570,24 +591,31 @@ export function App() {
    * only by the gate's ten-second deadline — long enough that the first person to see it reads it as
    * the gateway being slow.
    */
-  const startUp = async (): Promise<void> => {
-    const me = await api.get("/api/v1/auth/me", {});
+  let sessionFlight: Promise<void> | undefined;
+  const sessionRequest = new AbortController();
+  onCleanup(() => sessionRequest.abort());
+  const startUp = (): Promise<void> => {
+    if (sessionFlight !== undefined) return sessionFlight;
+    sessionFlight = Promise.resolve().then(async () => {
+      const me = await api.get("/api/v1/auth/me", { signal: sessionRequest.signal });
+      if (sessionRequest.signal.aborted) return;
 
-    report("shell", me.ok ? undefined : me.error);
-    if (me.ok) session.accept(me.value);
-    else {
-      // Nothing answered, or it answered with a failure. The token gate is still released, so a
-      // mutation issued now fails fast with a legible 403 instead of hanging for ever.
-      session.accept({
-        authType: "unknown",
-        csrfToken: "",
-        principal: { kind: "anonymous", name: "anonymous" },
-      });
-    }
+      report("shell", me.ok ? undefined : me.error);
+      if (me.ok) {
+        session.accept(me.value);
+        if (me.value.principal.kind !== "anonymous") reauthenticationRequested = false;
+      } else {
+        session.markExpired();
+        // Release settings/sign-in reads, but never invent a successfully established identity.
+        csrf.settle(undefined);
+      }
 
-    // Only now, with the session established and the gate open, does anything else go out.
-    const settings = await api.get("/api/v1/auth/settings", {});
-    session.acceptSettings(settings.ok ? settings.value : undefined);
+      // Only now, with the session established and the gate open, does anything else go out.
+      const settings = await api.get("/api/v1/auth/settings", { signal: sessionRequest.signal });
+      if (sessionRequest.signal.aborted) return;
+      session.acceptSettings(settings.ok ? settings.value : undefined);
+    }).finally(() => { sessionFlight = undefined; });
+    return sessionFlight;
   };
 
   /*
@@ -625,11 +653,8 @@ export function App() {
     capabilities.featureState(
       registration.serviceId,
       registration.requiresCluster ? clusterForFrame() : undefined,
-      // A control the caller may not use is disabled and explains itself rather than failing at the
-      // server. Until the session has answered, permission is assumed: refusing everything while
-      // `/auth/me` is in flight would flash a forbidden navigation on every load.
-      session.identity() === undefined ||
-        session.permits(
+      // Unknown and expired identities are never evidence of a grant.
+      session.permits(
           registration.viewAction.resource,
           registration.viewAction.action,
           clusterForFrame(),
@@ -664,7 +689,7 @@ export function App() {
       const navigate = useNavigate();
       return (
         <Overview
-          model={toOverviewModel(overview.data)}
+          model={toOverviewModel(overviewData())}
           onCreateTopic={() => {
             // No cluster, no topic list to send anybody to. The dashboard's own empty state is
             // where that case is explained; a button that navigates nowhere is not.
@@ -792,8 +817,8 @@ export function App() {
        visit left behind until `Frame`'s effect has run. */
     cluster: () => clusterForFrame(),
     permits: (action, name) =>
-      session.identity() === undefined ||
       session.permits(action.resource, action.action, clusterForFrame(), name),
+    writeBlocked: writePolicy.writeBlocked,
     paths,
     report: (scope, failed) => health.report(scope, failed ? "answered" : "ok"),
     messageBrowser: {
@@ -1085,7 +1110,7 @@ export function App() {
         </Show>
         <Show when={health.connectivity().kind === "connected" && session.mustSignIn()}>
           <SignIn
-            authType={session.settings()?.authType ?? "form"}
+            authType={session.authType() ?? "form"}
             providerLabel={session.settings()?.providerLabel}
             api={api}
             onSignedIn={() => {

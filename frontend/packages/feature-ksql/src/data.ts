@@ -215,6 +215,7 @@ export interface PushQuerySubscriber {
   readonly onColumns: (columns: readonly string[]) => void;
   readonly onRow: (row: KsqlRow) => void;
   readonly onError: (error: SseError) => void;
+  readonly onDone?: (() => void) | undefined;
 }
 
 /**
@@ -245,8 +246,9 @@ export function openPushQuery(
   statement: string,
   subscriber: PushQuerySubscriber,
   transport?: StreamTransport | undefined,
+  resolveUrl: (path: string) => string = (path) => path,
 ): SseHandle {
-  const url = pushQueryAddress(clusterId, statement);
+  const url = resolveUrl(pushQueryAddress(clusterId, statement));
   /*
    * The transport is a seam and the default is the real one.
    *
@@ -280,6 +282,7 @@ export function openPushQuery(
       if (columns !== Unreadable) subscriber.onColumns(columns);
     },
     onError: (error) => subscriber.onError(error),
+    onDone: () => subscriber.onDone?.(),
   };
 
   return transport === undefined

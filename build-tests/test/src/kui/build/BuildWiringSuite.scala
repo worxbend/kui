@@ -531,6 +531,7 @@ private object BuildWiringSuite {
     "The interface image copies every workspace manifest",
     "Install pnpm",
     "Install",
+    "Deployment proxy and local-only demo ports",
     "Typecheck",
     "Test",
     "Import boundaries",

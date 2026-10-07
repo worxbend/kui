@@ -15,9 +15,9 @@
  * The demonstration environment, the quickstart, and every deployment until an identity provider is
  * configured run with `authType: "disabled"`, and none of them may ever meet a login screen: that is
  * the product's front door and a locked door there is worse than any other bug on the screen. So
- * {@link mustSignIn} demands **both** that the settings have arrived and do not say `disabled`, and
- * that the principal is anonymous. While the settings call is in flight, and if it never answers at
- * all, the answer is "no sign-in" — the direction this failure has to fall.
+ * Sign-in uses the last known configured mode, falling back to `/auth/me` when settings fail.
+ * A loading identity is not an expired identity: expiry must keep sign-in visible and controls
+ * closed while the shell obtains a fresh anonymous session and CSRF token.
  *
  * ## Permissions disable controls rather than letting them fail at the server
  *
@@ -55,6 +55,7 @@ export type AuthMeResponse = {
 
 type WirePermission = {
   readonly resource: PermissionDto["resource"];
+  readonly defaultRole?: PermissionDto["defaultRole"] | undefined;
   readonly actions?: ArrayLike<string> | undefined;
   readonly clusters?: ArrayLike<string> | undefined;
   readonly value?: string | undefined;
@@ -95,6 +96,10 @@ export type SessionIdentity = {
 };
 
 export type SessionState = {
+  /** Last known authentication mode, retained when the identity expires. */
+  readonly authType: Accessor<string | undefined>;
+  /** Distinguishes an expired identity from start-up, so expiry cannot hide sign-in. */
+  readonly expired: Accessor<boolean>;
   /** `undefined` until `/auth/me` has answered. Not "nobody": "not asked yet". */
   readonly identity: Accessor<SessionIdentity | undefined>;
   /** `undefined` until `/auth/settings` has answered. */
@@ -151,6 +156,8 @@ export type SessionOptions = {
 export function createSession(options: SessionOptions): SessionState {
   const [identity, setIdentity] = createSignal<SessionIdentity | undefined>(undefined);
   const [settings, setSettings] = createSignal<AuthSettingsDto | undefined>(undefined);
+  const [expired, setExpired] = createSignal(false);
+  const [authType, setAuthType] = createSignal<string | undefined>(undefined);
 
   const signedIn = (): boolean => {
     const current = identity();
@@ -159,13 +166,16 @@ export function createSession(options: SessionOptions): SessionState {
 
   return {
     identity,
+    expired,
+    authType: () => settings()?.authType ?? authType(),
     settings,
     signedIn,
 
     mustSignIn: () => {
-      const configured = settings();
-      // Both halves, and each guards against a different serious failure. See the module comment.
-      if (configured === undefined || configured.authType === AuthDisabled) return false;
+      const configured = settings()?.authType ?? authType();
+      if (configured === AuthDisabled) return false;
+      if (expired()) return true;
+      if (configured === undefined || configured === "unknown") return false;
       const current = identity();
       // `undefined` means `/auth/me` has not answered yet, which is also not a reason to demand a
       // sign-in: a signed-in user reloading the page would be asked to sign in again, in a loop.
@@ -176,16 +186,16 @@ export function createSession(options: SessionOptions): SessionState {
       const current = identity();
       if (current === undefined) return false;
       const grants = grantsFromWire(current.permissions);
-      // The empty string stands in for "no cluster named": no cluster id is empty, so only a grant
-      // scoped to every cluster can match, which is what a question about KUI itself deserves.
-      const scope = cluster ?? "";
+      // No cluster means a global request: all explicit roles take precedence over defaults.
       const permission = { resource, action } as Parameters<typeof grantsAllowAny>[2];
       return name === undefined
-        ? grantsAllowAny(grants, scope, permission)
-        : grantsAllow(grants, scope, permission, name);
+        ? grantsAllowAny(grants, cluster, permission)
+        : grantsAllow(grants, cluster, permission, name);
     },
 
     accept: (response) => {
+      setExpired(false);
+      setAuthType(response.authType);
       // An empty token is no token. Sending `X-Csrf-Token: ` is rejected exactly as a missing header
       // is, but with a far more confusing message in the gateway's log.
       const token = response.csrfToken.length > 0 ? response.csrfToken : undefined;
@@ -198,6 +208,7 @@ export function createSession(options: SessionOptions): SessionState {
         authType: response.authType,
         permissions: Array.from(response.permissions ?? []).map((grant) => ({
           resource: grant.resource,
+          defaultRole: grant.defaultRole ?? false,
           actions: Array.from(grant.actions ?? []),
           clusters: Array.from(grant.clusters ?? []),
           ...(grant.value === undefined ? {} : { value: grant.value }),
@@ -208,13 +219,12 @@ export function createSession(options: SessionOptions): SessionState {
     },
 
     acceptSettings: (next) => {
-      // A deployment that has configured no authentication must never be shown a locked door because
-      // one request was slow, so a failed settings call is recorded as "disabled" rather than left
-      // unanswered for ever.
-      setSettings(next ?? { authType: AuthDisabled, rbacEnabled: false });
+      // Failure is not evidence that authentication was disabled. Retain the last known mode.
+      if (next !== undefined) setSettings(next);
     },
 
     markExpired: () => {
+      setExpired(true);
       setIdentity(undefined);
       options.invalidateCsrf();
     },

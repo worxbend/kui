@@ -36,8 +36,12 @@ final class PurgeUseCaseSuite extends KuiIOSuite {
   /** A deleter that answers a fixed set of watermarks and remembers what it was asked to delete. */
   final private class FakeDeleter(
       val asked: Ref[IO, List[Map[PartitionId, Offset]]],
-      watermarksOf: List[PlannedPurge]
+      watermarksOf: List[PlannedPurge],
+      val identity: Ref[IO, String]
   ) extends RecordDeleter[IO] {
+
+    def topicId(cluster: ClusterId, topic: TopicName): IO[Either[KuiError, String]] =
+      identity.get.map(Right(_))
 
     def watermarks(cluster: ClusterId, topic: TopicName): IO[Either[KuiError, List[PlannedPurge]]] =
       IO.pure(Right(watermarksOf))
@@ -63,11 +67,26 @@ final class PurgeUseCaseSuite extends KuiIOSuite {
       logger <- FakeStructuredLogger[IO]
       audit <- ProduceRig.RecordingAudit.make
       asked <- Ref.of[IO, List[Map[PartitionId, Offset]]](Nil)
-      deleter = new FakeDeleter(asked, watermarks)
+      identity <- Ref.of[IO, String]("original-topic-uuid")
+      deleter = new FakeDeleter(asked, watermarks, identity)
       profiles = new ProduceRig.Profiles(readOnly)
       guard = MutationGuard.make[IO](profiles, audit, logger)
       tokens = PurgeToken.make[IO](Secret("a key long enough for HMAC-SHA256".getBytes("UTF-8")))
     } yield Rig(PurgeUseCase.make[IO](deleter, profiles, guard, tokens, logger), deleter, audit.entries)
+
+  test("recreating a topic with identical offsets invalidates its purge token") {
+    for {
+      built <- rig(List(planned(0, 0L, 100L)))
+      offer <- built.purge.plan(ProduceRig.Cluster, ProduceRig.Topic)
+      token = offer.getOrElse(fail("the plan must be offered")).token
+      _ <- built.deleter.identity.set("replacement-topic-uuid")
+      applied <- built.purge.apply(Caller, ProduceRig.Cluster, ProduceRig.Topic, token)
+      asked <- built.deleter.asked.get
+    } yield {
+      assert(applied.isLeft)
+      assertEquals(asked, Nil)
+    }
+  }
 
   test("a purge deletes exactly the offsets the plan named, and records them in partition order") {
     for {

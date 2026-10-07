@@ -151,6 +151,25 @@ export function SmartFilterDialog(props: SmartFilterDialogProps): JSX.Element {
 
   const sample = (): KafkaRecord | undefined => props.samples[sampleAt()];
 
+  const [tested, setTested] = createSignal<{
+    source: string; sample: KafkaRecord | undefined; topic: string;
+  } | undefined>(untrack(() => props.testState.kind === "done"
+    ? { source: effectiveSource(), sample: sample(), topic: props.topic } : undefined));
+  createEffect(
+    () => [effectiveSource(), sample(), props.topic, props.open] as const,
+    ([source, chosen, topic, open]) => {
+      const previous = untrack(tested);
+      if (!open || previous?.source !== source || previous.sample !== chosen || previous.topic !== topic) {
+        setTested(undefined);
+      }
+    },
+  );
+  const currentTest = (): boolean => {
+    const submitted = tested();
+    return props.open && submitted !== undefined && submitted.source === effectiveSource() &&
+      submitted.sample === sample() && submitted.topic === props.topic;
+  };
+
   /**
    * Why the preview cannot run, in the words the operator needs.
    *
@@ -175,10 +194,10 @@ export function SmartFilterDialog(props: SmartFilterDialogProps): JSX.Element {
   };
 
   const verdict = (): FilterVerdict | undefined =>
-    props.testState.kind === "done" ? props.testState.value : undefined;
+    currentTest() && props.testState.kind === "done" ? props.testState.value : undefined;
 
   const failure = (): { readonly message: string; readonly code?: string } | undefined => {
-    for (const state of [props.applyState, props.testState]) {
+    for (const state of [props.applyState, ...(currentTest() ? [props.testState] : [])]) {
       if (state.kind === "failed") return { message: state.message, code: state.code };
       if (state.kind === "forbidden") return { message: state.message };
     }
@@ -212,7 +231,10 @@ export function SmartFilterDialog(props: SmartFilterDialogProps): JSX.Element {
             {...disabledProps(testDisabledReason())}
             onClick={() => {
               const chosen = sample();
-              if (chosen !== undefined) props.onTest(effectiveSource(), chosen);
+              if (chosen !== undefined) {
+                setTested({ source: effectiveSource(), sample: chosen, topic: props.topic });
+                props.onTest(effectiveSource(), chosen);
+              }
             }}
           >
             Try it on one record

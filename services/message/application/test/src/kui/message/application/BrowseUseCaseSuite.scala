@@ -46,7 +46,7 @@ final class BrowseUseCaseSuite extends KuiIOSuite {
   final private class CountingClock(calls: Ref[IO, Int]) extends Clock[IO] {
     def applicative: Applicative[IO] = Applicative[IO]
 
-    def monotonic: IO[FiniteDuration] = calls.update(_ + 1).as(0.seconds)
+    def monotonic: IO[FiniteDuration] = calls.getAndUpdate(_ + 1).map(call => (100000 + call).seconds)
 
     def realTime: IO[FiniteDuration] = IO.pure(0.seconds)
   }
@@ -631,6 +631,26 @@ final class BrowseUseCaseSuite extends KuiIOSuite {
       .map { produced =>
         assertEquals(delivered(produced), List("invoice"))
       }
+  }
+
+  test("progress elapsed time uses the same origin as terminal elapsed time") {
+    val records = List.tabulate(BrowseUseCase.ProgressEvery)(offset => raw(offset.toLong, "value"))
+    for {
+      calls <- Ref.of[IO, Int](0)
+      clock = new CountingClock(calls)
+      browse = BrowseUseCase.make[IO](
+        clusters,
+        serdes("<nothing fails>"),
+        source(records.map(_.asRight[KuiError])),
+        CursorCodec.hmacSha256[IO](key),
+        FilterSource.unsupported[IO],
+        RecordMasking.none[IO]
+      )(using summon[Concurrent[IO]], clock)
+      produced <- events(browse, request(BrowseUseCase.ProgressEvery))
+    } yield assertEquals(
+      produced.collect { case c: BrowseEvent.Consumed => c.elapsed },
+      List(1.second, 2.seconds)
+    )
   }
 
   test("a browse reads the monotonic clock only when it reports elapsed time") {

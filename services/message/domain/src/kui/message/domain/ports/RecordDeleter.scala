@@ -15,13 +15,15 @@ import kui.message.domain.{PlannedPurge, PurgeResult}
   */
 trait RecordDeleter[F[_]] {
 
+  /** Kafka's nonzero topic UUID, never the reusable name. Refuse when it cannot be established. */
+  def topicId(cluster: ClusterId, topic: TopicName): F[Either[KuiError, String]]
+
   /** Where each partition's log currently starts and ends.
     *
     * This is the plan phase's whole input, and it is why the operation has a plan at all: the number of
     * records a purge destroys is not in the request, it is in the broker, and it moves while the operator is
-    * reading. A partition that has no leader is left out of the result rather than reported with a guessed
-    * pair — the same rule the topic list follows for message counts, because a number nobody could have
-    * measured must never reach a screen.
+    * reading. Missing leaders or unknown offsets refuse the entire plan: a destructive preview must never
+    * silently exclude the partitions whose contents could not be measured.
     */
   def watermarks(cluster: ClusterId, topic: TopicName): F[Either[KuiError, List[PlannedPurge]]]
 

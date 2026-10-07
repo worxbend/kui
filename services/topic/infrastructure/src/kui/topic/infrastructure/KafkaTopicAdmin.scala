@@ -121,7 +121,9 @@ final class KafkaTopicAdmin[F[_]: Async](
         // Segment counts come from `describeLogDirs`, which is a per-broker call over every partition
         // on the cluster. It is not worth a topic page's latency, and a number that is sometimes there
         // and sometimes not is worse than one that is honestly absent.
-        segmentCount = None
+        segmentCount = None,
+        topicId =
+          Option(described.topicId).filterNot(_ == org.apache.kafka.common.Uuid.ZERO_UUID).map(_.toString)
       )
     }
 

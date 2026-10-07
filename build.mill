@@ -30,6 +30,7 @@ object Versions {
   val fs2             = "3.13.0"
   val tapir           = "1.13.31"
   val sttp            = "4.0.26"
+  val http4sBlaze     = "0.23.17"
   val circe           = "0.14.16"
   val circeYaml       = "0.16.1"
   val ciris           = "3.15.0"
@@ -774,6 +775,8 @@ object libs extends Module {
       mvn"com.softwaremill.sttp.tapir::tapir-netty-server-cats::${Versions.tapir}",
       mvn"com.softwaremill.sttp.client4::core::${Versions.sttp}",
       mvn"com.softwaremill.sttp.client4::fs2::${Versions.sttp}",
+      mvn"com.softwaremill.sttp.client4::http4s-backend::${Versions.sttp}",
+      mvn"org.http4s::http4s-blaze-client::${Versions.http4sBlaze}",
       mvn"org.typelevel::log4cats-core::${Versions.log4cats}"
     )
 
@@ -2806,7 +2809,7 @@ object services extends Module {
       * its routes and serve them beside the rest over one port (ADR-010).
       */
     object app extends KuiJvmModule {
-      def moduleDeps = Seq(api, infrastructure, libs.cache, libs.config, libs.observability, libs.http)
+      def moduleDeps = Seq(api, infrastructure, libs.cache, libs.config, libs.observability, libs.http, services.cluster.client)
 
       def mvnDeps = Seq(
         mvn"org.typelevel::cats-core::${Versions.cats}",
@@ -3003,7 +3006,7 @@ object services extends Module {
     /** The composition root: the one place in the alerts service that constructs anything concrete. */
     object app extends KuiJvmModule {
       def moduleDeps =
-        Seq(api, infrastructure, libs.cache, libs.config, libs.kafka, libs.observability, libs.http)
+        Seq(api, infrastructure, libs.cache, libs.config, libs.kafka, libs.observability, libs.http, services.cluster.client)
 
       def mvnDeps = Seq(
         mvn"org.typelevel::cats-core::${Versions.cats}",
@@ -3538,6 +3541,7 @@ object apps extends Module {
       services.gateway.application,
       services.cluster.app,
       services.cluster.api,
+      services.cluster.client,
       services.topic.app,
       services.topic.api,
       services.consumer.app,

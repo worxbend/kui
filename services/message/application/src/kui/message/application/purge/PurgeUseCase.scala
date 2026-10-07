@@ -79,12 +79,24 @@ object PurgeUseCase {
           // read the same profile flag — and the guard still makes the decision that matters, in the
           // breath before the write.
           _ <- EitherT(writable(cluster))
+          identity <- EitherT(deleter.topicId(cluster, topic))
           partitions <- EitherT(deleter.watermarks(cluster, topic))
+          currentIdentity <- EitherT(deleter.topicId(cluster, topic))
+          _ <- EitherT.fromEither[F](
+            Either.cond(
+              identity.nonEmpty && identity == currentIdentity,
+              (),
+              ApplicationError
+                .Refused(ErrorCode.InvalidState, "the topic changed while planning; plan again"): KuiError
+            )
+          )
           policy <- EitherT.liftF(deleter.cleanupPolicy(cluster, topic))
           now <- EitherT.liftF(Temporal[F].realTimeInstant)
           plan = PurgePlan.of(topic, partitions, policy, now)
           expiresAt = now.plus(PurgeToken.Ttl)
-          token <- EitherT.liftF(tokens.mint(cluster, topic, plan.partitions.filterNot(_.isEmpty), expiresAt))
+          token <- EitherT.liftF(
+            tokens.mint(cluster, topic, plan.partitions.filterNot(_.isEmpty), expiresAt, identity)
+          )
           _ <- EitherT.liftF(
             logger
               .info(context(cluster, topic))(
@@ -101,7 +113,8 @@ object PurgeUseCase {
       ): F[Either[KuiError, (PurgePlan, PurgeResult)]] =
         (for {
           now <- EitherT.liftF(Temporal[F].realTimeInstant)
-          planned <- EitherT(tokens.verify(cluster, topic, token, now))
+          identity <- EitherT(deleter.topicId(cluster, topic))
+          planned <- EitherT(tokens.verify(cluster, topic, token, now, identity))
           plan = PurgePlan.of(topic, planned, None, now)
           _ <- EitherT.fromEither[F](
             // A token over no partitions is a plan for a topic that was already empty. Applying it would
@@ -132,7 +145,18 @@ object PurgeUseCase {
                   .map(one => s"${one.partition.value}:${one.deleteBefore.value}")
                   .mkString(",")
               )
-            )(deleter.deleteBefore(cluster, topic, plan.deletions))
+            )((for {
+              current <- EitherT(deleter.topicId(cluster, topic))
+              _ <- EitherT.fromEither[F](
+                Either.cond(
+                  identity.nonEmpty && current == identity,
+                  (),
+                  ApplicationError
+                    .Refused(ErrorCode.InvalidState, "the topic changed; plan the purge again"): KuiError
+                )
+              )
+              deleted <- EitherT(deleter.deleteBefore(cluster, topic, plan.deletions))
+            } yield deleted).value)
           )
         } yield (plan, result)).value
 

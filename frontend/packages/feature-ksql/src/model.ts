@@ -52,6 +52,12 @@ export type ResultRegion =
   | { readonly kind: "running" }
   /** A destructive statement is waiting for the reader to confirm it (ADR-045). */
   | { readonly kind: "confirming"; readonly plan: StatementPlan }
+  /** Accepted upstream, but execution has not reached a known terminal state. */
+  | {
+      readonly kind: "pending";
+      readonly message: string | undefined;
+      readonly commandId: string | undefined;
+    }
   /** A statement that changed something and returned no rows: the server's own sentence. */
   | {
       readonly kind: "status";
@@ -104,14 +110,18 @@ export function isLive(region: ResultRegion): boolean {
 }
 
 /**
- * The region a finished statement produces.
+ * The region a statement receipt produces.
  *
- * `status` and `rows` are the service's two outcomes and they are kept apart here for the reason
+ * `pending` confirms acceptance, not completion. `status` and `rows` are terminal outcomes,
+ * kept apart here for the reason
  * `StatementResultDto`'s scaladoc gives: `rows` with an empty list is a query that matched nothing,
  * which is a measured emptiness worth saying out loud, and a statement that returns no rows at all
  * has no rows field to misread.
  */
 export function regionFor(result: StatementResult): ResultRegion {
+  if (result.outcome === "pending") {
+    return { kind: "pending", message: result.message, commandId: result.entity };
+  }
   if (result.outcome === "status") {
     return {
       kind: "status",

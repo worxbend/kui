@@ -6,22 +6,23 @@ import cats.Parallel
 import cats.data.NonEmptyList
 import cats.effect.kernel.{Async, Resource}
 import cats.syntax.all.*
+import fs2.Stream
 import org.typelevel.log4cats.StructuredLogger
 import org.typelevel.otel4s.metrics.Meter
 import sttp.client4.Backend
-import sttp.client4.httpclient.fs2.HttpClientFs2Backend
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.interceptor.Interceptor
 
 import kui.cache.CacheMetrics
-import kui.config.{ClusterConfig, MetricsConfig, MetricsSourceSettings, UrlPolicy}
+import kui.cluster.client.ClusterProfiles
+import kui.config.{ClusterConfig, HttpTlsConfig, KuiConfig, MetricsConfig, MetricsSourceSettings, UrlPolicy}
 import kui.contracts.capability.ServiceCapabilities
 import kui.http.health.ReadinessCheck
 import kui.http.principal.PrincipalVerification
 import kui.http.upstream.{HttpTls, UpstreamClient, UpstreamConfig, UpstreamCredentials}
 import kui.kernel.{ClusterId, PositiveInt}
 import kui.metrics.api.{MetricsApi, MetricsCapabilities}
-import kui.metrics.application.{MetricsUseCases, SourceAccess, SourceProfile}
+import kui.metrics.application.{ClusterSources, MetricsUseCases, SourceAccess, SourceProfile}
 import kui.metrics.domain.MetricsSourcePort
 import kui.metrics.infrastructure.prometheus.{PrometheusQueryClient, PrometheusQueryMetrics}
 import kui.metrics.infrastructure.{ConfiguredClusterSources, MetricsBuffer, PrometheusBrokerScrape}
@@ -64,6 +65,39 @@ final case class MetricsServer[F[_]](
   */
 object MetricsWiring {
 
+  /** Standalone production entry point: the remote profile resource outlives its collectors. */
+  def standalone[F[_]: {Async, Parallel}](
+      config: KuiConfig,
+      telemetry: Telemetry[F],
+      principals: PrincipalCodec[F],
+      logger: StructuredLogger[F],
+      policy: UrlPolicy = UrlPolicy.fromEnv(sys.env)
+  ): Resource[F, MetricsServer[F]] =
+    ClusterProfileSource
+      .remote(config, telemetry, principals, logger, policy)
+      .flatMap(profiles => fromProfiles(profiles, config, telemetry, principals, logger, policy))
+
+  /** Both deployment shapes attach an authoritative, snapshot-on-subscription source here. */
+  def fromProfiles[F[_]: {Async, Parallel}](
+      profiles: ClusterProfiles[F],
+      config: KuiConfig,
+      telemetry: Telemetry[F],
+      principals: PrincipalCodec[F],
+      logger: StructuredLogger[F],
+      policy: UrlPolicy = UrlPolicy.fromEnv(sys.env)
+  ): Resource[F, MetricsServer[F]] =
+    Resource.eval(ClusterProfileSource.snapshot(profiles)).flatMap { current =>
+      makeWith(
+        current,
+        config.metrics,
+        policy,
+        telemetry,
+        principals,
+        logger,
+        clusterChanges = Some(ClusterProfileSource.changes(profiles))
+      )
+    }
+
   /** The instrumentation scope this service's tracer and meter are named after. */
   val Instrumentation: String = "kui.metrics"
 
@@ -93,21 +127,27 @@ object MetricsWiring {
     *   the `kui.metrics` section, all four keys of it: `sources` decides which clusters can be measured,
     *   `scrapeInterval` is both the cadence and the step the samples are bucketed under, and `retention` and
     *   `maxSamplesPerSeries` bound what each cluster's window keeps.
+    * @param clusterChanges
+    *   the shared profile source's resolved snapshots, emitting its current snapshot on subscription. Added
+    *   profiles gain source lookups; changed or removed profiles release their collectors and clients.
     */
   def make[F[_]: {Async, Parallel}](
       clusters: List[ClusterConfig],
       metrics: MetricsConfig,
       telemetry: Telemetry[F],
       principals: PrincipalCodec[F],
-      logger: StructuredLogger[F]
+      logger: StructuredLogger[F],
+      clusterChanges: Option[Stream[F, List[ClusterConfig]]] = None
   ): Resource[F, MetricsServer[F]] =
     // The address rule is read here rather than taken as a parameter of this method, so that the all-in-one
-    // and the stand-alone process cannot apply two different ones — widening `make` would move a seam
-    // `apps/allinone` codes against. A JMX exporter at `http://kafka-metrics:5556/metrics` inside a Compose
+    // and the stand-alone process cannot apply two different ones. A JMX exporter at
+    // `http://kafka-metrics:5556/metrics` inside a Compose
     // network is the ordinary arrangement, and `KUI_ALLOW_PRIVATE_UPSTREAMS` is what admits it.
     Resource
       .eval(Async[F].delay(UrlPolicy.fromEnv(sys.env)))
-      .flatMap(policy => makeWith[F](clusters, metrics, policy, telemetry, principals, logger))
+      .flatMap(policy =>
+        makeWith[F](clusters, metrics, policy, telemetry, principals, logger, clusterChanges)
+      )
 
   /** The same wiring with the address rule handed in.
     *
@@ -123,7 +163,8 @@ object MetricsWiring {
       policy: UrlPolicy,
       telemetry: Telemetry[F],
       principals: PrincipalCodec[F],
-      logger: StructuredLogger[F]
+      logger: StructuredLogger[F],
+      clusterChanges: Option[Stream[F, List[ClusterConfig]]] = None
   ): Resource[F, MetricsServer[F]] =
     for {
       meter <- Resource.eval(telemetry.meter(Instrumentation))
@@ -134,14 +175,26 @@ object MetricsWiring {
       querySourceIds = ConfiguredClusterSources.queryable(clusters, metrics).map(_._1).toSet
       _ <- Resource.eval(startupLog[F](profiles, querySourceIds, logger))
 
-      buffers <- collectors[F](clusters, metrics, policy, telemetry, meter, logger)
-      queries <- queryClients[F](clusters, metrics, policy, telemetry, meter, logger)
-
-      sources = new ConfiguredClusterSources[F](
-        profiles,
-        buffers.toMap[ClusterId, MetricsSourcePort[F]],
-        queries
-      )
+      live <- ClusterCollectors.resource[F, ConfiguredClusterSources[F]](clusters) { cluster =>
+        for {
+          buffers <- collectors[F](List(cluster), metrics, policy, telemetry, meter, logger)
+          queries <- queryClients[F](List(cluster), metrics, policy, telemetry, meter, logger)
+        } yield new ConfiguredClusterSources[F](
+          ConfiguredClusterSources.profilesOf(List(cluster), metrics),
+          buffers.toMap[ClusterId, MetricsSourcePort[F]],
+          queries
+        )
+      }
+      _ <- live.watch(clusterChanges.getOrElse(Stream.empty), logger)
+      sources = new ClusterSources[F] {
+        def all: F[List[SourceProfile]] = live.current
+          .flatMap(_.values.toList.traverse(_._2.all))
+          .map(_.flatten.sortBy(_.cluster.value))
+        def profile(cluster: ClusterId): F[Option[SourceProfile]] =
+          live.current.flatMap(_.get(cluster).traverse(_._2.profile(cluster)).map(_.flatten))
+        def source(cluster: ClusterId): F[Option[MetricsSourcePort[F]]] =
+          live.current.flatMap(_.get(cluster).traverse(_._2.source(cluster)).map(_.flatten))
+      }
       // The stale threshold is the scrape cadence, from the same section: a point-in-time reading older
       // than the interval that should have replaced it is last-known-good and is drawn as such.
       useCases = MetricsUseCases.make[F](sources, metrics.scrapeInterval)
@@ -185,7 +238,7 @@ object MetricsWiring {
     if readable.isEmpty then Resource.pure[F, Map[ClusterId, MetricsBuffer[F]]](Map.empty)
     else
       for {
-        transport <- HttpClientFs2Backend.resource[F]()
+        transport <- HttpTls.resource[F](HttpTlsConfig.Default, policy)
         cacheMetrics <- Resource.eval(CacheMetrics.otel4s[F](meter))
         // One instant for every window, taken before any of them collects, so that two clusters
         // configured together report the same coverage rather than one of them looking a scrape younger.
@@ -298,8 +351,8 @@ object MetricsWiring {
       logger: StructuredLogger[F]
   ): Resource[F, PrometheusQueryClient[F]] =
     for {
-      transport <- HttpTls.resource[F](settings.tls)
-      credentials <- UpstreamCredentials.resource[F](settings.auth)
+      transport <- HttpTls.resource[F](settings.tls, policy)
+      credentials <- UpstreamCredentials.resource[F](settings.auth, policy = policy)
       upstream <- UpstreamClient.resource[F](
         queryUpstreamConfig(cluster, settings, policy),
         transport,

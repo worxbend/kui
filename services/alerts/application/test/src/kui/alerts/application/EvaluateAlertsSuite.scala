@@ -65,7 +65,7 @@ final class EvaluateAlertsSuite extends CatsEffectSuite {
     } yield {
       assertEquals(first.opened.size, 1, clue = first.opened.map(_.title))
       assertEquals(second.opened, Nil, clue = second.opened.map(_.title))
-      assertEquals(second.refreshed, first.opened.map(_.id))
+      assertEquals(second.refreshed.map(_.id), first.opened.map(_.id))
       assertEquals(feed.total, 1)
       assertEquals(feed.openCount, 1)
     }

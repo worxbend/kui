@@ -138,6 +138,7 @@ export interface HostOptions {
    * Typed off the context rather than off `KnownAction`, which the kernel's barrel does not export.
    */
   readonly permits?: boolean | KuiContextValue["permits"] | undefined;
+  readonly writeBlocked?: KuiContextValue["writeBlocked"] | undefined;
 }
 
 /**
@@ -184,6 +185,7 @@ export function topicsHost(options: HostOptions): {
         : (options.permits ?? true),
     paths,
     report: () => {},
+    ...(options.writeBlocked === undefined ? {} : { writeBlocked: options.writeBlocked }),
   };
 
   return {

@@ -12,7 +12,33 @@
  * screens say "BACKWARD, inherited" and "BACKWARD, set on this subject" as different sentences.
  */
 import type { ApiError, ApiResult, components, KuiApiClient } from "@kui/api";
-import { apiFailure, type Fetched } from "@kui/kernel";
+import { apiFailure, sharedQueries, type Fetched } from "@kui/kernel";
+
+/** Query identities and mutation invalidation belong to the data contract, not the route. */
+export const schemaKeys = {
+  subjectsPrefix: (cluster: string) => `schemas:subjects:${encodeURIComponent(cluster)}:`,
+  subjects: (cluster: string, query: SubjectQuery) =>
+    `${schemaKeys.subjectsPrefix(cluster)}${encodeURIComponent(query.q ?? "")}:${query.direction ?? "asc"}:${query.page ?? 1}:${query.pageSize ?? 50}`,
+  global: (cluster: string) => `schemas:global:${encodeURIComponent(cluster)}`,
+  compatibilityPrefix: (cluster: string) => `schemas:compat:${encodeURIComponent(cluster)}:`,
+  compatibility: (cluster: string, subject: string) => `${schemaKeys.compatibilityPrefix(cluster)}${encodeURIComponent(subject)}`,
+  versions: (cluster: string, subject: string) => `schemas:versions:${encodeURIComponent(cluster)}:${encodeURIComponent(subject)}`,
+  schema: (cluster: string, subject: string, version: string) =>
+    `schemas:schema:${encodeURIComponent(cluster)}:${encodeURIComponent(subject)}:${encodeURIComponent(version)}`,
+};
+
+function invalidateRegistration(cluster: string, subject: string): void {
+  sharedQueries.invalidateWhere(key => key.startsWith(schemaKeys.subjectsPrefix(cluster)) ||
+    key === schemaKeys.versions(cluster, subject) || key === schemaKeys.schema(cluster, subject, "latest") ||
+    key === schemaKeys.compatibility(cluster, subject));
+}
+
+function invalidateCompatibility(cluster: string, subject?: string): void {
+  sharedQueries.invalidateWhere(key => key.startsWith(schemaKeys.subjectsPrefix(cluster)) ||
+    (subject === undefined
+      ? key === schemaKeys.global(cluster) || key.startsWith(schemaKeys.compatibilityPrefix(cluster))
+      : key === schemaKeys.compatibility(cluster, subject)));
+}
 
 /**
  * The compatibility levels a Confluent-compatible registry knows.
@@ -407,15 +433,19 @@ export async function setCompatibility(
   subject?: string,
 ): Promise<ApiResult<unknown>> {
   if (subject === undefined) {
-    return api.put("/api/v1/clusters/{clusterId}/schemas/compatibility", {
+    const answer = await api.put("/api/v1/clusters/{clusterId}/schemas/compatibility", {
       params: { path: { clusterId } },
       body: { level },
     });
+    if (answer.ok) invalidateCompatibility(clusterId);
+    return answer;
   }
-  return api.put("/api/v1/clusters/{clusterId}/schemas/subjects/{subject}/compatibility", {
+  const answer = await api.put("/api/v1/clusters/{clusterId}/schemas/subjects/{subject}/compatibility", {
     params: { path: { clusterId, subject } },
     body: { level },
   });
+  if (answer.ok) invalidateCompatibility(clusterId, subject);
+  return answer;
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -482,6 +512,7 @@ export async function registerSchema(
     },
   );
   if (!answer.ok) return { ok: false, error: registryRefusal(answer.error) };
+  invalidateRegistration(clusterId, subject);
   return {
     ok: true,
     value: {
@@ -498,11 +529,8 @@ export async function registerSchema(
 /**
  * Why `Register schema` will not press, or `undefined`.
  *
- * Only a permission answer now: the endpoint exists, so "KUI cannot do this" is no longer one of
- * the reasons. A read-only cluster is refused by the server (`KUI-READ-ONLY`, ADR-047) rather than
- * predicted here, for the same reason every other write on this screen leaves it to the server —
- * the browser holds no read-only flag, and a control disabled on a guess is a control that is
- * wrong on the cluster where the guess is stale.
+ * Legacy permission-only fallback for standalone stories without the shell's write policy.
+ * Product routes use `KuiContextValue.writeBlocked` for reactive permissions and read-only state.
  */
 export function registerBlockedReason(permitted: boolean): string | undefined {
   return permitted

@@ -6,6 +6,7 @@ import scala.concurrent.duration.FiniteDuration
 
 import cats.effect.kernel.{Ref, Resource, Temporal}
 import cats.effect.std.{Semaphore, Supervisor}
+import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import org.typelevel.log4cats.StructuredLogger
 
@@ -94,20 +95,16 @@ object GroupSnapshots {
       logger: StructuredLogger[F]
   ): Resource[F, GroupSnapshots[F]] =
     for {
-      supervisor <- Supervisor[F]
       cells <- Resource.eval(Ref.of[F, Map[ClusterId, Entry[F]]](Map.empty))
       gate <- Resource.eval(Semaphore[F](1L))
-      impl = new Impl[F](admin, refreshInterval, metrics, logger, supervisor, cells, gate)
-      // Every cell is released before the supervisor goes away, so a cell's finalizer runs while
-      // its fiber can still be cancelled. A leaked refresh fiber here is a fiber authenticating to
-      // a cluster every thirty seconds after the operator removed it.
-      _ <- Resource.onFinalize(impl.releaseAll)
-      _ <- Resource.eval(profiles.all.flatMap(impl.sync))
-      _ <- Resource.eval(
-        supervisor
-          .supervise(profiles.changes.evalMap(_ => profiles.all.flatMap(impl.sync)).compile.drain)
-          .void
+      // Finalizers run in reverse: stop reconciliation, cancel forced refreshes, then drain cells.
+      _ <- Resource.onFinalize(
+        gate.permit.use(_ => cells.getAndSet(Map.empty).flatMap(_.values.toList.traverse_(_.release)))
       )
+      supervisor <- Supervisor[F]
+      impl = new Impl[F](admin, refreshInterval, metrics, logger, supervisor, cells, gate)
+      _ <- Resource.eval(profiles.all.flatMap(impl.sync))
+      _ <- profiles.changes.evalMap(_ => profiles.all.flatMap(impl.sync)).compile.drain.background
     } yield impl
 
   /** The refresh pass: the ordered set of port calls that produce one `GroupSnapshot`.
@@ -239,29 +236,31 @@ object GroupSnapshots {
           held <- cells.get
           ids = wanted.map(_.cluster).toSet
           obsolete = held.view.filterKeys(!ids.contains(_)).toMap
-          _ <- obsolete.values.toList.traverse_(_.release)
-          _ <- cells.update(_ -- obsolete.keySet)
+          _ <- Temporal[F].uncancelable(_ =>
+            cells.update(_ -- obsolete.keySet) >> obsolete.values.toList.traverse_(_.release)
+          )
           _ <- wanted
             .filterNot(profile => held.contains(profile.cluster))
             .traverse_(profile => start(profile.cluster))
         } yield ()
       }
 
-    def releaseAll: F[Unit] =
-      cells.getAndSet(Map.empty).flatMap(_.values.toList.traverse_(_.release))
+    private def start(cluster: ClusterId): F[Unit] = {
+      val resource = for {
+        current <- Resource.eval(Ref.of[F, Option[GroupSnapshot]](None))
+        previous <- Resource.eval(Ref.of[F, Option[GroupSnapshot]](None))
+        cell <- SnapshotCell.resource[F, GroupSnapshot](CacheName, cluster, refreshInterval, metrics)(
+          load(cluster, current, previous)
+        )
+      } yield (cell, previous)
 
-    private def start(cluster: ClusterId): F[Unit] =
-      for {
-        current <- Ref.of[F, Option[GroupSnapshot]](None)
-        previous <- Ref.of[F, Option[GroupSnapshot]](None)
-        allocated <- SnapshotCell
-          .resource[F, GroupSnapshot](CacheName, cluster, refreshInterval, metrics)(
-            load(cluster, current, previous)
-          )
-          .allocated
-        (cell, release) = allocated
-        _ <- cells.update(_.updated(cluster, Entry(cell, previous, release)))
-      } yield ()
+      // No cancellation gap may exist between allocation and the owning map receiving the finalizer.
+      Temporal[F].uncancelable { _ =>
+        resource.allocated.flatMap { case ((cell, previous), release) =>
+          cells.update(_.updated(cluster, Entry(cell, previous, release))).onError { case _ => release }
+        }
+      }
+    }
 
     /** The cell's `load`. It raises rather than returns the failure, because `SnapshotCell` unwraps a
       * `SnapshotLoadFailure` back into the `KuiError` the adapter already classified.

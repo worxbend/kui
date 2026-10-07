@@ -100,7 +100,7 @@ function NoCluster(): JSX.Element {
 function useClusterReadOnly(clusterId: () => string): () => boolean {
   const kui = useKui();
   const query = useQuery<ClusterWriteState>({
-    key: () => `cluster-write-state|${clusterId()}`,
+    key: () => kui.writeBlocked === undefined ? `cluster-write-state|${clusterId()}` : undefined,
     load: () => fetchClusterWriteState(kui.api, clusterId()),
   });
   return () => {
@@ -138,7 +138,9 @@ export function AlertsScreen(props: AlertsScreenProps): JSX.Element {
    * defect `feature-topics` had on seven controls and closed in wave 7, shipped here on one.
    */
   const refusal = createMemo(() =>
-    writeBlockedReason({
+    kui.writeBlocked !== undefined
+      ? kui.writeBlocked(props.clusterId, Actions.AlertsAcknowledge)
+      : writeBlockedReason({
       permitted: kui.permits(Actions.AlertsAcknowledge),
       readOnly: readOnly(),
       action: "acknowledge alerts on this cluster",
@@ -151,6 +153,7 @@ export function AlertsScreen(props: AlertsScreenProps): JSX.Element {
   );
 
   const onAcknowledge = (event: AlertEvent): void => {
+    if (refusal() !== undefined) return;
     setPending(event.id);
     void acknowledgement.run(event.id).then((outcome) => {
       setPending(undefined);

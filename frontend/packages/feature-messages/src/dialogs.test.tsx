@@ -261,6 +261,21 @@ describe("the resend confirmation", () => {
 });
 
 describe("the smart filter editor", () => {
+  it("invalidates an in-flight verdict when the expression or sample changes", async () => {
+    const [state, setState] = createSignal<import("@kui/kernel").Mutation<import("./filters.js").FilterVerdict>>({ kind: "idle" });
+    const ui = mount(() => <SmartFilterDialog open onClose={() => undefined} topic="orders"
+      source="true" samples={[RECORD]} testState={state()} applyState={{ kind: "idle" }}
+      onApply={() => undefined} onTest={() => setState({ kind: "running" })} />);
+    await flush();
+    buttons().find((b) => b.textContent?.includes("Try it on one record"))?.click(); await flush();
+    const editor = find<HTMLTextAreaElement>("textarea")!;
+    editor.value = "false"; editor.dispatchEvent(new Event("input", { bubbles: true })); await flush();
+    setState({ kind: "done", value: { kind: "matched" } }); await flush();
+    expect(find(".kui-verdict")).toBeNull();
+    editor.value = "true"; editor.dispatchEvent(new Event("input", { bubbles: true })); await flush();
+    expect(find(".kui-verdict")).toBeNull();
+    ui.dispose();
+  });
   const base = {
     open: true,
     onClose: () => undefined,

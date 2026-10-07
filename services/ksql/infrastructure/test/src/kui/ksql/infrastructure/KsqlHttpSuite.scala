@@ -24,6 +24,62 @@ final class KsqlHttpSuite extends KuiIOSuite {
 
   private val base: SafeUrl = SafeUrl.unsafe("http://ksqldb:8088")
 
+  test("HTTP 200 command ERROR is a failed execution") {
+    val body = """[{"@type":"currentStatus","commandStatus":{"status":"ERROR","message":"cannot create"}}]"""
+    server { case "/ksql" => (StatusCode.Ok, body) }
+      .execute(KsqlStatement.parse("CREATE STREAM X (ID STRING);").toOption.get)
+      .map(result => assert(result.isLeft, clue = result))
+  }
+
+  test("HTTP 200 queued and executing commands are pending, not complete") {
+    import cats.syntax.all.*
+    List("QUEUED", "PARSING", "EXECUTING", "RUNNING").traverse_ { status =>
+      val body =
+        s"""[{"@type":"currentStatus","commandId":"stream/X/create","commandStatus":{"status":"$status","message":"working"}}]"""
+      server { case "/ksql" => (StatusCode.Ok, body) }
+        .execute(KsqlStatement.parse("CREATE STREAM X (ID STRING);").toOption.get)
+        .map(result => assertEquals(result.map(_.wire), Right("pending")))
+    }
+  }
+
+  List("SUCCESS", "RUNNING", "TERMINATED").foreach { status =>
+    test(s"$status without @type preserves the server message and command ID") {
+      val body =
+        s"""[{"commandId":"stream/X/create","commandStatus":{"status":"$status","message":"server message"}}]"""
+      val expected = if status == "RUNNING" then
+        StatementOutcome.Pending("server message", Some("stream/X/create"))
+      else StatementOutcome.Status("server message", Some("stream/X/create"))
+      server { case "/ksql" => (StatusCode.Ok, body) }
+        .execute(KsqlStatement.parse("CREATE STREAM X AS SELECT * FROM Y;").toOption.get)
+        .map(result => assertEquals(result, Right(expected)))
+    }
+  }
+
+  test("a terminal entity does not hide another command still queued") {
+    val body = """[
+      {"commandId":"stream/X/create","commandStatus":{"status":"QUEUED","message":"queued"}},
+      {"commandId":"stream/Y/create","commandStatus":{"status":"TERMINATED","message":"terminated"}}
+    ]"""
+    server { case "/ksql" => (StatusCode.Ok, body) }
+      .execute(KsqlStatement.parse("CREATE STREAM X (ID STRING);").toOption.get)
+      .map(result => assertEquals(result, Right(StatementOutcome.Pending("queued", Some("stream/X/create")))))
+  }
+
+  test("a command status document with no state cannot claim completion") {
+    val body = """[{"@type":"currentStatus","commandId":"stream/X/create"}]"""
+    server { case "/ksql" => (StatusCode.Ok, body) }
+      .execute(KsqlStatement.parse("CREATE STREAM X (ID STRING);").toOption.get)
+      .map(result => assert(result.isLeft, clue = result))
+  }
+
+  test("pull-query in-body errors fail even after rows were received") {
+    val body =
+      """[{"header":{"schema":"`ID` STRING"}},{"row":{"columns":["1"]}},{"errorMessage":{"message":"query failed"}}]"""
+    server { case "/query" => (StatusCode.Ok, body) }
+      .execute(KsqlStatement.parse("SELECT * FROM X;").toOption.get)
+      .map(result => assertEquals(result.left.toOption.map(_.message), Some("query failed")))
+  }
+
   private def server(
       respond: PartialFunction[String, (StatusCode, String)],
       streamBody: String = "",

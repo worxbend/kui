@@ -22,7 +22,7 @@
  * ## Usage: three commands, and the first two are not optional
  *
  *   pnpm build-storybook
- *   npx --yes http-server storybook-static -p 6017 -s &      # what CI does, in the background
+ *   pnpm exec http-server storybook-static -p 6017 -s &     # pinned server, as in CI
  *   pnpm a11y                                                # or: node scripts/a11y-stories.mjs
  *   node scripts/a11y-stories.mjs 'chrome-|surfaces-'        # only matching story ids
  *

@@ -320,6 +320,51 @@ function fakeTransport(response: Promise<StreamResponse>): StreamTransport & { i
 }
 
 describe("a stream over fetch", () => {
+  it("bounds connection establishment even when send never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = abortingTransport();
+      const { errors, subscriber } = recorder();
+      const handle = openFetchStreamWith(transport, subscriber);
+      await vi.advanceTimersByTimeAsync(45_000);
+      flush();
+      expect(handle.connection().phase).toBe("closed");
+      expect(errors).toEqual([{ kind: "transport", cause: "stream connection timed out" }]);
+      expect(transport.isAborted).toBe(true);
+      transport.failSend();
+      await Promise.resolve();
+      expect(errors).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(["fail", "finish"] as const)("reports body %s without done as a terminal transport failure", async (ending) => {
+    const response = fakeResponse(200);
+    const transport = fakeTransport(Promise.resolve(response));
+    const { errors, subscriber } = recorder();
+    const handle = openFetchStreamWith(transport, subscriber);
+    await Promise.resolve();
+    response[ending]();
+    flush();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.kind).toBe("transport");
+    expect(handle.connection().phase).toBe("closed");
+    response.fail();
+    expect(errors).toHaveLength(1);
+    expect(transport.isAborted).toBe(true);
+  });
+
+  it("ignores a rejection body arriving after the client closed", async () => {
+    let resolve!: (body: string) => void;
+    const response = { ...fakeResponse(403), text: () => new Promise<string>((done) => { resolve = done; }) };
+    const { errors, subscriber } = recorder();
+    const handle = openFetchStreamWith(fakeTransport(Promise.resolve(response)), subscriber);
+    await Promise.resolve();
+    handle.close();
+    resolve(ENVELOPE);
+    await Promise.resolve();
+    expect(errors).toEqual([]);
+  });
+
   it("parses the wire format and carries the continuation cursor off the done event", async () => {
     const response = fakeResponse(200);
     const transport = fakeTransport(Promise.resolve(response));

@@ -178,6 +178,15 @@ final class CelFilterEngineSuite extends KuiIOSuite {
     evaluate("record.partition == 3 && record.keyAsText == 'order-1'", textOnly).assertEquals(Right(true))
   }
 
+  test("pruning preserves membership computed keys and whole-record access") {
+    List(
+      "'value' in record",
+      "record['val' + 'ue'].status == 'FAILED'",
+      "size(record) == 7",
+      "[record].exists(r, 'value' in r)"
+    ).traverse_(source => evaluate(source).assertEquals(Right(true)))
+  }
+
   // ------------------------------------------------------------------ compilation
 
   test("the three examples from the user-facing help compile") {

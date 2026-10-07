@@ -104,6 +104,8 @@ services:
     ports:
       - "${KUI_PORT:-8080}:8080"
     environment:
+      # Local demo only: Docker DNS resolves to private addresses checked at connection time.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       # The shared signing key. Both containers must derive the same bytes from the same string, or
       # every call the gateway makes is refused with a 401 (ADR-020). This is what makes the signed
       # principal path real here rather than only in the unit tests.
@@ -175,6 +177,8 @@ services:
     container_name: kui-cluster
     command: ["--config", "/etc/kui/kui-cluster.yaml"]
     environment:
+      # Local demo only: permit private endpoints in registered cluster profiles.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       KUI_PRINCIPAL_KEY: ${KUI_PRINCIPAL_KEY:-compose-development-key-not-for-any-real-deployment}
       KUI_TELEMETRY_LOGFORMAT: text
     volumes:
@@ -209,6 +213,8 @@ services:
     container_name: kui-topic
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
+      # Local demo only: cluster profiles are fetched over the private Docker network.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       KUI_PRINCIPAL_KEY: ${KUI_PRINCIPAL_KEY:-compose-development-key-not-for-any-real-deployment}
       # Signs streaming cursors and plan tokens (ADR-026, ADR-045). Every replica of a service must
       # have the same value or a cursor minted by one is refused by another; the three services here
@@ -236,6 +242,8 @@ services:
     container_name: kui-message
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
+      # Local demo only: cluster profiles and schema registries use private Docker addresses.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       KUI_PRINCIPAL_KEY: ${KUI_PRINCIPAL_KEY:-compose-development-key-not-for-any-real-deployment}
       # Signs streaming cursors and plan tokens (ADR-026, ADR-045). Every replica of a service must
       # have the same value or a cursor minted by one is refused by another; the three services here
@@ -263,6 +271,8 @@ services:
     container_name: kui-consumer
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
+      # Local demo only: cluster profiles are fetched over the private Docker network.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       KUI_PRINCIPAL_KEY: ${KUI_PRINCIPAL_KEY:-compose-development-key-not-for-any-real-deployment}
       # Signs streaming cursors and plan tokens (ADR-026, ADR-045). Every replica of a service must
       # have the same value or a cursor minted by one is refused by another; the three services here
@@ -303,6 +313,8 @@ services:
     container_name: kui-schema
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
+      # Local demo only: cluster profiles and schema registries use private Docker addresses.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       KUI_PRINCIPAL_KEY: ${KUI_PRINCIPAL_KEY:-compose-development-key-not-for-any-real-deployment}
       # Carried although this service signs nothing: it mounts the file the other four mount, and
       # that file resolves `kui.streaming.cursorKey` from this variable, so a container without it
@@ -377,6 +389,8 @@ services:
         condition: service_healthy
         required: false
     environment:
+      # Local demo only: live cluster profiles and exporters use private Docker addresses.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       KUI_PRINCIPAL_KEY: ${KUI_PRINCIPAL_KEY:-compose-development-key-not-for-any-real-deployment}
       # Carried although this service signs nothing: it mounts the file the other three mount, and
       # that file resolves `kui.streaming.cursorKey` from this variable, so a container without it
@@ -419,6 +433,8 @@ services:
     container_name: kui-alerts
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
+      # Local demo only: live cluster profiles are fetched over the private Docker network.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       KUI_PRINCIPAL_KEY: ${KUI_PRINCIPAL_KEY:-compose-development-key-not-for-any-real-deployment}
       # Carried for the same reason `kui-schema` carries it: this container mounts the file the
       # other five mount, and that file resolves `kui.streaming.cursorKey` from this variable, so a
@@ -478,6 +494,8 @@ services:
     container_name: kui-ksql
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
+      # Local demo only: cluster profiles and ksqlDB use private Docker addresses.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       KUI_PRINCIPAL_KEY: ${KUI_PRINCIPAL_KEY:-compose-development-key-not-for-any-real-deployment}
       # Carried for the reason the other six that mount this file carry it -- the file resolves
       # `kui.streaming.cursorKey` from this variable, so a container without it fails the load --
@@ -506,6 +524,8 @@ services:
     container_name: kui-connect
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
+      # Local demo only: cluster profiles and Connect use private Docker addresses.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       KUI_PRINCIPAL_KEY: ${KUI_PRINCIPAL_KEY:-compose-development-key-not-for-any-real-deployment}
       # Carried for the same reason `kui-schema` and `kui-alerts` carry it: this container mounts the
       # file the other six mount, and that file resolves `kui.streaming.cursorKey` from this

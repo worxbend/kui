@@ -53,13 +53,13 @@ describe("the session", () => {
     });
   });
 
-  it("shows no sign-in screen when the settings call fails outright", () => {
+  it("uses the session's auth mode when the settings call fails", () => {
     inRoot(() => {
       const { state } = session();
       state.acceptSettings(undefined);
       state.accept({ authType: "oidc", csrfToken: "", principal: anonymous });
       flush();
-      expect(state.mustSignIn()).toBe(false);
+      expect(state.mustSignIn()).toBe(true);
     });
   });
 
@@ -98,11 +98,18 @@ describe("the session", () => {
     inRoot(() => {
       const { state, settled } = session();
       state.accept({ authType: "oidc", csrfToken: "abc", principal: person });
+      state.acceptSettings({ authType: "oidc", rbacEnabled: true });
       state.markExpired();
       flush();
       expect(state.identity()).toBeUndefined();
       expect(state.signedIn()).toBe(false);
+      expect(state.authType()).toBe("oidc");
       expect(settled).toContain("invalidated");
+      expect(state.mustSignIn()).toBe(true);
+      expect(state.permits("topic", "edit", "prod")).toBe(false);
+      state.acceptSettings(undefined);
+      flush();
+      expect(state.mustSignIn()).toBe(true);
     });
   });
 

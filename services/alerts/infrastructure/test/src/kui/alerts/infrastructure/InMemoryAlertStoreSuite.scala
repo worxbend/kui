@@ -116,7 +116,7 @@ final class InMemoryAlertStoreSuite extends CatsEffectSuite {
       for {
         _ <- held.record(cluster, opening(List(stale)), old)
         // Still firing, so this pass moves `lastSeenAt` to now and leaves `openedAt` where it was.
-        _ <- held.record(cluster, Evaluation(Nil, List(stale.id), Nil, AlertRuleState.empty, Nil), at)
+        _ <- held.record(cluster, Evaluation(Nil, List(stale), Nil, AlertRuleState.empty, Nil), at)
         feed <- held.feed(cluster, ada, 100, None)
       } yield assertEquals(feed.total, 0, clue = "an event past its retention survived by still firing")
     }
@@ -180,7 +180,7 @@ final class InMemoryAlertStoreSuite extends CatsEffectSuite {
         _ <- held.record(cluster, opening(List(open)), at)
         _ <- held.record(
           cluster,
-          Evaluation(Nil, List(open.id), Nil, AlertRuleState.empty, Nil),
+          Evaluation(Nil, List(open), Nil, AlertRuleState.empty, Nil),
           at.plusSeconds(300)
         )
         feed <- held.feed(cluster, ada, 100, None)

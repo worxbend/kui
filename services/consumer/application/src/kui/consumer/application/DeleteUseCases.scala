@@ -157,7 +157,12 @@ private object GroupPreconditions {
             described.get(group) match {
               case None =>
                 ApplicationError
-                  .NotFound("consumer group", group.value, ErrorCode.GroupNotFound)
+                  .InvalidState(s"consumer group ${group.value} could not be described")
+                  .asLeft[ConsumerGroup]
+              case Some(found)
+                  if !found.completeness.membersKnown || !found.completeness.committedOffsetsKnown =>
+                ApplicationError
+                  .InvalidState(s"consumer group ${group.value} members or committed offsets are unknown")
                   .asLeft[ConsumerGroup]
               case Some(found) =>
                 found.offsetChangeRefusal match {

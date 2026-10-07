@@ -112,6 +112,17 @@ object KsqlMapping {
           entity = entity,
           executedAt = executed.executedAt
         )
+      case StatementOutcome.Pending(message, entity) =>
+        StatementResultDto(
+          statement = executed.statement.canonical,
+          shape = executed.statement.shape.wire,
+          outcome = executed.outcome.wire,
+          columns = Nil,
+          rows = Nil,
+          message = Some(message),
+          entity = entity,
+          executedAt = executed.executedAt
+        )
     }
 
   def plan(plan: StatementPlan): StatementPlanDto =

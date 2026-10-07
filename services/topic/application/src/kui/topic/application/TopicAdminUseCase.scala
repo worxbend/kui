@@ -273,8 +273,9 @@ object TopicAdminUseCase {
             now
           )
           expiresAt = now.plus(TopicPlanToken.Ttl)
+          preconditions <- EitherT.fromEither[F](deletePreconditions(detail, plan))
           token <- EitherT.liftF(
-            tokens.mint(cluster, topic, TopicMutation.Delete, deleteDetail(plan), expiresAt)
+            tokens.mint(cluster, topic, TopicMutation.Delete, preconditions, expiresAt)
           )
           _ <- EitherT.liftF(
             logger
@@ -293,7 +294,23 @@ object TopicAdminUseCase {
         (for {
           now <- EitherT.liftF(Temporal[F].realTimeInstant)
           signed <- EitherT(tokens.verify(cluster, topic, TopicMutation.Delete, token, now))
-          plan <- EitherT.fromEither[F](parseDeleteDetail(topic, signed, now))
+          detail <- EitherT(admin.detail(cluster, topic)).leftMap(toKui)
+          autoCreate <- EitherT.liftF(writer.autoCreateEnabled(cluster))
+          plan = DeletionPlan.of(
+            topic,
+            detail.summary.partitionCount,
+            detail.summary.messageCount,
+            autoCreate,
+            now
+          )
+          preconditions <- EitherT.fromEither[F](deletePreconditions(detail, plan))
+          _ <- EitherT.cond[F](
+            preconditions == signed,
+            (),
+            ApplicationError.InvalidState(
+              "topic deletion preconditions changed; preview the deletion again"
+            ): KuiError
+          )
           _ <- EitherT(
             guard.guard(
               principal,
@@ -305,7 +322,7 @@ object TopicAdminUseCase {
                 "records" -> plan.records.fold(UnknownRecords)(_.toString),
                 "autoCreateEnabled" -> plan.autoCreateEnabled.fold("unknown")(_.toString)
               )
-            )(writer.delete(cluster, topic))
+            )(writer.deleteById(cluster, topic, detail.topicId.getOrElse("")))
           )
         } yield plan).value
 
@@ -334,42 +351,36 @@ object TopicAdminUseCase {
         }
     }
 
-  /** A deletion plan as the string its token signs: `partitions:records:autoCreate`.
-    *
-    * The record count is in the token because it is the number the operator weighed the decision against. A
-    * token that signed only the topic name would let a plan read at "3 records" be confirmed against a topic
-    * that has since taken a million — which is exactly the substitution ADR-045 exists to prevent.
+  /** Bind identity and every retained range, not merely a count that retention can leave unchanged. Old
+    * name-only tokens deliberately cannot match this versioned precondition string.
     */
-  private[application] def deleteDetail(plan: DeletionPlan): String =
-    List(
+  private def deletePreconditions(detail: TopicDetail, plan: DeletionPlan): Either[KuiError, String] =
+    for {
+      id <- detail.topicId
+        .filter(_.nonEmpty)
+        .toRight[KuiError](
+          ApplicationError.InvalidState("topic identity is unavailable; deletion cannot be safely confirmed")
+        )
+      ranges <- detail.partitions.sortBy(_.partition.value).traverse { partition =>
+        for {
+          begin <- partition.earliestOffset.toRight[KuiError](unknownBounds)
+          end <- partition.latestOffset.toRight[KuiError](unknownBounds)
+        } yield s"${partition.partition.value}:$begin:$end"
+      }
+      _ <- Either.cond(
+        detail.partitions.nonEmpty && detail.partitions.size == plan.partitions,
+        (),
+        unknownBounds
+      )
+    } yield List(
+      "delete-v2",
+      id,
       plan.partitions.toString,
       plan.records.fold(UnknownRecords)(_.toString),
-      plan.autoCreateEnabled.fold(UnknownRecords)(_.toString)
-    ).mkString(":")
+      plan.autoCreateEnabled.fold(UnknownRecords)(_.toString),
+      ranges.mkString(",")
+    ).mkString(";")
 
-  private[application] def parseDeleteDetail(
-      topic: TopicName,
-      raw: String,
-      now: Instant
-  ): Either[KuiError, DeletionPlan] =
-    raw.split(':').toList match {
-      case partitions :: records :: autoCreate :: Nil =>
-        partitions.toIntOption match {
-          case None => Left(malformed)
-          case Some(count) =>
-            Right(
-              DeletionPlan.of(
-                topic = topic,
-                partitions = count,
-                records = if records == UnknownRecords then None else records.toLongOption,
-                autoCreateEnabled = if autoCreate == UnknownRecords then None else autoCreate.toBooleanOption,
-                computedAt = now
-              )
-            )
-        }
-      case _ => Left(malformed)
-    }
-
-  private val malformed: KuiError =
-    ApplicationError.Invalid("this confirmation does not name a topic deletion", Nil)
+  private val unknownBounds: KuiError =
+    ApplicationError.InvalidState("topic offset bounds are unavailable; preview the deletion again")
 }

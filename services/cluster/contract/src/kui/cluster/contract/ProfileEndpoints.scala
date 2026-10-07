@@ -36,6 +36,7 @@ object ProfileEndpoints {
 
   val ProfileSegment: String = "profile"
   val StreamSegment: String = "stream"
+  val EventName: String = "clusters"
 
   /** The conditional-request header a consumer sends back the ETag in. */
   val IfNoneMatchHeader: String = "If-None-Match"

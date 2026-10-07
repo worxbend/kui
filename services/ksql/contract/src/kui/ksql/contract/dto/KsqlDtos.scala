@@ -267,9 +267,9 @@ object StatementResultDto {
   given TapirSchema[StatementResultDto] = TapirSchema
     .derived[StatementResultDto]
     .description(
-      "What a finished statement produced. `outcome` is 'rows' for a pull query — an empty rows list " +
-        "then means the query matched nothing — or 'status' for a DDL or DML statement, whose `message` " +
-        "is the server's own sentence"
+      "The statement result. `outcome` is 'rows' for a completed pull query, 'status' for a completed " +
+        "statement, or 'pending' for a command accepted but not yet completed. `message` is the server's " +
+        "own sentence and `entity` carries the command ID when supplied. Do not retry a pending command."
     )
 
   given CanEqual[StatementResultDto, StatementResultDto] = CanEqual.derived

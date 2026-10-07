@@ -37,6 +37,46 @@ final class HttpClusterProfilesSuite extends CatsEffectSuite {
   // Start-up
   // ---------------------------------------------------------------------------------------------
 
+  List(ClusterChangeDto.Updated, ClusterChangeDto.Removed).foreach { kind =>
+    test(s"delayedPollCannotOverwriteSse-$kind") {
+      TestControl.executeEmbed(for {
+        entered <- cats.effect.Deferred[IO, Unit]
+        release <- cats.effect.Deferred[IO, Unit]
+        send <- cats.effect.Deferred[IO, Unit]
+        stream = Stream.eval(send.get).drain ++ openStreamOf(changeBytes(Prod, 3L, kind))
+        fake <- fake(Behaviour.of(profile(Prod, 1L)).copy(events = Some(stream)))
+        _ <- client(fake, fastConfig).use { (profiles, _) =>
+          for {
+            _ <- fake.update(
+              _.copy(
+                profiles = Map(Prod -> profile(Prod, 2L)),
+                beforeProfileAnswer = entered.complete(()).void >> release.get
+              )
+            )
+            _ <- IO.sleep(60.seconds)
+            _ <- entered.get
+            _ <- fake.update(
+              _.copy(
+                profiles =
+                  if kind == ClusterChangeDto.Removed then Map.empty else Map(Prod -> profile(Prod, 3L)),
+                beforeProfileAnswer = IO.unit
+              )
+            )
+            _ <- send.complete(())
+            _ <- IO.sleep(1.second)
+            _ <- release.complete(())
+            _ <- IO.sleep(1.second)
+            current <- profiles.get(Prod)
+          } yield assertEquals(
+            current.map(_.version),
+            if kind == ClusterChangeDto.Removed then None else Some(3L)
+          )
+        }
+      } yield ())
+    }
+
+  }
+
   test("startFetchesTheListAndEachProfile") {
     TestControl.executeEmbed(
       for {
@@ -265,6 +305,97 @@ final class HttpClusterProfilesSuite extends CatsEffectSuite {
   // Removal
   // ---------------------------------------------------------------------------------------------
 
+  test("aDelayedRemovalCannotEraseAnAlreadyCurrentNewerProfile") {
+    TestControl.executeEmbed(for {
+      send <- cats.effect.Deferred[IO, Unit]
+      processed <- cats.effect.Deferred[IO, Unit]
+      bytes = changeBytes(Prod, 1L, ClusterChangeDto.Removed).getBytes("UTF-8").toList
+      stream = Stream.eval(send.get).drain ++ Stream.emits(bytes).covary[IO] ++
+        Stream.eval(processed.complete(())).drain ++ Stream.never[IO]
+      fake <- fake(Behaviour.of(profile(Prod, 2L)).copy(events = Some(stream)))
+      changes <- Ref.of[IO, List[ProfileChange]](Nil)
+      _ <- client(fake, fastConfig).use { (profiles, _) =>
+        for {
+          _ <- profiles.onChange(change => changes.update(_ :+ change))
+          _ <- fake.reset
+          _ <- send.complete(())
+          _ <- processed.get
+          current <- profiles.get(Prod)
+          seen <- changes.get
+          calls <- fake.recorded
+        } yield {
+          assertEquals(current.map(_.version), Some(2L))
+          assertEquals(seen, Nil)
+          assertEquals(calls.count(_.path == "/internal/v1/clusters"), 1)
+        }
+      }
+    } yield ())
+  }
+
+  List(1L, 2L).foreach { previousVersion =>
+    test(s"aDelayedRemovalRefetchesARecreatedVersionOneFromVersion-$previousVersion") {
+      TestControl.executeEmbed(for {
+        send <- cats.effect.Deferred[IO, Unit]
+        processed <- cats.effect.Deferred[IO, Unit]
+        bytes = changeBytes(Prod, previousVersion, ClusterChangeDto.Removed).getBytes("UTF-8").toList
+        stream = Stream.eval(send.get).drain ++ Stream.emits(bytes).covary[IO] ++
+          Stream.eval(processed.complete(())).drain ++ Stream.never[IO]
+        fake <- fake(Behaviour.of(profile(Prod, previousVersion)).copy(events = Some(stream)))
+        changes <- Ref.of[IO, List[ProfileChange]](Nil)
+        _ <- client(fake, fastConfig).use { (profiles, _) =>
+          for {
+            _ <- profiles.onChange(change => changes.update(_ :+ change))
+            _ <- fake.update(_.copy(profiles = Map(Prod -> profile(Prod, 1L).copy(readOnly = true))))
+            _ <- fake.reset
+            _ <- send.complete(())
+            _ <- processed.get
+            current <- profiles.get(Prod)
+            seen <- changes.get
+            calls <- fake.recorded
+          } yield {
+            assertEquals(current.map(_.version), Some(1L))
+            assertEquals(current.map(_.readOnly), Some(true))
+            assertEquals(seen, List(ProfileChange.Updated(Prod, Some(previousVersion), 1L)))
+            assertEquals(calls.count(_.path.endsWith("/profile")), 1)
+            assertEquals(calls.filter(_.path.endsWith("/profile")).flatMap(_.ifNoneMatch), Nil)
+          }
+        }
+      } yield ())
+    }
+  }
+
+  List("listing", "profile").foreach { failingRequest =>
+    test(s"aRemovalRevalidationFailurePreservesStateWithAReason-$failingRequest") {
+      TestControl.executeEmbed(for {
+        send <- cats.effect.Deferred[IO, Unit]
+        processed <- cats.effect.Deferred[IO, Unit]
+        bytes = changeBytes(Prod, 1L, ClusterChangeDto.Removed).getBytes("UTF-8").toList
+        stream = Stream.eval(send.get).drain ++ Stream.emits(bytes).covary[IO] ++
+          Stream.eval(processed.complete(())).drain ++ Stream.never[IO]
+        fake <- fake(Behaviour.of(profile(Prod, 2L)).copy(events = Some(stream)))
+        changes <- Ref.of[IO, List[ProfileChange]](Nil)
+        _ <- client(fake, fastConfig).use { (profiles, _) =>
+          for {
+            _ <- profiles.onChange(change => changes.update(_ :+ change))
+            _ <- fake.update(
+              _.copy(listFails = failingRequest == "listing", profileFails = failingRequest == "profile")
+            )
+            _ <- send.complete(())
+            _ <- processed.get
+            current <- profiles.get(Prod)
+            seen <- changes.get
+            health <- profiles.health
+          } yield {
+            assertEquals(current.map(_.version), Some(2L))
+            assertEquals(seen, Nil)
+            assert(health.lastError.exists(_.message.nonEmpty), health.toString)
+            assert(health.failingSince.isDefined, health.toString)
+          }
+        }
+      } yield ())
+    }
+  }
+
   test("aFailedListFetchNeverFiresRemoved") {
     // The assertion that stops a blip from tearing down every Kafka client in the process. "I cannot
     // see the list" is not "the cluster was deleted", and only one of those is a reason to disconnect.
@@ -315,14 +446,21 @@ final class HttpClusterProfilesSuite extends CatsEffectSuite {
   test("aRemovedEventOnTheStreamDropsThatClusterImmediately") {
     TestControl.executeEmbed(
       for {
+        send <- cats.effect.Deferred[IO, Unit]
+        processed <- cats.effect.Deferred[IO, Unit]
+        bytes = changeBytes(Staging, 4L, ClusterChangeDto.Removed).getBytes("UTF-8").toList
+        stream = Stream.eval(send.get).drain ++ Stream.emits(bytes).covary[IO] ++
+          Stream.eval(processed.complete(())).drain ++ Stream.never[IO]
         fake <- fake(
           Behaviour
             .of(profile(Prod, 1L), profile(Staging, 4L))
-            .copy(events = Some(openStreamOf(changeBytes(Staging, 4L, ClusterChangeDto.Removed))))
+            .copy(events = Some(stream))
         )
         changes <- Ref.of[IO, List[ProfileChange]](Nil)
         all <- client(fake, fastConfig).use { (profiles, _) =>
-          profiles.onChange(change => changes.update(_ :+ change)) *> IO.sleep(1.second) *> profiles.all
+          profiles.onChange(change => changes.update(_ :+ change)) *>
+            fake.update(current => current.copy(profiles = current.profiles.removed(Staging))) *>
+            send.complete(()) *> processed.get *> profiles.all
         }
         seen <- changes.get
       } yield {

@@ -51,7 +51,7 @@ final class KafkaTopicScrapeSuite extends KuiIOSuite {
 
   private val broker = new Node(1, "broker-1.example", 9092)
 
-  private def description(name: String): TopicDescription =
+  private def description(name: String, id: Uuid): TopicDescription =
     new TopicDescription(
       name,
       false,
@@ -62,7 +62,9 @@ final class KafkaTopicScrapeSuite extends KuiIOSuite {
           List(broker).asJava,
           List(broker).asJava
         )
-      ).asJava
+      ).asJava,
+      java.util.Set.of[org.apache.kafka.common.acl.AclOperation](),
+      id
     )
 
   private def policyConfig(value: String): Config =
@@ -90,7 +92,8 @@ final class KafkaTopicScrapeSuite extends KuiIOSuite {
   private def cluster(
       names: List[String],
       policy: String => Either[Throwable, String],
-      batchFails: Boolean = false
+      batchFails: Boolean = false,
+      topicId: Uuid = Uuid.ZERO_UUID
   ): Admin =
     StubAdmin {
       case ("listTopics", _) =>
@@ -101,7 +104,7 @@ final class KafkaTopicScrapeSuite extends KuiIOSuite {
       case ("describeTopics", (asked: TopicCollection.TopicNameCollection) :: _) =>
         KuiTopicAdminResults.describeTopics(
           asked.topicNames.asScala.toList
-            .map(name => name -> KafkaFuture.completedFuture(description(name)))
+            .map(name => name -> KafkaFuture.completedFuture(description(name, topicId)))
             .toMap
             .asJava
         )
@@ -161,6 +164,19 @@ final class KafkaTopicScrapeSuite extends KuiIOSuite {
       pool <- RecordingAdminPool(client)
       logger <- FakeStructuredLogger[IO]
     } yield (new KafkaTopicAdmin[IO](pool, _ => Some(connection), "__", logger), pool)
+
+  test("topic detail retains Kafka identity but never treats the zero UUID as known") {
+    val id = Uuid.fromString("AAAAAAAAAAAAAAAAAAAAAQ")
+    for {
+      (known, _) <- adminOver(cluster(List("orders"), _ => Right("delete"), topicId = id))
+      detail <- known.detail(cluster, TopicName.unsafe("orders"))
+      (unknown, _) <- adminOver(cluster(List("orders"), _ => Right("delete")))
+      absent <- unknown.detail(cluster, TopicName.unsafe("orders"))
+    } yield {
+      assertEquals(detail.map(_.topicId), Right(Some(id.toString)))
+      assertEquals(absent.map(_.topicId), Right(None))
+    }
+  }
 
   test("aDescribeConfigsThatFailedForOneTopicLeavesThatRowsPolicyAbsentAndFillsTheOthers") {
     // `delete` is Kafka's own default, so the failure mode this guards is not a blank cell: it is a row

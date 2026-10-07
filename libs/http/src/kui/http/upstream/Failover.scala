@@ -91,11 +91,26 @@ object Failover {
           .withPath(prefix ++ uri.path.filter(_.nonEmpty))
     }
 
-  /** Whether this failure means "could not reach it" rather than "it said no".
-    *
-    * Only the former rotates to the next address. Distinguishing them by exception type rather than by
-    * message keeps the rule readable and stops it depending on a JDK's wording.
+  /** These failures occur during address resolution or connection establishment, before HTTP transmission. A
+    * generic SocketException is deliberately excluded: it can be a reset after a committed mutation.
     */
+  def isBeforeTransmission(error: Throwable): Boolean = {
+    @annotation.tailrec
+    def loop(current: Throwable, remaining: Int): Boolean = current match {
+      case _: java.net.ConnectException | _: java.net.UnknownHostException |
+          _: java.net.NoRouteToHostException | _: java.nio.channels.UnresolvedAddressException =>
+        true
+      case _ if remaining > 0 =>
+        Option(current.getCause) match {
+          case Some(cause) if cause ne current => loop(cause, remaining - 1)
+          case _ => false
+        }
+      case _ => false
+    }
+    loop(error, 16)
+  }
+
+  /** Connectivity failures mark a destination unhealthy; only replay-safe calls may repeat after a reset. */
   def isConnectionFailure(error: Throwable): Boolean =
     error match {
       case _: java.net.ConnectException => true

@@ -83,6 +83,8 @@ object KafkaGroupAdminPort {
         admin.committedOffsets(connection, ids, partitions = None, requireStable = false)
       ).parTupled.flatMap {
         case (Left(error), _) => error.asLeft[Map[GroupId, ConsumerGroup]].pure[F]
+        case (Right(described), _) if ids.size == 1 && requireResult(described, ids.head).isLeft =>
+          requireResult(described, ids.head).map(_ => Map.empty[GroupId, ConsumerGroup]).pure[F]
         case (Right(described), committed) =>
           val commitsByGroup = committed.toOption.map(_.values).getOrElse(Map.empty)
           for {
@@ -111,7 +113,7 @@ object KafkaGroupAdminPort {
               id -> groupOf(
                 description,
                 commitsByGroup.getOrElse(id, Nil),
-                committedKnown = committed.isRight,
+                committedKnown = committed.exists(requireResult(_, id).isRight),
                 ends = ends,
                 begins = begins,
                 at = now
@@ -135,10 +137,14 @@ object KafkaGroupAdminPort {
       (for {
         offline <- eitherT(offsets.leaderless(connection, partitions))
         askable = partitions.diff(offline)
-        begin <- eitherT(offsets.beginningOffsets(connection, askable))
-        end <- eitherT(offsets.endOffsets(connection, askable))
+        begin <- eitherT(
+          offsets.beginningOffsets(connection, askable).map(_.flatMap(requireResults(_, askable)))
+        )
+        end <- eitherT(offsets.endOffsets(connection, askable).map(_.flatMap(requireResults(_, askable))))
         committed <- eitherT(
-          admin.committedOffsets(connection, List(group), Some(partitions), requireStable = true)
+          admin
+            .committedOffsets(connection, List(group), Some(partitions), requireStable = true)
+            .map(_.flatMap(requireResult(_, group)))
         )
         timestamps <- at match {
           case None => eitherT(Map.empty[TopicPartition, Option[Offset]].asRight[KuiError].pure[F])
@@ -146,14 +152,13 @@ object KafkaGroupAdminPort {
             eitherT(
               offsets
                 .offsetsForTimes(connection, askable.map(_ -> instant.toEpochMilli).toMap)
-                .map(_.map(_.values))
+                .map(_.flatMap(requireResults(_, askable)))
             )
         }
       } yield OffsetWindow(
-        begin = begin.values,
-        end = end.values,
-        committed = committed.values
-          .getOrElse(group, Nil)
+        begin = begin,
+        end = end,
+        committed = committed
           .map(offset => offset.partition -> offset.offset)
           .toMap,
         atTimestamp = timestamps,
@@ -281,6 +286,16 @@ object KafkaGroupAdminPort {
         partitions = member.assignment.partitions,
         targetPartitions = member.targetAssignment.map(_.partitions)
       )
+
+    /** A missing batch key is a failed lookup, not a successful absent offset. */
+    private def requireResults[K, V](batch: BatchResult[K, V], keys: Set[K]): Either[KuiError, Map[K, V]] =
+      keys.toList.traverse(key => requireResult(batch, key).map(key -> _)).map(_.toMap)
+
+    private def requireResult[K, V](batch: BatchResult[K, V], key: K): Either[KuiError, V] =
+      batch.skipped.get(key) match {
+        case Some(reason) => Left(skipToError(reason))
+        case None => batch.get(key).left.map(skipToError)
+      }
 
     private def skipToError(reason: SkipReason): KuiError = reason match {
       case SkipReason.NotAuthorized(detail) => kui.kernel.error.ApplicationError.Forbidden(detail)

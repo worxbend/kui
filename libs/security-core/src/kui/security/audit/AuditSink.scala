@@ -68,6 +68,9 @@ enum MutationKind(val operation: String) {
 
   /** One subject's compatibility level set, overriding the global one from now on (`SR-005`). */
   case SetSubjectCompatibility extends MutationKind("schema.compatibility.subject.set")
+
+  /** A schema version registered under a subject. */
+  case RegisterSchema extends MutationKind("schema.subject.version.register")
 }
 
 object MutationKind {

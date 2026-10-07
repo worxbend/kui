@@ -33,6 +33,8 @@ object AuthConfigSection {
   val keys: List[List[String]] =
     List(
       List("kui", "auth", "type"),
+      List("kui", "auth", "trustedProxies"),
+      List("kui", "auth", "trustedProxies", "*"),
       List("kui", "auth", "users", "*", "name"),
       List("kui", "auth", "users", "*", "passwordHash"),
       List("kui", "auth", "users", "*", "groups"),
@@ -50,7 +52,12 @@ object AuthConfigSection {
     )
 
   /** `kui.auth` with its secrets still unresolved. */
-  final case class Draft(authType: AuthType, users: List[UserDraft], oidc: Option[OidcDraft])
+  final case class Draft(
+      authType: AuthType,
+      users: List[UserDraft],
+      oidc: Option[OidcDraft],
+      trustedProxies: Set[String] = Set.empty
+  )
 
   final case class UserDraft(
       name: String,
@@ -104,7 +111,22 @@ object AuthConfigSection {
       ConfigReader.all(userIndices.map(index => user(lookup, index)))
     ).mapN((_, decoded) => decoded)
 
-    (authType, users, oidc(lookup))
+    val trusted = ConfigReader
+      .all(ConfigReader.list(lookup, s"$Prefix.trustedProxies").map { raw =>
+        IpLiteral.canonical(raw) match {
+          case Some(address) => address.validNel
+          case None =>
+            ConfigReader
+              .problem(
+                lookup,
+                s"$Prefix.trustedProxies",
+                "must contain only literal IPv4 or IPv6 addresses (no hostnames or networks)"
+              )
+              .invalidNel
+        }
+      })
+      .map(_.toSet)
+    (authType, users, oidc(lookup), trusted)
       .mapN(Draft.apply)
       .andThen(draft => checkTypeIsUsable(lookup, draft))
   }
@@ -251,6 +273,6 @@ object AuthConfigSection {
           }
       }
     } yield (ConfigReader.all(users), oidcConfig.sequence).mapN((accounts, provider) =>
-      AuthConfig(draft.authType, accounts, provider)
+      AuthConfig(draft.authType, accounts, provider, draft.trustedProxies)
     )
 }

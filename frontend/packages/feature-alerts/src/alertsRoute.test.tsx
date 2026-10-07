@@ -19,14 +19,15 @@
  * mount this feature at; a route that only works when it is handed its parameters by a test is a
  * route nobody has checked.
  */
-import { describe, expect, it } from "vitest";
-import { flush, onCleanup } from "solid-js";
+import { describe, expect, it, vi } from "vitest";
+import { createSignal, flush, onCleanup } from "solid-js";
 import { createRouter, memoryHistory } from "@solidjs/router";
 import {
   AlertsProvider,
   KuiProvider,
   createAlerts,
   type SseHandle,
+  type KuiContextValue,
 } from "@kui/kernel";
 import { Actions, ErrorCodes, type KuiApiClient } from "@kui/api";
 
@@ -135,6 +136,7 @@ function open(
   cluster: string,
   api: KuiApiClient,
   permits: (action: { readonly resource: string; readonly action: string }) => boolean = () => true,
+  writeBlocked?: KuiContextValue["writeBlocked"],
 ): { readonly container: HTMLElement; readonly dispose: () => void } {
   const history = memoryHistory(`${BASE}/clusters/${cluster}/alerts`);
   const Router = createRouter({
@@ -166,7 +168,7 @@ function open(
     onCleanup(() => alerts.stop());
     return (
       <AlertsProvider value={alerts}>
-        <KuiProvider value={testContext(api, permits)}>
+        <KuiProvider value={{ ...testContext(api, permits), ...(writeBlocked === undefined ? {} : { writeBlocked }) }}>
           <Router />
         </KuiProvider>
       </AlertsProvider>
@@ -214,6 +216,21 @@ function acknowledgeButton(container: HTMLElement, event: string): HTMLButtonEle
 }
 
 describe("the alerts route", () => {
+  it("77: the shared write policy overrides the legacy read-only query reactively", async () => {
+    const client = stub({ readOnly: false });
+    const [reason, setReason] = createSignal<string | undefined>("Cluster is read-only");
+    const policy = vi.fn(() => reason());
+    const view = open("quickstart", client.api, () => true, policy);
+    try {
+      await settle();
+      const buttons = () => [...view.container.querySelectorAll("button")].filter(b => b.textContent?.includes("Acknowledge"));
+      expect(buttons().length).toBeGreaterThan(0);
+      expect(buttons().every(b => b.getAttribute("aria-disabled") === "true")).toBe(true);
+      expect(policy).toHaveBeenCalledWith("quickstart", Actions.AlertsAcknowledge);
+      setReason(undefined); await settle();
+      expect(buttons().some(b => b.getAttribute("aria-disabled") !== "true")).toBe(true);
+    } finally { view.dispose(); }
+  });
   it("reads this cluster's events, at the path the service publishes", async () => {
     const client = stub();
     const { container, dispose } = open("quickstart", client.api);

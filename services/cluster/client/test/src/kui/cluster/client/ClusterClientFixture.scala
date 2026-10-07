@@ -66,7 +66,8 @@ object ClusterClientFixture {
       listFails: Boolean = false,
       profileFails: Boolean = false,
       /** `None` means the change stream cannot be opened at all. */
-      events: Option[Stream[IO, Byte]] = Some(Stream.never[IO])
+      events: Option[Stream[IO, Byte]] = Some(Stream.never[IO]),
+      beforeProfileAnswer: IO[Unit] = IO.unit
   )
 
   object Behaviour {
@@ -97,7 +98,10 @@ object ClusterClientFixture {
           val ifNoneMatch = request.headers.find(_.name.equalsIgnoreCase("If-None-Match")).map(_.value)
 
           calls.update(_ :+ Call(request.method.method, path, ifNoneMatch)) >>
-            behaviour.get.flatMap(answer(path, ifNoneMatch, _))
+            behaviour.get.flatMap(current =>
+              (if path.endsWith("/profile") then current.beforeProfileAnswer else IO.unit) >>
+                answer(path, ifNoneMatch, current)
+            )
         }
 
     private def answer(

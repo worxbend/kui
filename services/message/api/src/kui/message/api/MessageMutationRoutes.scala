@@ -138,9 +138,9 @@ object MessageMutationRoutes {
     * because one source partition is one read and one audit record. They are copied in the order they were
     * given and the tally is summed, so a caller that asked for three partitions gets one answer.
     *
-    * A range that fails stops the resend, and the failure says how much had already been copied. It has to:
-    * the ranges before it are written and cannot be taken back, and an error that did not mention them would
-    * send an operator to retry the whole request and duplicate everything that had already worked.
+    * Independent ranges are attempted in order. Per-record and whole-range failures stay beside the tally:
+    * earlier writes cannot be taken back, so no later failure may discard their receipt. If every range
+    * refused before producing a result, preserve the first KuiError and its non-success HTTP status.
     */
   private def resendRoute[F[_]: Async](
       resend: ResendUseCase[F],
@@ -152,27 +152,54 @@ object MessageMutationRoutes {
           case Left(error) => error.asLeft[ResendResultDto].pure[F]
           case Right(requests) =>
             requests
-              .foldLeftM(ResendResult(0L, 0L, Nil).asRight[(KuiError, ResendResult)]) {
-                case (Left(stopped), _) => stopped.asLeft[ResendResult].pure[F]
-                case (Right(sofar), one) =>
-                  resend.resend(principal, one).map {
-                    case Right(result) =>
-                      ResendResult(
-                        read = sofar.read + result.read,
-                        produced = sofar.produced + result.produced,
-                        failures = sofar.failures ++ result.failures
-                      ).asRight[(KuiError, ResendResult)]
-                    case Left(error) => (error, sofar).asLeft[ResendResult]
+              .foldLeftM((ResendResultDto(request.toTopic, 0L, 0L), Option.empty[KuiError], false)) {
+                case ((sofar, firstError, completed), one) =>
+                  resend.resend(principal, one).map { result =>
+                    (
+                      resendOutcome(sofar, one, result),
+                      firstError.orElse(result.swap.toOption),
+                      completed || result.isRight
+                    )
                   }
               }
-              .map {
-                case Right(total) => ResendResultDto(request.toTopic, total.read, total.produced).asRight
-                case Left((error, sofar)) => partialResend(error, sofar).asLeft
+              .map { (receipt, firstError, completed) =>
+                // A zero-written result still carries per-record failures or a completed empty range.
+                // Only all-Left requests have no receipt to lose; never decide this from written alone.
+                if completed then receipt.asRight[KuiError] else firstError.toLeft(receipt)
               }
         }
     }
 
   // -----------------------------------------------------------------------------------------------
+
+  /** Preserve both per-record and whole-range failures beside writes that cannot be undone. */
+  private[api] def resendOutcome(
+      sofar: ResendResultDto,
+      request: ResendRequest,
+      result: Either[KuiError, ResendResult]
+  ): ResendResultDto = result match {
+    case Right(done) =>
+      sofar.copy(
+        read = sofar.read + done.read,
+        written = sofar.written + done.produced,
+        failures = sofar.failures ++ done.failures.map(failure =>
+          ResendFailureDto(
+            request.source.partition,
+            failure.sourceOffset,
+            failure.error.code.wire,
+            failure.error.message
+          )
+        )
+      )
+    case Left(error) =>
+      sofar.copy(rangeFailures =
+        sofar.rangeFailures :+ ResendRangeFailureDto(
+          OffsetRangeDto(request.source.partition, request.source.offsets.from, request.source.offsets.until),
+          error.code.wire,
+          error.message
+        )
+      )
+  }
 
   /** The wire request as the domain's, with every rule the domain owns applied by the domain.
     *

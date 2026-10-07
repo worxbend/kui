@@ -31,6 +31,7 @@ import { createSignal, flush } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import {
   clearToasts,
+  sharedQueries,
   formatBytes as kernelFormatBytes,
   toasts,
   type KuiContextValue,
@@ -3111,8 +3112,16 @@ describe("a destructive success says so", () => {
     const confirm = [...(confirmation?.querySelectorAll("button") ?? [])].find(
       (button) => button.textContent?.trim() === "Delete topic",
     );
+    const invalidation = vi.spyOn(sharedQueries, "invalidateWhere");
     confirm?.click();
     await settle();
+
+    const affected = invalidation.mock.calls.map(([predicate]) => predicate);
+    expect(affected.some((matches) => matches('topics|toast-cluster|{"page":1}'))).toBe(true);
+    expect(affected.some((matches) => matches('topic-statistics|toast-cluster'))).toBe(true);
+    expect(affected.some((matches) => matches('topic-overview|toast-cluster|orders.v1'))).toBe(true);
+    expect(affected.some((matches) => matches('topics|other-cluster|{"page":1}'))).toBe(false);
+    invalidation.mockRestore();
 
     expect(toasts().map((toast) => toast.title)).toContain("orders.v1 deleted");
     // The sentence an operator is least likely to have thought of, carried into the confirmation.

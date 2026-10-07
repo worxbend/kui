@@ -21,20 +21,32 @@ import kui.message.domain.TimestampType
   * and the lifetime, which is that a cancelled browse closes its consumer. Neither needs a broker, and
   * neither is visible in a suite that has one.
   *
-  * It polls one record at a time on purpose. A consumer that handed the whole assignment back in a single
-  * poll would let a termination bug pass unnoticed: the loop would happen to have everything it needed before
-  * its stopping condition was ever consulted.
+  * By default it polls one record at a time to exercise the loop's termination condition. Larger batches
+  * exercise fetched-but-not-emitted suffixes. Retained bounds may be independent of visible records to model
+  * compaction, retention and invisible control-record tails.
   */
 final class FakeBrowseConsumer(
     log: Ref[IO, Map[PartitionId, Vector[RawRecord]]],
     assigned: Ref[IO, List[PartitionId]],
-    positions: Ref[IO, Map[PartitionId, Long]],
+    currentPositions: Ref[IO, Map[PartitionId, Long]],
     assignments: Ref[IO, Int],
-    polls: Ref[IO, Int]
+    polls: Ref[IO, Int],
+    maxPollRecords: Int,
+    retainedBounds: Map[PartitionId, (Long, Long)]
 ) extends BrowseConsumer[IO] {
 
+  require(maxPollRecords > 0, "a poll batch must admit at least one record")
+
+  private def bounds(current: Map[PartitionId, Vector[RawRecord]], partition: PartitionId): (Long, Long) =
+    retainedBounds.getOrElse(
+      partition, {
+        val records = current.getOrElse(partition, Vector.empty)
+        (records.headOption.fold(0L)(_.offset.value), records.lastOption.fold(0L)(_.offset.value + 1L))
+      }
+    )
+
   def partitions(topic: TopicName): IO[Either[KuiError, List[PartitionId]]] =
-    log.get.map(_.keys.toList.sortBy(_.value).asRight[KuiError])
+    log.get.map(current => (current.keySet ++ retainedBounds.keySet).toList.sortBy(_.value).asRight[KuiError])
 
   def beginningOffsets(
       topic: TopicName,
@@ -42,7 +54,7 @@ final class FakeBrowseConsumer(
   ): IO[Either[KuiError, Map[PartitionId, Long]]] =
     log.get.map(current =>
       partitions
-        .map(partition => partition -> current.get(partition).flatMap(_.headOption).fold(0L)(_.offset.value))
+        .map(partition => partition -> bounds(current, partition)._1)
         .toMap
         .asRight[KuiError]
     )
@@ -53,9 +65,7 @@ final class FakeBrowseConsumer(
   ): IO[Either[KuiError, Map[PartitionId, Long]]] =
     log.get.map(current =>
       partitions
-        .map(partition =>
-          partition -> current.get(partition).flatMap(_.lastOption).fold(0L)(_.offset.value + 1L)
-        )
+        .map(partition => partition -> bounds(current, partition)._2)
         .toMap
         .asRight[KuiError]
     )
@@ -93,23 +103,42 @@ final class FakeBrowseConsumer(
     assignments.update(_ + 1) *> assigned.set(partitions).as(().asRight[KuiError])
 
   def seek(topic: TopicName, partition: PartitionId, offset: Long): IO[Either[KuiError, Unit]] =
-    positions.update(_.updated(partition, offset)).as(().asRight[KuiError])
+    currentPositions.update(_.updated(partition, offset)).as(().asRight[KuiError])
 
-  /** One record per poll, round-robin over the assignment; an empty list when every assigned partition has
-    * been read to its end.
+  def positions: IO[Either[KuiError, Map[PartitionId, Long]]] =
+    (assigned.get, currentPositions.get).mapN((ids, positions) =>
+      positions.filter((partition, _) => ids.contains(partition)).asRight
+    )
+
+  /** At most maxPollRecords in assignment order, preserving offset order within each partition. Positions
+    * skip holes, but never skip a visible record held back by the batch cap.
     */
   def poll(timeout: FiniteDuration): IO[Either[KuiError, List[RawRecord]]] =
     polls.update(_ + 1) *> (for {
       partitions <- assigned.get
-      current <- positions.get
+      current <- currentPositions.get
       records <- log.get
-      next = partitions.collectFirst(Function.unlift { partition =>
-        val at = current.getOrElse(partition, 0L)
-        records.getOrElse(partition, Vector.empty).find(_.offset.value == at).map(partition -> _)
-      })
-      _ <- next
-        .traverse_((partition, record) => positions.update(_.updated(partition, record.offset.value + 1L)))
-    } yield next.map(_._2).toList.asRight[KuiError])
+      available = partitions.map { partition =>
+        val (begin, end) = bounds(records, partition)
+        val at = current.getOrElse(partition, begin).max(begin)
+        partition -> records
+          .getOrElse(partition, Vector.empty)
+          .filter(record => record.offset.value >= at && record.offset.value < end)
+      }.toMap
+      next = partitions.flatMap(available).take(maxPollRecords)
+      delivered = next.groupBy(_.partition)
+      _ <- currentPositions.update { positions =>
+        partitions.foldLeft(positions) { (updated, partition) =>
+          val sent = delivered.getOrElse(partition, Nil)
+          val end = bounds(records, partition)._2
+          val at = current.getOrElse(partition, bounds(records, partition)._1)
+          val after =
+            if sent.size == available(partition).size then at.max(end)
+            else sent.lastOption.fold(at)(_.offset.value + 1L)
+          updated.updated(partition, after)
+        }
+      }
+    } yield next.asRight[KuiError])
 
   /** How many polls this browse made, for the suite that asserts a bounded read stops. */
   val pollCount: IO[Int] = polls.get
@@ -143,16 +172,27 @@ object FakeBrowseConsumer {
       headersSize = 0
     )
 
-  def of(log: Map[PartitionId, Vector[RawRecord]]): IO[FakeBrowseConsumer] =
-    Ref.of[IO, Map[PartitionId, Vector[RawRecord]]](log).flatMap(of)
+  def of(
+      log: Map[PartitionId, Vector[RawRecord]],
+      maxPollRecords: Int = 1,
+      retainedBounds: Map[PartitionId, (Long, Long)] = Map.empty
+  ): IO[FakeBrowseConsumer] =
+    Ref.of[IO, Map[PartitionId, Vector[RawRecord]]](log).flatMap(create(_, maxPollRecords, retainedBounds))
 
   def of(log: Ref[IO, Map[PartitionId, Vector[RawRecord]]]): IO[FakeBrowseConsumer] =
+    create(log, 1, Map.empty)
+
+  private def create(
+      log: Ref[IO, Map[PartitionId, Vector[RawRecord]]],
+      maxPollRecords: Int,
+      retainedBounds: Map[PartitionId, (Long, Long)]
+  ): IO[FakeBrowseConsumer] =
     (
       Ref.of[IO, List[PartitionId]](Nil),
       Ref.of[IO, Map[PartitionId, Long]](Map.empty),
       Ref.of[IO, Int](0),
       Ref.of[IO, Int](0)
-    ).mapN(new FakeBrowseConsumer(log, _, _, _, _))
+    ).mapN(new FakeBrowseConsumer(log, _, _, _, _, maxPollRecords, retainedBounds))
 
   /** The consumer, as the `Resource` a browse opens — with a flag that records the close.
     *
@@ -208,6 +248,7 @@ object FakeBrowseConsumer {
           if before < silentPolls then IO.pure(List.empty[RawRecord].asRight[KuiError])
           else underlying.poll(timeout)
         }
+      def positions = underlying.positions
     }
 
   /** The log as it stood when the browse planned, plus one record written the moment it had.
@@ -247,6 +288,7 @@ object FakeBrowseConsumer {
       def seek(topic: TopicName, partition: PartitionId, offset: Long) =
         underlying.seek(topic, partition, offset)
       def poll(timeout: FiniteDuration): IO[Either[KuiError, List[RawRecord]]] = underlying.poll(timeout)
+      def positions = underlying.positions
     }
 
   /** The same thing over a log the test can still write to after the browse has started.

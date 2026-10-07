@@ -94,16 +94,13 @@ final class KsqlUseCasesSuite extends CatsEffectSuite {
     )
   }
 
-  test("a plan that cannot name the topic says so in words rather than naming one nobody measured") {
+  test("a plan that cannot identify the target cannot authorize deletion") {
     // The product's central promise applied to a warning. The object is not in this cluster's listing, so
     // the sentence says KUI cannot say which topic — it does not guess from the object's name.
     rig().flatMap(rig =>
       rig.useCases.plan(alice, cluster, "DROP STREAM NOWHERE DELETE TOPIC;").map {
-        case Right(plan) =>
-          assert(plan.token.isDefined)
-          assert(clue(plan.warnings).exists(_.contains("KUI cannot say which topic")))
-          assert(!clue(plan.warnings).exists(_.contains("'orders'")))
-        case Left(error) => fail(s"the plan failed: ${error.message}")
+        case Right(plan) => fail(s"an unidentified target received a plan: $plan")
+        case Left(error) => assertEquals(error.code, ErrorCode.Validation)
       }
     )
   }
@@ -114,8 +111,8 @@ final class KsqlUseCasesSuite extends CatsEffectSuite {
 
     rig(objectsAnswer = down).flatMap(rig =>
       rig.useCases.plan(alice, cluster, dropWithTopic).map {
-        case Right(plan) => assert(clue(plan.warnings).exists(_.contains("did not answer")))
-        case Left(error) => fail(s"the plan failed: ${error.message}")
+        case Right(plan) => fail(s"an unreachable server received a plan: $plan")
+        case Left(error) => assertEquals(error.code, ErrorCode.UpstreamUnavailable)
       }
     )
   }
@@ -184,6 +181,45 @@ final class KsqlUseCasesSuite extends CatsEffectSuite {
 
         assert(accepted.isRight, clue = accepted)
         assertEquals(afterApply, List(dropWithTopic))
+      }
+    }
+  }
+
+  test("an apostrophe inside a quoted identifier cannot bypass the service confirmation guard") {
+    rig().flatMap { rig =>
+      for {
+        result <- rig.useCases.execute(alice, cluster, "DROP STREAM `orders'archive` DELETE TOPIC;", None)
+        executed <- rig.server.executed.get
+      } yield {
+        assertEquals(result.left.toOption.map(_.code), Some(ErrorCode.Validation))
+        assertEquals(executed, Nil)
+      }
+    }
+  }
+
+  test("a token cannot delete a stream remapped to a different Kafka topic") {
+    for {
+      before <- rig()
+      after <- rig(objectsAnswer =
+        Right(KsqlObjects.of(List(KsqlObject.Stream("ORDERS", "replacement", Some("JSON"))), Nil))
+      )
+      plan <- before.useCases.plan(alice, cluster, dropWithTopic)
+      result <- after.useCases.execute(alice, cluster, dropWithTopic, plan.toOption.flatMap(_.token))
+      sent <- after.server.executed.get
+    } yield {
+      assert(result.isLeft, clue = result)
+      assertEquals(sent, Nil)
+    }
+  }
+
+  test("quoted DROP targets match exact case and object kind") {
+    rig().flatMap { rig =>
+      for {
+        wrongCase <- rig.useCases.plan(alice, cluster, "DROP STREAM `orders` DELETE TOPIC;")
+        wrongKind <- rig.useCases.plan(alice, cluster, "DROP TABLE ORDERS DELETE TOPIC;")
+      } yield {
+        assert(wrongCase.isLeft, clue = wrongCase)
+        assert(wrongKind.isLeft, clue = wrongKind)
       }
     }
   }
@@ -294,6 +330,18 @@ final class KsqlUseCasesSuite extends CatsEffectSuite {
         assertEquals(batch.left.toOption.map(_.code), Some(ErrorCode.Validation))
         assertEquals(empty.left.toOption.map(_.code), Some(ErrorCode.Validation))
         assertEquals(executed, Nil)
+      }
+    }
+  }
+
+  test("an accepted command still pending is audited as unknown, never succeeded") {
+    rig(executeAnswer = Right(StatementOutcome.Pending("queued", Some("stream/X/create")))).flatMap { rig =>
+      for {
+        answer <- rig.useCases.execute(alice, cluster, "CREATE STREAM X (ID STRING);", None)
+        outcomes <- rig.outcomes
+      } yield {
+        assertEquals(answer.map(_.outcome.wire), Right("pending"))
+        assertEquals(outcomes, List(MutationOutcome.Unknown))
       }
     }
   }

@@ -70,7 +70,8 @@ final class ResendUseCaseSuite extends CatsEffectSuite {
   private def rig(
       readOnly: Boolean = false,
       source: List[RawRecord] = List(record(10L), record(11L), record(12L)),
-      limits: ResendLimits = ResendLimits.Default
+      limits: ResendLimits = ResendLimits.Default,
+      scanBudget: PollBudget = budget
   ): IO[(ResendUseCase[IO], FakeProducers, RecordingAudit, FakeSerdes)] =
     for {
       producers <- FakeProducers.make()
@@ -78,13 +79,49 @@ final class ResendUseCaseSuite extends CatsEffectSuite {
       audit <- RecordingAudit.make
       guard <- guardFor(new Profiles(readOnly), audit)
     } yield (
-      ResendUseCase.make[IO](producers, new FakeRecords(source), guard, budget, limits),
+      ResendUseCase.make[IO](producers, new FakeRecords(source), guard, scanBudget, limits),
       producers,
       audit,
       serdes
     )
 
   // -----------------------------------------------------------------------------------------------
+
+  test("an incomplete source scan writes nothing") {
+    for {
+      (resend, producers, _, _) <- rig(scanBudget = budget.consume(999, 0))
+      answer <- resend.resend(ProduceRig.Caller, requestOf())
+      written <- producers.sent.get
+    } yield {
+      assert(answer.isLeft)
+      assertEquals(written, Nil)
+    }
+  }
+
+  test("byte-budget exhaustion refuses the copy before any write") {
+    for {
+      (resend, producers, _, _) <- rig(scanBudget = budget.consume(0, budget.bytesLeft - 1L))
+      answer <- resend.resend(ProduceRig.Caller, requestOf())
+      written <- producers.sent.get
+    } yield {
+      assert(answer.isLeft)
+      assertEquals(written, Nil)
+    }
+  }
+
+  test("a complete sparse range at the record budget remains copyable") {
+    for {
+      (resend, producers, _, _) <- rig(
+        source = List(record(10L), record(12L)),
+        scanBudget = budget.consume(998, 0)
+      )
+      answer <- resend.resend(ProduceRig.Caller, requestOf())
+      written <- producers.sent.get
+    } yield {
+      assertEquals(answer.map(_.produced), Right(2L))
+      assertEquals(written.size, 2)
+    }
+  }
 
   test("copiesTheBytesExactly") {
     for {

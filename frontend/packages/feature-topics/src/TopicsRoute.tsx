@@ -17,7 +17,7 @@
  * The message browser hangs off a topic but belongs to `feature-messages`, which is why
  * `/topics/:topicName/messages` is not here.
  */
-import { Match, Show, Switch, createEffect, createMemo, createSignal } from "solid-js";
+import { Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { Actions, userMessage, type ApiResult } from "@kui/api";
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
@@ -93,10 +93,10 @@ export default function Topics(): JSX.Element {
   }>();
 
   return (
-    <Show when={params.clusterId} fallback={<NoCluster />}>
+    <Show keyed when={params.clusterId} fallback={<NoCluster />}>
       {(clusterId) => (
-        <Show when={params.topicName} fallback={<TopicsScreen clusterId={clusterId()} />}>
-          {(topicName) => <TopicScreen clusterId={clusterId()} topicName={topicName()} />}
+        <Show keyed when={params.topicName} fallback={<TopicsScreen clusterId={clusterId} />}>
+          {(topicName) => <TopicScreen clusterId={clusterId} topicName={topicName} />}
         </Show>
       )}
     </Show>
@@ -409,6 +409,13 @@ export async function pollUntilListed(reload: () => void, listed: () => boolean)
   }
 }
 
+/** Recheck at submission as well as at entry: policy can change while a form is open. */
+function allowWrite(reason: string | undefined): boolean {
+  if (reason === undefined) return true;
+  notify("Write blocked", { message: reason, tone: "warning" });
+  return false;
+}
+
 function TopicsScreen(props: { readonly clusterId: string }): JSX.Element {
   const kui = useKui();
   const navigate = useNavigate();
@@ -552,21 +559,21 @@ function TopicsScreen(props: { readonly clusterId: string }): JSX.Element {
    * a permission they already hold wastes their afternoon.
    */
   const createBlocked = (): string | undefined =>
-    writeBlockedReason({
+    kui.writeBlocked !== undefined ? kui.writeBlocked(props.clusterId, Actions.TopicCreate) : writeBlockedReason({
       permitted: kui.permits(Actions.TopicCreate),
       readOnly: readOnly(),
       action: "create a topic on this cluster",
     });
 
   const purgeBlocked = (): string | undefined =>
-    writeBlockedReason({
+    kui.writeBlocked !== undefined ? kui.writeBlocked(props.clusterId, Actions.TopicMessagesDelete) : writeBlockedReason({
       permitted: kui.permits(Actions.TopicMessagesDelete),
       readOnly: readOnly(),
       action: "empty topics on this cluster",
     });
 
   const deleteBlocked = (): string | undefined =>
-    writeBlockedReason({
+    kui.writeBlocked !== undefined ? kui.writeBlocked(props.clusterId, Actions.TopicDelete) : writeBlockedReason({
       permitted: kui.permits(Actions.TopicDelete),
       readOnly: readOnly(),
       action: "delete topics on this cluster",
@@ -692,6 +699,10 @@ function TopicsScreen(props: { readonly clusterId: string }): JSX.Element {
         onConfirm={() => {
           const kind = bulk();
           if (kind === undefined) return;
+          if (!allowWrite(kind === "delete" ? deleteBlocked() : purgeBlocked())) return;
+          if (kui.writeBlocked !== undefined && [...selected()].some((name) =>
+            !allowWrite(kui.writeBlocked!(props.clusterId,
+              kind === "delete" ? Actions.TopicDelete : Actions.TopicMessagesDelete, name)))) return;
           void runBulk.run(kind).then((outcome) => {
             if (outcome.kind !== "done") return;
             setBulk(undefined);
@@ -717,6 +728,8 @@ function TopicsScreen(props: { readonly clusterId: string }): JSX.Element {
            inventing one would refuse a name that is genuinely free. */
         existingNames={result().topics.map((topic) => topic.name)}
         onCreate={(topic) => {
+          if (!allowWrite(kui.writeBlocked !== undefined
+            ? kui.writeBlocked(props.clusterId, Actions.TopicCreate, topic.name) : createBlocked())) return;
           void create.run(topic).then((outcome) => {
             if (outcome.kind !== "done") return;
             setCreating(false);
@@ -744,6 +757,10 @@ function TopicScreen(props: {
   });
   const state = overviewQuery.state;
   const reload = overviewQuery.reload;
+  // The keyed route owns both target strings and all confirmations. Mutation receipts may
+  // still arrive after navigation, but must not close dialogs or navigate the new workspace.
+  let active = true;
+  onCleanup(() => { active = false; });
 
   /* The same one question the list screen asks, on the same key, so the two share one request. */
   const readOnly = useClusterReadOnly(() => props.clusterId);
@@ -839,14 +856,14 @@ function TopicScreen(props: {
    * offered a live `Delete this topic` on `orders.payments` and found out from the gateway.
    */
   const purgeBlocked = (): string | undefined =>
-    writeBlockedReason({
+    kui.writeBlocked !== undefined ? kui.writeBlocked(props.clusterId, Actions.TopicMessagesDelete, props.topicName) : writeBlockedReason({
       permitted: kui.permits(Actions.TopicMessagesDelete, props.topicName),
       readOnly: readOnly(),
       action: "empty this topic",
     });
 
   const deleteBlocked = (): string | undefined =>
-    writeBlockedReason({
+    kui.writeBlocked !== undefined ? kui.writeBlocked(props.clusterId, Actions.TopicDelete, props.topicName) : writeBlockedReason({
       permitted: kui.permits(Actions.TopicDelete, props.topicName),
       readOnly: readOnly(),
       action: "delete this topic",
@@ -861,14 +878,14 @@ function TopicScreen(props: {
    * `false` for everyone for ever, and disable a control with a message blaming the operator.
    */
   const growBlocked = (): string | undefined =>
-    writeBlockedReason({
+    kui.writeBlocked !== undefined ? kui.writeBlocked(props.clusterId, Actions.TopicEdit, props.topicName) : writeBlockedReason({
       permitted: kui.permits(Actions.TopicEdit, props.topicName),
       readOnly: readOnly(),
       action: "add partitions to this topic",
     });
 
   const editBlocked = (): string | undefined =>
-    writeBlockedReason({
+    kui.writeBlocked !== undefined ? kui.writeBlocked(props.clusterId, Actions.TopicEdit, props.topicName) : writeBlockedReason({
       permitted: kui.permits(Actions.TopicEdit, props.topicName),
       readOnly: readOnly(),
       action: "change this topic's settings",
@@ -1015,8 +1032,9 @@ function TopicScreen(props: {
             onChange={
               editBlocked() === undefined
                 ? (change) => {
+                    if (!allowWrite(editBlocked())) return;
                     void editConfig.run(change).then((outcome) => {
-                      if (outcome.kind !== "done") return;
+                      if (!active || outcome.kind !== "done") return;
                       /* Re-read rather than patching the row locally. The response is the
                          configuration as the broker holds it *afterwards*, so a value the broker
                          normalised — "3600000" for "1h" — is the value the operator sees, and the
@@ -1046,8 +1064,9 @@ function TopicScreen(props: {
         describe={describePurge}
         state={purge.state()}
         onConfirm={(token) => {
+          if (!allowWrite(purgeBlocked())) return;
           void purge.run(token).then((outcome) => {
-            if (outcome.kind !== "done") return;
+            if (!active || outcome.kind !== "done") return;
             setPurging(false);
             /* The count is the server's own, from the answer rather than from the plan: a partition
                the broker refused is not a partition that was emptied, and the toast is the only
@@ -1077,6 +1096,7 @@ function TopicScreen(props: {
            with twelve partitions is a wrong answer wearing a right answer's shape. */
         current={overview()?.topic.partitions}
         onContinue={(target) => {
+          if (!allowWrite(growBlocked())) return;
           setGrowing(false);
           setGrowTarget(target);
         }}
@@ -1109,8 +1129,9 @@ function TopicScreen(props: {
         describe={describePartitionIncrease}
         state={grow.state()}
         onConfirm={(token) => {
+          if (!allowWrite(growBlocked())) return;
           void grow.run(token).then((outcome) => {
-            if (outcome.kind !== "done") return;
+            if (!active || outcome.kind !== "done") return;
             setGrowTarget(undefined);
             notify(`${props.topicName} now has ${formatCount(outcome.value.target)} partitions`, {
               message: "Kafka cannot remove a partition, so this cannot be undone.",
@@ -1136,8 +1157,20 @@ function TopicScreen(props: {
         describe={describeDeletion}
         state={remove.state()}
         onConfirm={(token) => {
+          if (!allowWrite(deleteBlocked())) return;
           void remove.run(token).then((outcome) => {
             if (outcome.kind !== "done") return;
+            const cluster = props.clusterId;
+            const topic = props.topicName;
+            sharedQueries.invalidateWhere((key) =>
+              key.startsWith(`topics|${cluster}|`) ||
+              key === topicStatisticsKey(cluster) ||
+              key === `topic-overview|${cluster}|${topic}` ||
+              ["topic-config", "topic-partitions", "topic-consumers"].some((kind) =>
+                key === `${kind}|${cluster}/${topic}`) ||
+              key === `messages:topic:${cluster}:${topic}`,
+            );
+            if (!active) return;
             setDeleting(false);
             /* Raised before the navigation, and it survives it: the toast region lives in the shell,
                above the route, so a confirmation for a page that no longer exists is still read on

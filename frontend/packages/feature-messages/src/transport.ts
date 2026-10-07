@@ -83,6 +83,7 @@ export function createBrowseTransport(options?: {
           },
           onDone: (data) => {
             endReason = decodeEndReason(data);
+            handlers.onDone?.();
           },
           onError: (error) => handlers.onFailure(toFailure(error)),
         },

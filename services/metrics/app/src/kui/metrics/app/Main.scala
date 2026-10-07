@@ -12,10 +12,11 @@ import kui.metrics.api.MetricsApi
   *
   * ==It starts even when nothing is configured, and most deployments are in that state==
   *
-  * A deployment that names no `kui.metrics.sources` entry still starts this process, still serves its routes,
-  * and reports every cluster as `not_configured` — which is the fact the dashboard needs in order to keep its
-  * written "not measured" sentences rather than draw five empty axes. A process that exited because it had
-  * nothing to measure would restart-loop in every deployment there is.
+  * Standalone deployments name `kui.clusterProfiles.url` (or `kui.gateway.services.cluster.url`) for the
+  * authoritative, live cluster list. A deployment that names no `kui.metrics.sources` entry still starts this
+  * process, still serves its routes, and reports every cluster as `not_configured` — which is the fact the
+  * dashboard needs in order to keep its written "not measured" sentences rather than draw five empty axes. A
+  * process that exited because it had nothing to measure would restart-loop in every deployment there is.
   *
   * ==Why there is no URL policy parameter here==
   *
@@ -32,7 +33,7 @@ object Main extends IOApp {
       args,
       (config, telemetry, principals, logger) =>
         MetricsWiring
-          .make[IO](config.clusters, config.metrics, telemetry, principals, logger)
+          .standalone[IO](config, telemetry, principals, logger)
           .map(service => ServiceMain.Serving(service.routes, service.interceptors))
     )
 }

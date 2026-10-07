@@ -69,7 +69,7 @@ final class AlertRulesSuite extends FunSuite {
       )
 
     assertEquals(second.opened, Nil)
-    assertEquals(second.refreshed, open.map(_.id))
+    assertEquals(second.refreshed.map(_.id), open.map(_.id))
     assertEquals(second.resolved, Nil)
   }
 
@@ -252,6 +252,24 @@ final class AlertRulesSuite extends FunSuite {
   }
 
   // ----------------------------------------------------------------------- the shape of a pass
+  test("unknown and missing disks preserve open alerts while measured healthy disks clear") {
+    val first = firstPass(
+      directories(
+        directory("/unknown", Some(95)),
+        directory("/missing", Some(95)),
+        directory("/healthy", Some(95))
+      )
+    )
+    val next = AlertRules.evaluate(
+      now.plusSeconds(60),
+      limits,
+      directories(directory("/unknown", None), directory("/healthy", Some(20))),
+      first.opened,
+      first.state
+    )
+    assertEquals(next.resolved, first.opened.filter(_.key.subject.endsWith("/healthy")).map(_.id))
+    assertEquals(next.refreshed, Nil)
+  }
 
   test("every rule appears in the report of every pass, whatever it found") {
     val evaluation = firstPass(healthy)
@@ -271,7 +289,7 @@ final class AlertRulesSuite extends FunSuite {
       )
 
     assertEquals(second.opened, Nil)
-    assertEquals(second.refreshed, first.opened.map(_.id))
+    assertEquals(second.refreshed.map(_.id), first.opened.map(_.id))
   }
 
   test("a duration reads to one unit and rounds down, so 'at least' is true rather than nearly true") {

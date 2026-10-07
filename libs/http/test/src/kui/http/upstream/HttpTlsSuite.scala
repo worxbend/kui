@@ -11,7 +11,7 @@ import cats.syntax.all.*
 import sttp.client4.{asStringAlways, basicRequest}
 import sttp.model.Uri
 
-import kui.config.{HttpKeyStore, HttpStoreFormat, HttpStoreMaterial, HttpTlsConfig, HttpTrustStore}
+import kui.config.{HttpKeyStore, HttpStoreFormat, HttpStoreMaterial, HttpTlsConfig, HttpTrustStore, UrlPolicy}
 import kui.kernel.Secret
 import kui.testkit.KuiIOSuite
 
@@ -74,14 +74,21 @@ final class HttpTlsSuite extends KuiIOSuite {
     }
   }
 
-  test("the sttp transport owns and deterministically closes its Java client") {
-    for {
-      client <- HttpTls
-        .clientResource[IO](HttpTlsConfig.Default)
-        .use(client => IO(assert(!client.isTerminated)) *> IO.pure(client))
-      _ <- IO(assert(client.isTerminated, "the Java HTTP client survived its Resource"))
-      _ <- HttpTls.resource[IO](HttpTlsConfig.Default).use(backend => IO(assert(backend != null)))
-    } yield ()
+  test("the sttp transport owns and deterministically closes its connection pool") {
+    HttpsUpstreamFixture.server(requireClientCertificate = false).use { running =>
+      val config =
+        HttpTlsConfig(Some(running.materials.truststore(HttpStoreFormat.Pkcs12, inline = false)), None)
+      val request = basicRequest.get(Uri.unsafeParse(running.url))
+      for {
+        backend <- HttpTls.resource[IO](config, UrlPolicy.Dev).use { backend =>
+          request.send(backend).map { response =>
+            assertEquals(response.code.code, 200)
+            backend
+          }
+        }
+        afterClose <- request.send(backend).attempt
+      } yield assert(afterClose.isLeft, "the connection pool survived its Resource")
+    }
   }
 
   test("invalid base64, files, passwords, stores and keys fail with sanitized errors") {
@@ -214,6 +221,38 @@ final class HttpTlsSuite extends KuiIOSuite {
     }
   }
 
+  test("pinned sockets preserve the authority for TLS identity, SNI and mutual authentication") {
+    HttpsUpstreamFixture.server(requireClientCertificate = true).use { running =>
+      val config = HttpTlsConfig(
+        Some(running.materials.truststore(HttpStoreFormat.Pkcs12, inline = false)),
+        Some(running.materials.keystore(HttpStoreFormat.Pkcs12, inline = false))
+      )
+      // The certificate names localhost but not the pinned socket address 127.0.0.2.
+      val correct = Uri.unsafeParse(running.wrongHostnameUrl.replace("127.0.0.2", "localhost"))
+      val wrong = Uri.unsafeParse(running.url.replace("127.0.0.1", "wrong.example.test"))
+      HttpTls
+        .resourceWithResolver[IO](
+          config,
+          UrlPolicy.Dev,
+          name =>
+            Array(java.net.InetAddress.getByName(if name == "localhost" then "127.0.0.2" else "127.0.0.1"))
+        )
+        .use { backend =>
+          for {
+            response <- basicRequest.get(correct).send(backend)
+            _ <- IO(assertEquals(response.code.code, 200))
+            mismatch <- basicRequest.get(wrong).send(backend).attempt
+          } yield {
+            assertHandshakeFailure(
+              mismatch.map(_.body.toString),
+              "TLS checked the socket IP instead of the URL hostname"
+            )
+            assertEquals(running.serverName.get(), "wrong.example.test")
+          }
+        }
+    }
+  }
+
   test("JKS and PKCS12 path client stores complete mutual TLS") {
     HttpsUpstreamFixture.server(requireClientCertificate = true).use { running =>
       HttpStoreFormat.All.traverse_ { format =>
@@ -266,7 +305,7 @@ final class HttpTlsSuite extends KuiIOSuite {
   private def get(url: String, config: HttpTlsConfig): IO[Either[Throwable, String]] = {
     val target = Uri.parse(url).fold(error => fail(error), identity)
     HttpTls
-      .resource[IO](config)
+      .resource[IO](config, UrlPolicy.Dev)
       .use(
         basicRequest
           .get(target)

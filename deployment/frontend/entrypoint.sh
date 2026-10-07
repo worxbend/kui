@@ -75,6 +75,10 @@ server {
 
   root /usr/share/nginx/html;
 
+  # Match KuiServer's 16 KiB request-line envelope: an 8 KiB browse cursor still
+  # needs room for the path, the other query parameters and HTTP framing.
+  large_client_header_buffers 4 16k;
+
   # Answered without touching the disk, so it says "nginx is up" and nothing more. Whether the
   # interface is actually present is a different question, and conflating them makes a missing
   # build look like a healthy container.
@@ -103,6 +107,7 @@ server {
   # A deep link such as /ui/clusters/quickstart/topics is the router's, not a file. Answer it with
   # the application, exactly as the gateway's own single-page fallback does.
   location ${BASE_PATH}/ui/ {
+    alias /usr/share/nginx/html/ui/;
     try_files \$uri \$uri/ ${BASE_PATH}/ui/index.html;
   }
 
@@ -111,7 +116,8 @@ server {
   # Vite writes a content hash into every asset filename, so an asset URL is immutable by
   # construction: if the content changes the URL changes. index.html is the one file whose name
   # is stable, so it is the one file that must never be cached.
-  location ~* ${BASE_PATH}/ui/assets/.*\.(js|css|woff2?|png|svg|map)\$ {
+  location ^~ ${BASE_PATH}/ui/assets/ {
+    alias /usr/share/nginx/html/ui/assets/;
     expires 1y;
     add_header Cache-Control "public, immutable";
   }

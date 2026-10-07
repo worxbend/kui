@@ -65,7 +65,8 @@ object ProtobufPayload {
   def readIndexes(body: Array[Byte]): Either[String, (List[Int], Array[Byte])] =
     if body.isEmpty then Left("the record has a Schema Registry header and no body")
     else
-      readVarint(body, 0).flatMap { (count, afterCount) =>
+      readVarint(body, 0).flatMap { (rawCount, afterCount) =>
+        val count = zigZag(rawCount)
         if count == 0L then Right((Nil, body.drop(afterCount)))
         else if count < 0L || count > MaxIndexDepth then
           Left(
@@ -90,7 +91,8 @@ object ProtobufPayload {
     else
       readVarint(bytes, offset) match {
         case Left(problem) => Left(problem)
-        case Right((value, next)) =>
+        case Right((rawValue, next)) =>
+          val value = zigZag(rawValue)
           if value < 0L || value > Int.MaxValue then
             Left(s"the record's message-index path contains $value, which is not a message number")
           else readIndexPath(bytes, next, remaining - 1, value.toInt :: collected)
@@ -103,9 +105,10 @@ object ProtobufPayload {
     */
   def decode(file: ProtoFile, body: Array[Byte]): Either[String, String] =
     readIndexes(body).flatMap { (path, message) =>
-      file
+      val resolved = file.resolved
+      resolved
         .messageAt(path)
-        .flatMap(declared => decodeMessage(file, declared, message, 0, message.length))
+        .flatMap(declared => decodeMessage(resolved, declared, message, 0, message.length))
         .map(_.spaces2)
     }
 
@@ -128,7 +131,7 @@ object ProtobufPayload {
     def loop(offset: Int, collected: List[(Int, Json)]): Either[String, List[(Int, Json)]] =
       if offset >= until then Right(collected.reverse)
       else
-        readVarint(bytes, offset) match {
+        readVarint(bytes, offset, until) match {
           case Left(problem) => Left(problem)
           case Right((tag, afterTag)) =>
             val number = (tag >>> 3).toInt
@@ -136,22 +139,22 @@ object ProtobufPayload {
             if number <= 0 then
               Left(s"the record contains field number $number, and Protobuf numbers start at 1")
             else
-              readValue(file, message.byNumber.get(number), wireType, bytes, afterTag) match {
+              readValue(file, message.byNumber.get(number), wireType, bytes, afterTag, until) match {
                 case Left(problem) => Left(problem)
                 case Right((value, next)) => loop(next, (number -> value) :: collected)
               }
         }
 
-    loop(from, Nil).map(entries => assemble(message, entries))
+    loop(from, Nil).map(entries => assemble(file, message, entries))
   }
 
   /** Wire entries as one JSON object, grouped by field and ordered by the schema. */
-  private def assemble(message: ProtoMessage, entries: List[(Int, Json)]): Json = {
+  private def assemble(file: ProtoFile, message: ProtoMessage, entries: List[(Int, Json)]): Json = {
     val grouped: Map[Int, List[Json]] =
       entries.groupBy((number, _) => number).map((number, pairs) => number -> pairs.map(_._2))
 
     val declared = message.fields.flatMap { field =>
-      grouped.get(field.number).map(values => field.name -> render(field, values))
+      grouped.get(field.number).map(values => field.name -> render(file, field, values))
     }
 
     val unknown = grouped.toList
@@ -171,7 +174,7 @@ object ProtobufPayload {
     * object built from its entry messages. A non-repeated field that somehow appeared twice keeps the last
     * occurrence, which is what every Protobuf implementation does.
     */
-  private def render(field: ProtoField, values: List[Json]): Json =
+  private def render(file: ProtoFile, field: ProtoField, values: List[Json]): Json =
     field.mapEntry match {
       case Some(_) =>
         Json.obj(
@@ -188,7 +191,7 @@ object ProtobufPayload {
           // A packed run arrives as one array; an unpacked one arrives as several separate values, and an
           // encoder may mix the two in a single record. Flattening is what makes those three encodings of
           // the same list render identically, which is the whole promise of a packed field.
-          case ProtoLabel.Repeated if field.fieldType.isPackable =>
+          case ProtoLabel.Repeated if isPackable(file, field.fieldType) =>
             Json.arr(values.flatMap(value => value.asArray.map(_.toList).getOrElse(List(value)))*)
           case ProtoLabel.Repeated => Json.arr(values*)
           case _ => values.lastOption.getOrElse(Json.Null)
@@ -211,24 +214,25 @@ object ProtobufPayload {
       declared: Option[ProtoField],
       wireType: Int,
       bytes: Array[Byte],
-      offset: Int
+      offset: Int,
+      until: Int
   ): Either[String, (Json, Int)] =
     wireType match {
       case VarintWire =>
-        readVarint(bytes, offset).map((raw, next) => (varintAs(file, declared, raw), next))
+        readVarint(bytes, offset, until).map((raw, next) => (varintAs(file, declared, raw), next))
 
       case Fixed64Wire =>
-        readFixed(bytes, offset, 8).map((raw, next) => (fixed64As(declared, raw), next))
+        readFixed(bytes, offset, 8, until).map((raw, next) => (fixed64As(declared, raw), next))
 
       case Fixed32Wire =>
-        readFixed(bytes, offset, 4).map((raw, next) => (fixed32As(declared, raw.toInt), next))
+        readFixed(bytes, offset, 4, until).map((raw, next) => (fixed32As(declared, raw.toInt), next))
 
       case LengthDelimitedWire =>
-        readVarint(bytes, offset).flatMap { (length, afterLength) =>
-          if length < 0L || afterLength + length > bytes.length then
+        readVarint(bytes, offset, until).flatMap { (length, afterLength) =>
+          if length < 0L || length > until - afterLength then
             Left(
               s"a length-delimited field claims $length bytes and the record has " +
-                s"${bytes.length - afterLength} left. The record is truncated or is not Protobuf"
+                s"${until - afterLength} left. The record is truncated or is not Protobuf"
             )
           else {
             val end = afterLength + length.toInt
@@ -259,6 +263,8 @@ object ProtobufPayload {
         field.fieldType match {
           case ProtoType.Str => Right(Json.fromString(text(bytes, from, until)))
           case ProtoType.Bytes => Right(Json.fromString(base64(bytes, from, until)))
+          case named @ ProtoType.Named(_) if field.label == ProtoLabel.Repeated && isPackable(file, named) =>
+            packed(file, field, bytes, from, until)
           case ProtoType.Named(reference) =>
             resolve(file, field, reference) match {
               case Right(nested) => decodeMessage(file, nested, bytes, from, until)
@@ -279,6 +285,14 @@ object ProtobufPayload {
         Right(Json.fromString(printable(bytes, from, until).getOrElse(base64(bytes, from, until))))
     }
 
+  private def enumType(file: ProtoFile, reference: String): Option[ProtoEnum] =
+    file.enumsByName.get(reference.stripPrefix("."))
+
+  private def isPackable(file: ProtoFile, fieldType: ProtoType): Boolean = fieldType match {
+    case ProtoType.Named(reference) => enumType(file, reference).isDefined
+    case scalar => scalar.isPackable
+  }
+
   /** A packed repeated field: values of one type, one after another, with no tags between them. */
   private def packed(
       file: ProtoFile,
@@ -291,7 +305,7 @@ object ProtobufPayload {
     def loop(offset: Int, collected: List[Json]): Either[String, List[Json]] =
       if offset >= until then Right(collected.reverse)
       else
-        packedOne(file, field, bytes, offset) match {
+        packedOne(file, field, bytes, offset, until) match {
           case Left(problem) => Left(problem)
           case Right((value, next)) => loop(next, value :: collected)
         }
@@ -303,15 +317,16 @@ object ProtobufPayload {
       file: ProtoFile,
       field: ProtoField,
       bytes: Array[Byte],
-      offset: Int
+      offset: Int,
+      until: Int
   ): Either[String, (Json, Int)] =
     field.fieldType match {
       case ProtoType.Fixed32 | ProtoType.SFixed32 | ProtoType.Float =>
-        readFixed(bytes, offset, 4).map((raw, next) => (fixed32As(Some(field), raw.toInt), next))
+        readFixed(bytes, offset, 4, until).map((raw, next) => (fixed32As(Some(field), raw.toInt), next))
       case ProtoType.Fixed64 | ProtoType.SFixed64 | ProtoType.Double =>
-        readFixed(bytes, offset, 8).map((raw, next) => (fixed64As(Some(field), raw), next))
+        readFixed(bytes, offset, 8, until).map((raw, next) => (fixed64As(Some(field), raw), next))
       case _ =>
-        readVarint(bytes, offset).map((raw, next) => (varintAs(file, Some(field), raw), next))
+        readVarint(bytes, offset, until).map((raw, next) => (varintAs(file, Some(field), raw), next))
     }
 
   /** A varint's value, read as the declared type says to read it.
@@ -330,11 +345,7 @@ object ProtobufPayload {
       case Some(ProtoType.Named(reference)) =>
         // An enum, or a message field carrying a varint, which can only mean the record and the schema
         // disagree. The enum case is the real one and is named; the other renders as a number.
-        file.enumsByName
-          .get(qualify(file, reference))
-          .orElse(file.enumsByName.collectFirst {
-            case (name, values) if name.endsWith(s".$reference") || name == reference => values
-          })
+        enumType(file, reference)
           .flatMap(_.values.get(raw.toInt))
           .map(Json.fromString)
           .getOrElse(longJson(raw))
@@ -379,14 +390,10 @@ object ProtobufPayload {
   /** ZigZag: how `sint32` and `sint64` encode negative numbers compactly. */
   private def zigZag(raw: Long): Long = (raw >>> 1) ^ -(raw & 1L)
 
-  /** A named type resolved against the file, innermost scope outwards, as the language resolves it. */
+  /** References have already been bound to the lexical symbol, before deciding packability. */
   private def resolve(file: ProtoFile, field: ProtoField, reference: String): Either[String, ProtoMessage] =
     field.mapEntry
-      .orElse(file.messagesByName.get(qualify(file, reference)))
-      .orElse(file.messagesByName.get(reference))
-      .orElse(file.messagesByName.collectFirst {
-        case (name, message) if name.endsWith(s".$reference") => message
-      })
+      .orElse(file.messagesByName.get(reference.stripPrefix(".")))
       .toRight(unresolved(file, field, reference))
 
   private def unresolved(file: ProtoFile, field: ProtoField, reference: String): String =
@@ -398,21 +405,20 @@ object ProtobufPayload {
       s"field '${field.name}' has type '$reference', and the schema does not declare it. The registry " +
         "returned a schema that is not self-contained"
 
-  private def qualify(file: ProtoFile, reference: String): String =
-    if reference.startsWith(".") then reference.drop(1)
-    else file.packageName.fold(reference)(name => s"$name.$reference")
-
   /** A varint, and the offset after it.
     *
     * Ten bytes is the maximum: a 64-bit value in seven-bit groups. An eleventh continuation bit means the
     * bytes are not a varint, and saying so is better than looping until the array ends.
     */
-  private def readVarint(bytes: Array[Byte], offset: Int): Either[String, (Long, Int)] = {
+  private def readVarint(bytes: Array[Byte], offset: Int): Either[String, (Long, Int)] =
+    readVarint(bytes, offset, bytes.length)
+
+  private def readVarint(bytes: Array[Byte], offset: Int, until: Int): Either[String, (Long, Int)] = {
     @tailrec
     def loop(index: Int, shift: Int, acc: Long): Either[String, (Long, Int)] =
-      if index >= bytes.length then
+      if index >= until then
         Left("the record ends in the middle of a number; it is truncated or is not Protobuf")
-      else if shift >= 70 then
+      else if shift >= 70 || (shift == 63 && (bytes(index) & 0xfe) != 0) then
         Left("the record contains a ten-byte number that never ends; these bytes are not Protobuf")
       else {
         val byte = bytes(index)
@@ -425,8 +431,13 @@ object ProtobufPayload {
   }
 
   /** A fixed-width little-endian value, and the offset after it. */
-  private def readFixed(bytes: Array[Byte], offset: Int, width: Int): Either[String, (Long, Int)] =
-    if offset + width > bytes.length then
+  private def readFixed(
+      bytes: Array[Byte],
+      offset: Int,
+      width: Int,
+      until: Int
+  ): Either[String, (Long, Int)] =
+    if width > until - offset then
       Left(s"the record ends in the middle of a $width-byte value; it is truncated or is not Protobuf")
     else {
       val value =

@@ -56,7 +56,8 @@ final case class PermissionDto(
     clusters: List[String],
     resource: String,
     value: Option[String],
-    actions: List[String]
+    actions: List[String],
+    defaultRole: Boolean = false
 )
 
 object PermissionDto {
@@ -68,13 +69,15 @@ object PermissionDto {
         resource <- cursor.get[String]("resource")
         value <- cursor.get[Option[String]]("value")
         actions <- cursor.get[List[String]]("actions")
-      } yield PermissionDto(clusters, resource, value, actions),
+        defaultRole <- cursor.getOrElse[Boolean]("defaultRole")(false)
+      } yield PermissionDto(clusters, resource, value, actions, defaultRole),
     (dto: PermissionDto) =>
       Json.obj(
         "clusters" -> dto.clusters.asJson,
         "resource" -> dto.resource.asJson,
         "value" -> dto.value.asJson,
-        "actions" -> dto.actions.asJson
+        "actions" -> dto.actions.asJson,
+        "defaultRole" -> dto.defaultRole.asJson
       )
   )
 

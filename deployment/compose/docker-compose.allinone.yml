@@ -31,6 +31,8 @@ services:
     ports:
       - "${KUI_PORT:-8080}:8080"
     environment:
+      # Local demo only: allow integrations registered on the private Docker network.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       # Human-readable log lines: `docker compose logs` is read by a person here, and the images
       # default to JSON, which is right for a log collector and unreadable for a terminal.
       KUI_TELEMETRY_LOGFORMAT: text

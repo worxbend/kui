@@ -187,7 +187,7 @@ describe("the recorded resend", () => {
   it("reads the tally and calls a complete copy complete", async () => {
     const answer = await resend(client(copiedDocument), "development", "audit.log.raw", range("0", "3"));
     if (!answer.ok) throw new Error("expected the resend to answer");
-    expect(answer.value).toEqual({ toTopic: "scratch.jm-test", read: 3, written: 3, requested: 3 });
+    expect(answer.value).toEqual({ toTopic: "scratch.jm-test", read: 3, written: 3, requested: 3, failures: [], rangeFailures: [] });
     expect(readingOf(answer.value)).toEqual({ kind: "complete" });
   });
 

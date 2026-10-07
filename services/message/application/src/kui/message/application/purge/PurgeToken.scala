@@ -37,7 +37,8 @@ trait PurgeToken[F[_]] {
       cluster: ClusterId,
       topic: TopicName,
       partitions: List[PlannedPurge],
-      expiresAt: Instant
+      expiresAt: Instant,
+      topicId: String = ""
   ): F[String]
 
   /** `Left(KUI-VALIDATION)` for a bad signature, an expired token, or one minted for another cluster or
@@ -50,14 +51,15 @@ trait PurgeToken[F[_]] {
       cluster: ClusterId,
       topic: TopicName,
       token: String,
-      now: Instant
+      now: Instant,
+      topicId: String = ""
   ): F[Either[KuiError, List[PlannedPurge]]]
 }
 
 object PurgeToken {
 
   private val Algorithm: String = "HmacSHA256"
-  private val Version: String = "v1"
+  private val Version: String = "v2"
   private val Operation: String = "message.purge"
   private val Separator: Char = '.'
   private val Field: Char = '|'
@@ -75,10 +77,11 @@ object PurgeToken {
         cluster: ClusterId,
         topic: TopicName,
         partitions: List[PlannedPurge],
-        expiresAt: Instant
+        expiresAt: Instant,
+        topicId: String
     ): F[String] =
       Sync[F].delay {
-        val payload = render(cluster, topic, partitions, expiresAt)
+        val payload = render(cluster, topic, partitions, expiresAt, topicId)
         s"${encode(payload.getBytes(StandardCharsets.UTF_8))}$Separator${encode(sign(payload))}"
       }
 
@@ -86,7 +89,8 @@ object PurgeToken {
         cluster: ClusterId,
         topic: TopicName,
         token: String,
-        now: Instant
+        now: Instant,
+        topicId: String
     ): F[Either[KuiError, List[PlannedPurge]]] =
       Sync[F].delay {
         token.split(Separator) match {
@@ -100,7 +104,7 @@ object PurgeToken {
                 else
                   parse(payload) match {
                     case Some((subject, partitions, expiresAt))
-                        if subject == subjectOf(cluster, topic) && !now.isAfter(expiresAt) =>
+                        if subject == subjectOf(cluster, topic, topicId) && !now.isAfter(expiresAt) =>
                       Right(partitions)
                     case _ => Left(invalid)
                   }
@@ -133,7 +137,8 @@ object PurgeToken {
   /** A topic name cannot contain `/` — `TopicName`'s own pattern allows only letters, digits, `.`, `_` and
     * `-` — so a cluster and a topic can be joined without a name chosen to look like a pair confusing them.
     */
-  private def subjectOf(cluster: ClusterId, topic: TopicName): String = s"${cluster.value}/${topic.value}"
+  private def subjectOf(cluster: ClusterId, topic: TopicName, topicId: String): String =
+    s"${cluster.value}/${topic.value}/${encode(topicId.getBytes(StandardCharsets.UTF_8))}"
 
   /** The canonical rendering. Partitions are sorted, because the token is only as good as the guarantee that
     * the same plan renders to the same bytes.
@@ -146,14 +151,15 @@ object PurgeToken {
       cluster: ClusterId,
       topic: TopicName,
       partitions: List[PlannedPurge],
-      expiresAt: Instant
+      expiresAt: Instant,
+      topicId: String
   ): String = {
     val rendered = partitions
       .sortBy(_.partition.value)
       .map(one => s"${one.partition.value}$Pair${one.lowWatermark.value}$Pair${one.highWatermark.value}")
       .mkString(Entry.toString)
 
-    List(Version, subjectOf(cluster, topic), Operation, rendered, expiresAt.toEpochMilli.toString)
+    List(Version, subjectOf(cluster, topic, topicId), Operation, rendered, expiresAt.toEpochMilli.toString)
       .mkString(Field.toString)
   }
 

@@ -18,7 +18,7 @@ import sttp.client4.{Backend, GenericRequest, Response}
 import kui.config.{SafeUrl, UrlPolicy}
 import kui.kernel.error.{ErrorCode, InfrastructureError, KuiError}
 import kui.kernel.{PositiveInt, ServiceId}
-import kui.observability.{MetricNames, Telemetry, UpstreamInstrumentation}
+import kui.observability.{MetricNames, Telemetry, UpstreamInstrumentation, UpstreamOutcome}
 
 /** Everything KUI needs to know about how to call one other system.
   *
@@ -86,13 +86,14 @@ object UpstreamClient {
 
   /** Builds the client. Order per call, and each layer is there for a different failure:
     *
-    *   1. **URL policy** — the address must still be one this deployment may call, even after a redirect
-    *      (`ARCHITECTURE.md` §14);
+    *   1. **URL policy** — the selected failover URL must be one this deployment may call. Production
+    *      transports must come from [[HttpTls.resource]] with this same policy: that factory enforces the
+    *      numeric socket address, which cannot be secured by a separate preflight DNS lookup;
     *   2. **bulkhead** — fail fast rather than let a slow upstream consume every thread;
     *   3. **circuit breaker** — stop calling something that is plainly down, and find out when it is back;
     *   4. **failover and retry** — try the next address when one refuses a connection, and repeat an
     *      idempotent call with full-jitter backoff;
-    *   5. **timeout** — the outer bound, so the whole thing is finite whatever happens inside;
+    *   5. **timeout** — around all attempts, inside breaker protection so deadline expiry counts as failure;
     *   6. **instrumentation** — one span and one measurement per call.
     *
     * The nesting is what makes the timeout meaningful: it is outside the retries, so `callTimeout` bounds the
@@ -112,13 +113,26 @@ object UpstreamClient {
       )
       bulkhead <- Resource.eval(Bulkhead.make[F](config.name, config.maxConcurrent))
       failover <- Resource.eval(Failover.make[F](config.urls, config.failoverGrace))
+      attempts <- Resource.eval(
+        UpstreamInstrumentation.measureAttempts[F](underlying, telemetry, serviceName.value, config.name)
+      )
       instrumented <- Resource.eval(
-        UpstreamInstrumentation.wrap[F](underlying, telemetry, serviceName.value, config.name)
+        UpstreamInstrumentation.wrap[F](
+          new ResilientBackend[F](attempts, config, breaker, bulkhead, failover),
+          telemetry,
+          serviceName.value,
+          config.name,
+          result =>
+            result match {
+              case Left(UpstreamFailure(_: InfrastructureError.Timeout)) => UpstreamOutcome.Timeout
+              case Left(UpstreamFailure(_: InfrastructureError.CircuitOpen)) => UpstreamOutcome.CircuitOpen
+              case other => UpstreamInstrumentation.outcomeOf(other)
+            }
+        )
       )
       _ <- logTransitions[F](breaker, config.name, logger)
     } yield new UpstreamClient[F] {
-      val backend: Backend[F] =
-        new ResilientBackend[F](instrumented, config, breaker, bulkhead, failover)
+      val backend: Backend[F] = instrumented
 
       def circuitStates: Stream[F, CircuitEvent] = breaker.events
       def currentState: F[CircuitState] = breaker.state
@@ -267,21 +281,20 @@ object UpstreamClient {
       with Backend[F] {
 
     override def send[T](request: GenericRequest[T, Any & Effect[F]]): F[Response[T]] = {
+      val bounded = attempt(request, 0).timeoutTo(
+        config.callTimeout,
+        Async[F].raiseError[Response[T]](
+          new TimeoutException(s"${config.name} did not answer within ${config.callTimeout}")
+        )
+      )
       val call = bulkhead.protect(
         breaker
-          .protectClassified(attempt(request, 0))(response => response.code.code < ServerErrorFrom)(error =>
+          .protectClassified(bounded)(response => response.code.code < ServerErrorFrom)(error =>
             !isResponseLimitCause(error)
           )
       )
 
-      call
-        .timeoutTo(
-          config.callTimeout,
-          Async[F].raiseError[Response[T]](
-            new TimeoutException(s"${config.name} did not answer within ${config.callTimeout}")
-          )
-        )
-        .handleErrorWith(error => Async[F].raiseError(translate(error)))
+      call.handleErrorWith(error => Async[F].raiseError(translate(error)))
     }
 
     /** One attempt over the healthy addresses, then a retry if the outcome allows it. */
@@ -316,10 +329,11 @@ object UpstreamClient {
 
     /** Tries each address in turn, rotating past the ones that will not connect.
       *
-      * Only a connection-level failure moves on to the next address. An address that answered `500` is
-      * reachable and is answering; asking the next machine the same question would give the same answer and
-      * would hide from the operator that the cluster is unwell rather than unreachable. A URL-policy refusal
-      * does not fail over either — the next address would be refused for the same reason.
+      * Only a connection-level failure on a replay-safe request (or one known not to have transmitted) moves
+      * on to the next address. An address that answered `500` is reachable and is answering; asking the next
+      * machine the same question would give the same answer and would hide from the operator that the cluster
+      * is unwell rather than unreachable. A URL-policy refusal does not fail over either — the next address
+      * would be refused for the same reason.
       *
       * When every address refuses a connection the last failure propagates, and `errorFor` turns it into
       * `Unreachable`.
@@ -330,7 +344,10 @@ object UpstreamClient {
     ): F[Response[T]] =
       urls.tail.foldLeft(sendTo(request, urls.head)) { (previous, url) =>
         previous.handleErrorWith {
-          case error if Failover.isConnectionFailure(error) => sendTo(request, url)
+          case error
+              if Failover.isConnectionFailure(error) &&
+                (RetryPolicy.isIdempotent(request.method) || Failover.isBeforeTransmission(error)) =>
+            sendTo(request, url)
           case other => Async[F].raiseError(other)
         }
       }
@@ -354,7 +371,9 @@ object UpstreamClient {
 
         case Right(_) =>
           delegate
-            .send(request.method(request.method, rebased))
+            // Redirect handling is above the socket transport. Only explicitly configured failover
+            // endpoints may receive credentials; HttpTls independently disables redirects as well.
+            .send(request.method(request.method, rebased).followRedirects(false))
             .attempt
             .flatMap {
               case Right(response) => failover.markHealthy(url).as(response)

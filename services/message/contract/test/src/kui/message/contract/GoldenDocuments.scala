@@ -123,7 +123,9 @@ object GoldenDocuments {
     """{
       |  "toTopic" : "orders-replay",
       |  "read" : 512,
-      |  "written" : 512
+      |  "written" : 512,
+      |  "failures" : [],
+      |  "rangeFailures" : []
       |}""".stripMargin
 
   /** A purge that one partition refused. Seven partitions were still purged, and saying so is the point. */

@@ -47,7 +47,7 @@
  * learn to click through confirmations.
  */
 
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import {
   Button,
@@ -119,6 +119,7 @@ export function ResetWizard(props: ResetWizardProps): JSX.Element {
    * is stale and skip writing over whatever the screen shows now.
    */
   let requestToken = 0;
+  onCleanup(() => { requestToken++; });
   /**
    * The last thing that went wrong, whether the form refused it or the server did.
    *
@@ -162,6 +163,7 @@ export function ResetWizard(props: ResetWizardProps): JSX.Element {
   }
 
   function close(): void {
+    requestToken++;
     setOpen(false);
     setStep({ kind: "composing" });
     setProblem(null);
@@ -172,6 +174,10 @@ export function ResetWizard(props: ResetWizardProps): JSX.Element {
    * either the step advances, or a sentence appears. There is no third path.
    */
   async function preview(): Promise<void> {
+    if (props.permitted === false) {
+      setProblem(props.refusal ?? "You do not have permission to reset offsets.");
+      return;
+    }
     const attempt = resetRequestOf({ ...form(), topic: chosenTopic() }, partitions());
     if (!attempt.ok) {
       setProblem(attempt.problem);
@@ -195,6 +201,10 @@ export function ResetWizard(props: ResetWizardProps): JSX.Element {
   }
 
   async function applyPlan(plan: ResetPlan): Promise<void> {
+    if (props.permitted === false) {
+      setProblem(props.refusal ?? "You do not have permission to reset offsets.");
+      return;
+    }
     setProblem(null);
     const token = ++requestToken;
     setStep({ kind: "applying", plan });
@@ -348,9 +358,13 @@ export function ResetWizard(props: ResetWizardProps): JSX.Element {
             <p class="kui-cg-reset__note" data-testid="group-reset-scope">
               {scopeSentence(partitions().length)}
             </p>
-            <Button busy={step().kind === "planning"} onClick={() => void preview()}>
-              {step().kind === "planning" ? "Planning…" : "Preview the plan"}
-            </Button>
+            <Show when={props.permitted !== false} fallback={
+              <Button disabled disabledReason={props.refusal ?? "You do not have permission to reset offsets."}>Preview the plan</Button>
+            }>
+              <Button busy={step().kind === "planning"} onClick={() => void preview()}>
+                {step().kind === "planning" ? "Planning…" : "Preview the plan"}
+              </Button>
+            </Show>
           </div>
         </Show>
 
@@ -379,6 +393,8 @@ export function ResetWizard(props: ResetWizardProps): JSX.Element {
             <PlanView
               plan={plan()}
               applying={step().kind === "applying"}
+              permitted={props.permitted}
+              refusal={props.refusal}
               formatTime={props.formatTime}
               onApply={() => void applyPlan(plan())}
               onCancelApply={() => cancelApplying(plan())}
@@ -438,6 +454,8 @@ export function scopeSentence(count: number): string {
 function PlanView(props: {
   readonly plan: ResetPlan;
   readonly applying: boolean;
+  readonly permitted?: boolean | undefined;
+  readonly refusal?: string | undefined;
   readonly formatTime?: ((at: Date) => string) | undefined;
   readonly onApply: () => void;
   readonly onCancelApply: () => void;
@@ -480,9 +498,13 @@ function PlanView(props: {
             </p>
           }
         >
-          <Button variant="danger" icon="warning" busy={props.applying} onClick={props.onApply}>
-            {props.applying ? "Writing offsets…" : "Apply this plan"}
-          </Button>
+          <Show when={props.permitted !== false} fallback={
+            <Button variant="danger" icon="warning" disabled disabledReason={props.refusal ?? "You do not have permission to reset offsets."}>Apply this plan</Button>
+          }>
+            <Button variant="danger" icon="warning" busy={props.applying} onClick={props.onApply}>
+              {props.applying ? "Writing offsets…" : "Apply this plan"}
+            </Button>
+          </Show>
         </Show>
         <Show
           when={!props.applying}

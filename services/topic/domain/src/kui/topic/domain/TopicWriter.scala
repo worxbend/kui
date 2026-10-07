@@ -62,6 +62,9 @@ trait TopicWriter[F[_]] {
     */
   def delete(cluster: ClusterId, topic: TopicName): F[Either[TopicError, Unit]]
 
+  /** Delete only the approved Kafka identity, even if the name was replaced after the final read. */
+  def deleteById(cluster: ClusterId, topic: TopicName, topicId: String): F[Either[TopicError, Unit]]
+
   /** Whether this cluster's brokers will recreate a deleted topic the moment anything names it.
     *
     * `None` means KUI could not read it — the broker refused `describeConfigs` on a broker resource, or the

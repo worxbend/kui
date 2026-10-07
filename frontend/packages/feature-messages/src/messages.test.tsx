@@ -36,6 +36,7 @@ function fakeTransport(): {
   consumed: (records: number, filterErrors?: number) => void;
   close: (marker?: string, reason?: "limit" | "exhausted" | "budget" | "cancelled") => void;
   closes: () => number;
+  breakConnection: () => void;
 } {
   const urls: string[] = [];
   let handlers: Parameters<BrowseTransport["open"]>[1] | undefined;
@@ -70,9 +71,11 @@ function fakeTransport(): {
     close: (end, why) => {
       marker = end;
       reason = why;
-      handlers?.onConnection({ phase: "closed", reason: "done" });
+      handlers?.onDone?.();
+      handlers?.onConnection({ phase: "closed", reason: "the stream finished" });
     },
     closes: () => closed,
+    breakConnection: () => handlers?.onConnection({ phase: "closed", reason: "stream ended" }),
   };
 }
 
@@ -109,6 +112,43 @@ function withSession(run: (session: BrowseSession, fake: ReturnType<typeof fakeT
 }
 
 describe("a browse session", () => {
+  test("does not report EOF without done as a successful browse", () => {
+    withSession((session, fake) => {
+      session.start(DEFAULT_BROWSE); fake.emit(record("1"));
+      fake.breakConnection(); void flush();
+      expect(session.progress().failure?.kind).toBe("transport");
+      expect(session.canLoadMore()).toBe(false);
+      expect(session.rows()).toHaveLength(1);
+    });
+  });
+  test("releases records held by a pause when the server completes", () => {
+    withSession((session, fake) => {
+      session.start(DEFAULT_BROWSE);
+      session.setPaused(true);
+      fake.emit(record("1"));
+      fake.close(undefined, "limit");
+      void flush();
+      expect(session.rows().map((row) => row.offset)).toEqual(["1"]);
+      expect(session.held()).toBe(0);
+      expect(session.paused()).toBe(false);
+    });
+  });
+
+  test.each(["key", "headerName", "headerValue", "undecodable", "value"] as const)("bounds retained %s payloads independently", (field) => {
+    withSession((session, fake) => {
+      session.start(DEFAULT_BROWSE);
+      const huge = "x".repeat(MAX_RETAINED_PAYLOAD_BYTES + 1);
+      const extra: Partial<KafkaRecord> = field === "key" ? { key: huge }
+        : field === "headerName" ? { headers: [{ name: huge, value: "small" }] }
+        : field === "headerValue" ? { headers: [{ name: "small", value: huge }] }
+        : field === "undecodable" ? { value: { kind: "undecodable", reason: "bad", hex: huge } }
+        : { value: { kind: "text", text: huge } };
+      fake.emit({ ...record("1"), ...extra });
+      void flush();
+      expect(JSON.stringify(session.rows()[0]).length).toBeLessThan(1000);
+      expect(session.rows()[0]?.value.kind).toBe("large");
+    });
+  });
   test("yields a large stream after the first visible record batch", () => {
     const fake = fakeTransport();
     const continuations: Array<() => void> = [];
@@ -386,7 +426,8 @@ describe("a browse session", () => {
         for (let index = 0; index < 20; index += 1) {
           handlers.onEvent({ kind: "record", record: record(String(index)) });
         }
-        handlers.onConnection({ phase: "closed", reason: "done" });
+        handlers.onDone?.();
+        handlers.onConnection({ phase: "closed", reason: "the stream finished" });
         return handle;
       },
     };
@@ -712,7 +753,8 @@ describe("a browse session", () => {
     const synchronous: BrowseTransport = {
       open: (_url, handlers) => {
         handlers.onEvent({ kind: "record", record: record("1") });
-        handlers.onConnection({ phase: "closed", reason: "done" });
+        handlers.onDone?.();
+        handlers.onConnection({ phase: "closed", reason: "the stream finished" });
         return { close: () => undefined, endMarker: () => "cursor-1" };
       },
     };
@@ -841,7 +883,8 @@ describe("a browse session", () => {
       });
       first.handlers.onFailure({ kind: "decode", event: "message", cause: "old failure" });
       first.marker = "cursor-1";
-      first.handlers.onConnection({ phase: "closed", reason: "done" });
+      first.handlers.onDone?.();
+      first.handlers.onConnection({ phase: "closed", reason: "the stream finished" });
       void flush();
 
       expect(session.rows()).toEqual([]);

@@ -18,7 +18,9 @@ final case class TopicDetail(
     /** How many log segments the topic's partitions hold. `None` when the broker would not report its log
       * directories, the same refusal as `TopicSummary.sizeBytes`.
       */
-    segmentCount: Option[Int]
+    segmentCount: Option[Int],
+    /** Kafka's immutable identity, absent when the broker cannot report it. */
+    topicId: Option[String] = None
 ) {
   def name: kui.kernel.TopicName = summary.name
 }
@@ -36,7 +38,8 @@ object TopicDetail {
       isInternal: Boolean,
       partitions: List[PartitionView],
       cleanupPolicy: Option[String] = None,
-      segmentCount: Option[Int] = None
+      segmentCount: Option[Int] = None,
+      topicId: Option[String] = None
   ): TopicDetail = {
     val ordered = partitions.sorted
 
@@ -48,7 +51,8 @@ object TopicDetail {
       summary = TopicSummary.of(name, isInternal, ordered, cleanupPolicy),
       partitions = ordered,
       cleanupPolicy = cleanupPolicy,
-      segmentCount = segmentCount
+      segmentCount = segmentCount,
+      topicId = topicId
     )
   }
 

@@ -409,6 +409,68 @@ final class ConnectHttpSuite extends KuiIOSuite {
     }
   }
 
+  test("legacy restart explicitly restarts every task, including running tasks") {
+    Ref.of[IO, List[String]](Nil).flatMap { asked =>
+      val backend: Backend[IO] = BackendStub[IO](summon[sttp.monad.MonadError[IO]]).whenAnyRequest
+        .thenRespondF { request =>
+          val path = "/" + request.uri.path.mkString("/")
+          val body = path match {
+            case "/" => """{"version":"2.2.2"}"""
+            case "/connectors/elastic-sink/status" =>
+              """{"tasks":[{"id":0,"state":"FAILED"},{"id":2,"state":"RUNNING"}]}"""
+            case _ => ""
+          }
+          asked
+            .update(_ :+ s"${request.method.method} $path")
+            .as(ResponseStub.adjust(body, StatusCode.Ok): sttp.client4.Response[StubBody])
+        }
+      for {
+        result <- new ConnectHttp[IO](backend, base, payments, ConnectCredentials.anonymous[IO])
+          .operate(elastic, ConnectorOperation.Restart)
+        calls <- asked.get
+      } yield {
+        assertEquals(result, Right(()))
+        assertEquals(
+          calls.filter(_.startsWith("POST")),
+          List(
+            "POST /connectors/elastic-sink/restart",
+            "POST /connectors/elastic-sink/tasks/0/restart",
+            "POST /connectors/elastic-sink/tasks/2/restart"
+          )
+        )
+      }
+    }
+  }
+
+  test("a legacy task restart failure is not reported as a successful connector restart") {
+    worker {
+      case "/" => (StatusCode.Ok, """{"version":"2.2.2"}""")
+      case "/connectors/elastic-sink/status" => (StatusCode.Ok, """{"tasks":[{"id":0}]}""")
+      case "/connectors/elastic-sink/restart" => (StatusCode.NoContent, "")
+      case "/connectors/elastic-sink/tasks/0/restart" => (StatusCode.Conflict, rebalanceBody)
+    }.operate(elastic, ConnectorOperation.Restart)
+      .map(answer => assertEquals(answer.left.map(_.code), Left(ErrorCode.ConnectRebalancing)))
+  }
+
+  test("a legacy worker without task identities is refused before any mutation") {
+    Ref.of[IO, List[String]](Nil).flatMap { asked =>
+      val backend: Backend[IO] = BackendStub[IO](summon[sttp.monad.MonadError[IO]]).whenAnyRequest
+        .thenRespondF { request =>
+          asked
+            .update(_ :+ request.method.method)
+            .as(ResponseStub.adjust("{}", StatusCode.Ok): sttp.client4.Response[StubBody])
+        }
+      for {
+        answer <- new ConnectHttp[IO](backend, base, payments, ConnectCredentials.anonymous[IO])
+          .operate(elastic, ConnectorOperation.Restart)
+        methods <- asked.get
+      } yield {
+        assert(answer.isLeft, clue = answer)
+        assert(!methods.contains("POST"))
+      }
+    }
+  }
+
   test("a restart asks for the tasks too, and asks for all of them") {
     // Both parameters are the opposite of the API's defaults, and both are the point: `includeTasks=false`
     // restarts the connector and leaves its dead tasks dead, which is the state §7.7's operator is
@@ -418,7 +480,10 @@ final class ConnectHttpSuite extends KuiIOSuite {
         .thenRespondF { request =>
           asked
             .set(s"${request.method.method} ${request.uri.toString}")
-            .as(ResponseStub.adjust("", StatusCode.Accepted): sttp.client4.Response[StubBody])
+            .as(
+              ResponseStub
+                .adjust("""{"version":"3.0.0"}""", StatusCode.Accepted): sttp.client4.Response[StubBody]
+            )
         }
 
       new ConnectHttp[IO](backend, base, payments, ConnectCredentials.anonymous[IO])
@@ -467,7 +532,10 @@ final class ConnectHttpSuite extends KuiIOSuite {
   }
 
   test("an operation refused mid-rebalance is the rebalance refusal, not a failed restart") {
-    worker { case "/connectors/elastic-sink/restart" => (StatusCode.Conflict, rebalanceBody) }
+    worker {
+      case "/" => (StatusCode.Ok, """{"version":"3.0.0"}""")
+      case "/connectors/elastic-sink/restart" => (StatusCode.Conflict, rebalanceBody)
+    }
       .operate(elastic, ConnectorOperation.Restart)
       .map(answer => assertEquals(answer.left.map(_.code), Left(ErrorCode.ConnectRebalancing)))
   }

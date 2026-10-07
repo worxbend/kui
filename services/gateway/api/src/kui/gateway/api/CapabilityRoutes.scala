@@ -14,12 +14,15 @@ import sttp.tapir.server.ServerEndpoint
 import kui.contracts.ErrorEnvelope
 import kui.contracts.capability.{CapabilityChange, CapabilityEntry, CapabilityKey, CapabilitySnapshot}
 import kui.contracts.sse.SseEventName
+import kui.gateway.api.auth.SessionMiddleware
 import kui.gateway.application.capability.{CapabilityRegistry, Trigger}
 import kui.gateway.contract.{CapabilityEndpoints, GatewayEndpoints}
 import kui.http.sse.{Sse, SseConfig, SseEvent}
 import kui.kernel.error.ApplicationError
 import kui.kernel.{CorrelationId, ServiceId}
 import kui.observability.{Correlation, Telemetry}
+import kui.security.Principal
+import kui.security.rbac.{AccessRequest, ClusterFlags, Rbac, RbacPolicy}
 
 /** The three routes that let a browser find out what works, and be told when that changes.
   *
@@ -61,11 +64,12 @@ object CapabilityRoutes {
       trigger: Trigger[F],
       telemetry: Telemetry[F],
       logger: StructuredLogger[F],
-      sse: SseConfig = SseConfig.default
+      sse: SseConfig = SseConfig.default,
+      rbac: RbacPolicy = RbacPolicy.Disabled
   ): List[ServerEndpoint[Fs2Streams[F], F]] =
     List(
-      snapshotRoute[F](registry),
-      streamRoute[F](registry, telemetry, logger, sse),
+      snapshotRoute[F](registry, rbac),
+      streamRoute[F](registry, telemetry, logger, sse, rbac),
       probeRoute[F](registry, trigger)
     )
 
@@ -74,9 +78,25 @@ object CapabilityRoutes {
     (registry.entries, Clock[F].realTimeInstant).mapN(CapabilitySnapshot.apply)
 
   private def snapshotRoute[F[_]: Async](
-      registry: CapabilityRegistry[F]
+      registry: CapabilityRegistry[F],
+      rbac: RbacPolicy
   ): ServerEndpoint[Any, F] =
-    CapabilityEndpoints.snapshot.serverLogicSuccess[F](_ => snapshotOf(registry))
+    CapabilityEndpoints.snapshot
+      .in(caller)
+      .serverLogicSuccess[F](principal =>
+        snapshotOf(registry).map(snapshot =>
+          snapshot.copy(entries = snapshot.entries.filter(entry => visible(rbac, principal)(entry.key)))
+        )
+      )
+
+  private val caller = extractFromRequest[Principal](request =>
+    request.attribute(SessionMiddleware.Attribute).map(_.principal).getOrElse(Principal.Anonymous)
+  )
+
+  private[api] def visible(policy: RbacPolicy, principal: Principal)(key: CapabilityKey): Boolean =
+    key.cluster.forall(id =>
+      Rbac.decide(policy, principal, ClusterFlags.Writable, AccessRequest(id, "capabilities.read")).isAllowed
+    )
 
   /** The snapshot as an event, followed by one event per change.
     *
@@ -85,18 +105,27 @@ object CapabilityRoutes {
     * the deltas onto the snapshot always reproduces the registry. The other order leaves a window in which a
     * browser's sidebar silently drifts from reality and nothing ever tells it.
     */
-  def snapshotThenChanges[F[_]: Async](registry: CapabilityRegistry[F]): Stream[F, SseEvent] =
+  def snapshotThenChanges[F[_]: Async](
+      registry: CapabilityRegistry[F],
+      allowed: CapabilityKey => Boolean = _ => true
+  ): Stream[F, SseEvent] =
     Stream.resource(registry.subscribe).flatMap { deltas =>
-      Stream.eval(snapshotOf(registry)).map(snapshotEvent) ++ deltas.map(changeEvent)
+      Stream
+        .eval(snapshotOf(registry))
+        .map(snapshot =>
+          snapshotEvent(snapshot.copy(entries = snapshot.entries.filter(entry => allowed(entry.key))))
+        ) ++
+        deltas.filter(change => allowed(change.entry.key)).map(changeEvent)
     }
 
   private def streamRoute[F[_]: Async](
       registry: CapabilityRegistry[F],
       telemetry: Telemetry[F],
       logger: StructuredLogger[F],
-      config: SseConfig
+      config: SseConfig,
+      rbac: RbacPolicy
   ): ServerEndpoint[Fs2Streams[F], F] =
-    streamEndpoint[F].serverLogicSuccess[F] { _ =>
+    streamEndpoint[F].in(caller).serverLogicSuccess[F] { principal =>
       // The correlation id is minted per connection rather than read from the request, because the
       // failure this guards against happens long after the request headers were handled and the id has
       // to be the one that identifies *this* stream in the logs.
@@ -107,7 +136,7 @@ object CapabilityRoutes {
             // the browser as a truncated body: `EventSource` reconnects, re-runs the same failing
             // subscription and loops, with nothing on screen or in the client's hands to say why. ADR-035
             // requires exactly one terminal `done` or `error` event, and this is the `error` half.
-            Sse.withErrorEvent(snapshotThenChanges(registry), correlationId),
+            Sse.withErrorEvent(snapshotThenChanges(registry, visible(rbac, principal)), correlationId),
             config,
             EventName,
             telemetry,

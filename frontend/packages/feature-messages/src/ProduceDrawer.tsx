@@ -50,6 +50,7 @@ export interface ProduceDrawerProps {
   readonly partitionCount?: number | undefined;
   readonly onSend: (draft: RecordDraft) => void;
   readonly state: Mutation<readonly ProducedRecord[]>;
+  readonly disabledReason?: string | undefined;
 }
 
 export function ProduceDrawer(props: ProduceDrawerProps): JSX.Element {
@@ -69,6 +70,7 @@ export function ProduceDrawer(props: ProduceDrawerProps): JSX.Element {
     return value === null ? ({ kind: "empty" } as const) : analyzeJsonValue(value);
   });
   const problem = createMemo(() => {
+    if (props.disabledReason !== undefined) return props.disabledReason;
     const structural = draftProblem(draft());
     if (structural !== undefined) return structural;
     const value = valueAnalysis();
@@ -77,6 +79,7 @@ export function ProduceDrawer(props: ProduceDrawerProps): JSX.Element {
   const canSend = () => problem() === undefined && !busy();
 
   const send = (): void => {
+    if (!canSend()) return;
     const current = draft();
     if (
       minifyBeforeSending() &&

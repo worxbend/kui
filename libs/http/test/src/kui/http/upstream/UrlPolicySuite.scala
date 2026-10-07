@@ -1,13 +1,19 @@
 package kui.http.upstream
 
+import java.net.InetSocketAddress
+import java.util.concurrent.atomic.AtomicInteger
+
 import cats.data.NonEmptyList
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
+import com.sun.net.httpserver.HttpServer
 import munit.CatsEffectSuite
 import sttp.client4.*
+import sttp.client4.impl.cats.implicits.*
+import sttp.client4.testing.{BackendStub, ResponseStub}
 import sttp.model.StatusCode
 
-import kui.config.{SafeUrl, UrlPolicy}
+import kui.config.{HttpTlsConfig, SafeUrl, UrlPolicy}
 import kui.kernel.error.InfrastructureError
 
 /** That the outbound URL policy is enforced where it actually matters — on the address a request is about to
@@ -83,6 +89,57 @@ final class UrlPolicySuite extends CatsEffectSuite {
           _ <- basicRequest.get(uri"http://ignored/x").send(client.backend).attempt
           reached <- stub.calls
         } yield assertEquals(reached, 0)
+      }
+    }
+  }
+
+  test("the transport cannot follow redirects outside the configured endpoint set") {
+    val stub = BackendStub[IO](summon[sttp.monad.MonadError[IO]]).whenAnyRequest.thenRespondF { request =>
+      IO {
+        assert(!request.options.followRedirects, "transport redirects bypass per-call URL validation")
+        ResponseStub.adjust("redirect", StatusCode.Found)
+      }
+    }
+    UpstreamFixture.client(clientFor("https://registry.example.com", UrlPolicy.Strict), stub).use { client =>
+      basicRequest.get(uri"https://ignored/subjects").followRedirects(true).send(client.backend).map {
+        response =>
+          assertEquals(response.code, StatusCode.Found)
+      }
+    }
+  }
+
+  test("a live sttp redirect does not contact its destination") {
+    val redirected = new AtomicInteger(0)
+    val server = Resource.make(IO.blocking {
+      val running = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0)
+      val _ = running.createContext(
+        "/start",
+        exchange => {
+          exchange.getResponseHeaders.set("Location", "/secret")
+          exchange.sendResponseHeaders(302, -1)
+          exchange.close()
+        }
+      )
+      val _ = running.createContext(
+        "/secret",
+        exchange => {
+          val _ = redirected.incrementAndGet()
+          exchange.sendResponseHeaders(200, -1)
+          exchange.close()
+        }
+      )
+      running.start()
+      running
+    })(running => IO.blocking(running.stop(0)))
+    server.use { running =>
+      val base = s"http://127.0.0.1:${running.getAddress.getPort}"
+      HttpTls.resource[IO](HttpTlsConfig.Default, UrlPolicy.Dev).use { transport =>
+        UpstreamFixture.client(clientFor(base, UrlPolicy.Dev), transport).use { client =>
+          basicRequest.get(uri"http://ignored/start").send(client.backend).map { response =>
+            assertEquals(response.code, StatusCode.Found)
+            assertEquals(redirected.get(), 0)
+          }
+        }
       }
     }
   }

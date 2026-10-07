@@ -86,7 +86,7 @@ final class KsqlHttp[F[_]: Async](
         .asLeft[StatementOutcome]
         .pure[F]
     else if statement.query then pullQuery(statement)
-    else this.statement(statement.canonical).map(_.flatMap(entities => Right(statusFrom(entities))))
+    else this.statement(statement.canonical).map(_.flatMap(commandOutcome))
 
   /** The push query, as frames.
     *
@@ -163,12 +163,12 @@ final class KsqlHttp[F[_]: Async](
         .contentType(MediaType),
       maxResponseBytes = Some(KsqlHttp.MaxPullQueryResponseBytes)
     ).map(_.flatMap { body =>
-      parser.parse(body).left.map(_ => malformed("its query answer is not JSON")).map { json =>
-        val frames = json.asArray.map(_.toList).getOrElse(List(json)).flatMap(frameOfJson)
-        val columns = frames.collectFirst { case QueryFrame.Header(names) => names }.getOrElse(Nil)
-        val rows = frames.collect { case QueryFrame.Row(row) => row.values }
-
-        StatementOutcome.Rows(columns, rows)
+      parser.parse(body).left.map(_ => malformed("its query answer is not JSON")).flatMap { json =>
+        json.asArray.map(_.toList).getOrElse(List(json)).flatMap(decodeFrame).sequence.map { frames =>
+          val columns = frames.collectFirst { case QueryFrame.Header(names) => names }.getOrElse(Nil)
+          val rows = frames.collect { case QueryFrame.Row(row) => row.values }
+          StatementOutcome.Rows(columns, rows)
+        }
       }
     })
 
@@ -473,6 +473,55 @@ object KsqlHttp {
         }
     }
 
+  /** HTTP acceptance is not command completion. Unknown command states fail closed.
+    *
+    * The supported baseline's status API documents TERMINATED as a query started by the command and
+    * subsequently stopped, not a rejected command. Keep its message/ID as an applied statement's status:
+    * https://github.com/confluentinc/ksql/blob/v0.14.0-ksqldb/docs/developer-guide/ksqldb-rest-api/status-endpoint.md
+    * RUNNING is also declared in that release's CommandStatus.Status, but the REST guide does not promise
+    * completion for it. Preserve it conservatively as pending (audit Unknown), never an upstream failure:
+    * https://github.com/confluentinc/ksql/blob/v0.14.0-ksqldb/ksqldb-rest-model/src/main/java/io/confluent/ksql/rest/entity/CommandStatus.java
+    */
+  def commandOutcome(entities: List[Json]): Either[KuiError, StatementOutcome] = {
+    val decoded = entities.traverse { entity =>
+      val cursor = entity.hcursor
+      val command = cursor.downField("commandStatus")
+      val id = cursor.get[String]("commandId").toOption
+      val message = command.get[String]("message").getOrElse("the command has not reported a result")
+      // The versioned /ksql examples omit @type. Field presence (even null/malformed) is enough to
+      // require command state; a listing discriminator must not bypass that requirement.
+      if command.succeeded || cursor.downField("commandId").succeeded ||
+        cursor.downField("commandSequenceNumber").succeeded ||
+        cursor.get[String]("@type").toOption.contains("currentStatus")
+      then
+        command.get[String]("status").toOption match {
+          case Some("SUCCESS" | "TERMINATED") => Right(StatementOutcome.Status(message, id))
+          case Some("QUEUED" | "PARSING" | "EXECUTING" | "RUNNING") =>
+            Right(StatementOutcome.Pending(message, id))
+          case Some("ERROR") => Left(InfrastructureError.Remote(ErrorCode.UpstreamKsql, message, Nil))
+          case _ =>
+            Left(
+              InfrastructureError.Remote(
+                ErrorCode.UpstreamKsql,
+                "ksqlDB returned an unknown command status",
+                Nil
+              )
+            )
+        }
+      else
+        errorIn(entity) match {
+          case Some(error) => Left(InfrastructureError.Remote(ErrorCode.UpstreamKsql, error, Nil))
+          case None => Right(statusFrom(List(entity)))
+        }
+    }
+    decoded.map(results =>
+      results
+        .collectFirst { case pending: StatementOutcome.Pending => pending }
+        .orElse(results.lastOption)
+        .getOrElse(StatementOutcome.Pending("ksqlDB accepted the request without a completion status", None))
+    )
+  }
+
   /** One line of a chunked `/query` response, as a frame.
     *
     * The response is a JSON array written incrementally, so each line is one element with the array's
@@ -497,14 +546,15 @@ object KsqlHttp {
               )
             )
           )
-        case Right(json) =>
-          json.hcursor.get[String]("errorMessage").toOption.orElse(errorIn(json)) match {
-            case Some(message) =>
-              Some(Left(InfrastructureError.Remote(ErrorCode.UpstreamKsql, message, Nil)))
-            case None => frameOfJson(json).map(Right(_))
-          }
+        case Right(json) => decodeFrame(json)
       }
   }
+
+  private def decodeFrame(json: Json): Option[Either[KuiError, QueryFrame]] =
+    json.hcursor.get[String]("errorMessage").toOption.orElse(errorIn(json)) match {
+      case Some(message) => Some(Left(InfrastructureError.Remote(ErrorCode.UpstreamKsql, message, Nil)))
+      case None => frameOfJson(json).map(Right(_))
+    }
 
   private def errorIn(json: Json): Option[String] =
     json.hcursor

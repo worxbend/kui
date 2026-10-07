@@ -108,7 +108,8 @@ final class ProfileDecodingSuite extends FunSuite {
       .through(SseWire.parse[fs2.Pure])
       .toList
 
-    assertEquals(events.map(_.name), List("cluster", "cluster", "heartbeat", "cluster"))
+    assertEquals(events.map(_.name), List("clusters", "clusters", "heartbeat", "clusters"))
+    assertEquals(ProfileSubscription.EventName, kui.cluster.contract.ProfileEndpoints.EventName)
     assertEquals(events.flatMap(_.id), List("1", "2", "3"))
   }
 

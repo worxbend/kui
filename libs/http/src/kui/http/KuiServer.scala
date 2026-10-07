@@ -7,6 +7,7 @@ import scala.concurrent.duration.{DurationInt, FiniteDuration}
 import cats.effect.kernel.{Async, Resource}
 import cats.effect.std.Dispatcher
 import cats.syntax.all.*
+import io.netty.handler.codec.http.{HttpDecoderConfig, HttpServerCodec}
 import org.typelevel.log4cats.StructuredLogger
 import sttp.capabilities.fs2.Fs2Streams
 import sttp.tapir.server.ServerEndpoint
@@ -32,6 +33,11 @@ object KuiServer {
 
   /** How long a stopping server waits for in-flight requests. See `resource`'s `gracefulShutdown`. */
   val DefaultGracefulShutdown: FiniteDuration = 10.seconds
+
+  /** An 8 KiB cursor needs additional space for the route, prefix, query options and HTTP framing. Keep this
+    * envelope aligned with deployment/frontend/entrypoint.sh and any outer proxy.
+    */
+  val MaxRequestLineBytes: Int = 16 * 1024
 
   /** How long a request may take before Netty stops waiting for the handler and closes the connection.
     *
@@ -103,6 +109,17 @@ object KuiServer {
         NettyConfig.default
           .withGracefulShutdownTimeout(gracefulShutdown)
           .copy(requestTimeout = Some(DefaultResponseTimeout))
+          .initPipeline { config => (pipeline, handler) =>
+            // Retain Tapir's TLS, streaming and compression handlers; customize only the decoder limit.
+            NettyConfig.defaultInitPipeline(config)(pipeline, handler)
+            val codecName = pipeline.context(classOf[HttpServerCodec]).name()
+            val _ = pipeline.replace(
+              classOf[HttpServerCodec],
+              codecName,
+              new HttpServerCodec(new HttpDecoderConfig().setMaxInitialLineLength(MaxRequestLineBytes))
+            )
+            ()
+          }
       )
         .host(config.host.value)
         .port(config.port.value)

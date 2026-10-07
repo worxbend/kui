@@ -2237,6 +2237,7 @@ export interface components {
         readonly PermissionDto: {
             readonly actions?: readonly string[];
             readonly clusters?: readonly string[];
+            readonly defaultRole: boolean;
             readonly resource: string;
             readonly value?: string;
         };
@@ -2515,6 +2516,27 @@ export interface components {
             /** @description A part of an aggregated response: status is one of ok, stale, unavailable, forbidden, not_configured; ok and stale carry data */
             readonly requestHandlers: unknown;
         };
+        /** ResendFailureDto */
+        readonly ResendFailureDto: {
+            readonly code: string;
+            readonly error: string;
+            /**
+             * Format: int64
+             * @description a record's position in a partition, from 0
+             */
+            readonly offset: number;
+            /**
+             * Format: int32
+             * @description a partition number, from 0
+             */
+            readonly partition: number;
+        };
+        /** ResendRangeFailureDto */
+        readonly ResendRangeFailureDto: {
+            readonly code: string;
+            readonly error: string;
+            readonly range: components["schemas"]["OffsetRangeDto"];
+        };
         /**
          * ResendRequestDto
          * @description Copy offset ranges into another topic, byte for byte
@@ -2526,9 +2548,11 @@ export interface components {
         };
         /**
          * ResendResultDto
-         * @description A resend's tally; read and written differ when retention removed part of the source
+         * @description A resend's tally, failed source records and ranges; retry only the reported failures
          */
         readonly ResendResultDto: {
+            readonly failures?: readonly components["schemas"]["ResendFailureDto"][];
+            readonly rangeFailures?: readonly components["schemas"]["ResendRangeFailureDto"][];
             /** Format: int64 */
             readonly read: number;
             /** @description a Kafka topic name: 1-249 characters from [a-zA-Z0-9._-], not '.' or '..' */
@@ -2709,7 +2733,7 @@ export interface components {
         };
         /**
          * StatementResultDto
-         * @description What a finished statement produced. `outcome` is 'rows' for a pull query — an empty rows list then means the query matched nothing — or 'status' for a DDL or DML statement, whose `message` is the server's own sentence
+         * @description The statement result. `outcome` is 'rows' for a completed pull query, 'status' for a completed statement, or 'pending' for a command accepted but not yet completed. `message` is the server's own sentence and `entity` carries the command ID when supplied. Do not retry a pending command.
          */
         readonly StatementResultDto: {
             readonly columns?: readonly string[];

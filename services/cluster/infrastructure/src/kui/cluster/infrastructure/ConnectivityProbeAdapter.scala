@@ -2,7 +2,7 @@ package kui.cluster.infrastructure
 
 import scala.concurrent.duration.*
 
-import cats.effect.kernel.Async
+import cats.effect.kernel.{Async, Resource}
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import org.typelevel.log4cats.StructuredLogger
@@ -25,17 +25,15 @@ import kui.kernel.error.{ErrorCode, KuiError}
   * metadata request — which is the entire set of things a misconfiguration breaks.
   */
 final class ConnectivityProbeAdapter[F[_]: Async](
-    admin: adm.ClusterAdmin[F],
-    clients: ClusterAdminClients[F],
+    admin: Resource[F, adm.ClusterAdmin[F]],
     logger: StructuredLogger[F]
 ) extends ConnectivityProbe[F] {
 
   def probe(profile: ClusterProfile): F[Connectivity] = {
     val bound = ConnectivityProbeAdapter.timeoutFor(profile)
 
-    clients
-      .connectionFor(profile)
-      .flatMap(connection => admin.describeCluster(connection))
+    admin
+      .use(_.describeCluster(ClusterProfileConnection.of(profile)))
       .timeoutTo(bound, Async[F].pure(Left(ConnectivityProbeAdapter.timedOut(bound))))
       .attempt
       .flatMap {

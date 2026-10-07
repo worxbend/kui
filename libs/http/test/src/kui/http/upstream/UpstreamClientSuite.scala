@@ -246,6 +246,27 @@ final class UpstreamClientSuite extends CatsEffectSuite {
     }
   }
 
+  test("whole-call deadlines open the circuit while caller cancellation does not") {
+    val config =
+      UpstreamFixture.single().copy(callTimeout = 1.second, failureThreshold = PositiveInt.unsafe(2))
+    TestControl.executeEmbed {
+      UpstreamFixture.recording(ResponseKind.Never).flatMap { stub =>
+        UpstreamFixture.client(config, stub.backend).use { client =>
+          for {
+            canceled <- request(Method.GET).send(client.backend).start
+            _ <- IO.sleep(1.millisecond) >> canceled.cancel
+            afterCancel <- client.currentState
+            _ <- request(Method.GET).send(client.backend).attempt.replicateA_(2)
+            afterTimeouts <- client.currentState
+          } yield {
+            assertEquals(afterCancel, CircuitState.Closed)
+            assertEquals(afterTimeouts, CircuitState.Open)
+          }
+        }
+      }
+    }
+  }
+
   test("the timeout bounds the whole call, not each attempt") {
     // A caller told "at most ten seconds" gets ten seconds, not ten seconds times the retry count.
     val config = UpstreamFixture.single().copy(callTimeout = 3.seconds, maxRetries = 5)
@@ -286,6 +307,33 @@ final class UpstreamClientSuite extends CatsEffectSuite {
     TestControl.executeEmbed(program).map { (status, hosts) =>
       assertEquals(status, StatusCode.Ok)
       assertEquals(hosts, List("registry-a", "registry-b"))
+    }
+  }
+
+  test("a connection reset cannot replay a mutation on the next address") {
+    val config = UpstreamFixture
+      .config(
+        "registry",
+        NonEmptyList.of(
+          UpstreamFixture.url("http://registry-a:8081"),
+          UpstreamFixture.url("http://registry-b:8081")
+        )
+      )
+      .copy(maxRetries = 0)
+    List(Method.POST -> 1, Method.PUT -> 1, Method.DELETE -> 1, Method.GET -> 2).traverse_ {
+      (method, expected) =>
+        for {
+          calls <- Ref.of[IO, Int](0)
+          stub = BackendStub[IO](summon[sttp.monad.MonadError[IO]]).whenAnyRequest.thenRespondF { _ =>
+            calls.update(_ + 1) >> IO.raiseError[Response[StubBody]](
+              new java.net.SocketException("reset after commit")
+            )
+          }
+          _ <- UpstreamFixture
+            .client(config, stub)
+            .use(client => request(method).send(client.backend).attempt)
+          count <- calls.get
+        } yield assertEquals(count, expected, method.method)
     }
   }
 

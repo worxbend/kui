@@ -107,13 +107,18 @@ final class KafkaGroupAdminPortSuite extends KuiIOSuite {
   final private class FakeOffsets(
       ends: Either[KuiError, BatchResult[TopicPartition, Offset]],
       begins: Either[KuiError, BatchResult[TopicPartition, Offset]],
-      offline: Set[TopicPartition]
+      offline: Set[TopicPartition],
+      times: Option[BatchResult[TopicPartition, Option[Offset]]],
+      metadataFailure: Option[KuiError]
   ) extends OffsetLookup[IO] {
     def endOffsets(conn: ClusterConnection, partitions: Set[TopicPartition]) = IO.pure(ends)
     def beginningOffsets(conn: ClusterConnection, partitions: Set[TopicPartition]) = IO.pure(begins)
     def offsetsForTimes(conn: ClusterConnection, timestamps: Map[TopicPartition, Long]) =
-      IO.pure(Right(BatchResult.complete(timestamps.map((p, _) => p -> Option(Offset.unsafe(7L))))))
-    def leaderless(conn: ClusterConnection, partitions: Set[TopicPartition]) = IO.pure(Right(offline))
+      IO.pure(
+        Right(times.getOrElse(BatchResult.complete(timestamps.map((p, _) => p -> Option(Offset.unsafe(7L))))))
+      )
+    def leaderless(conn: ClusterConnection, partitions: Set[TopicPartition]) =
+      IO.pure(metadataFailure.toLeft(offline))
   }
 
   private def rig(
@@ -140,7 +145,9 @@ final class KafkaGroupAdminPortSuite extends KuiIOSuite {
         )
       ),
       endsSkipped: Map[TopicPartition, SkipReason] = Map.empty,
-      offline: Set[TopicPartition] = Set.empty
+      offline: Set[TopicPartition] = Set.empty,
+      times: Option[BatchResult[TopicPartition, Option[Offset]]] = None,
+      metadataFailure: Option[KuiError] = None
   ): IO[(kui.consumer.domain.GroupAdminPort[IO], FakeAdmin)] =
     for {
       listing <- Ref.of[IO, Either[KuiError, GroupListingResult]](
@@ -156,9 +163,86 @@ final class KafkaGroupAdminPortSuite extends KuiIOSuite {
       deleteSkips <- Ref.of[IO, Map[GroupId, SkipReason]](Map.empty)
       stability <- Ref.of[IO, List[Boolean]](Nil)
       admin = new FakeAdmin(listing, describedRef, committedRef, altered, deleteSkips, stability)
-      lookup = new FakeOffsets(ends.map(batch => BatchResult(batch.values, endsSkipped)), ends, offline)
+      lookup = new FakeOffsets(
+        ends.map(batch => BatchResult(batch.values, endsSkipped)),
+        ends,
+        offline,
+        times,
+        metadataFailure
+      )
       logger <- FakeStructuredLogger[IO]
     } yield (KafkaGroupAdminPort.make[IO](admin, lookup, connection, logger), admin)
+
+  test("a skipped commit lookup is unknown on reads and refused for reset windows") {
+    for {
+      rigged <- rig(committed =
+        Right(BatchResult(Map.empty, Map(orders -> SkipReason.NotAuthorized("commit denied"))))
+      )
+      (port, _) = rigged
+      described <- port.describe(List(orders))
+      window <- port.offsetWindow(orders, ResetScope(topic, Set(partition(0))), None)
+    } yield {
+      assert(!described.getOrElse(fail("describe"))(orders).completeness.committedOffsetsKnown)
+      assertEquals(window.left.toOption.map(_.message), Some("commit denied"))
+    }
+  }
+
+  test("a skipped group description retains its failure rather than disappearing") {
+    for {
+      rigged <- rig(described =
+        Right(BatchResult(Map.empty, Map(orders -> SkipReason.NotAuthorized("describe denied"))))
+      )
+      (port, _) = rigged
+      result <- port.describe(List(orders))
+    } yield assertEquals(result.left.toOption.map(_.message), Some("describe denied"))
+  }
+
+  test("failed timestamp lookups are not absent timestamps; explicit absence remains valid") {
+    for {
+      failed <- rig(times =
+        Some(BatchResult(Map.empty, Map(partition(0) -> SkipReason.NotAuthorized("timestamp denied"))))
+      )
+      refused <- failed._1.offsetWindow(orders, ResetScope(topic, Set(partition(0))), Some(Instant.EPOCH))
+      absent <- rig(times = Some(BatchResult.complete(Map(partition(0) -> None))))
+      accepted <- absent._1.offsetWindow(orders, ResetScope(topic, Set(partition(0))), Some(Instant.EPOCH))
+      missing <- rig(times = Some(BatchResult.empty))
+      incomplete <- missing._1.offsetWindow(orders, ResetScope(topic, Set(partition(0))), Some(Instant.EPOCH))
+    } yield {
+      assertEquals(refused.left.toOption.map(_.message), Some("timestamp denied"))
+      assertEquals(accepted.map(_.atTimestamp), Right(Map(partition(0) -> None)))
+      assert(incomplete.isLeft)
+    }
+  }
+
+  test("missing bounds and commit results cannot create a reset window") {
+    for {
+      missingBounds <- rig(ends = Right(BatchResult.empty))
+      bounds <- missingBounds._1.offsetWindow(orders, ResetScope(topic, Set(partition(0))), None)
+      missingCommit <- rig(committed = Right(BatchResult.empty))
+      commit <- missingCommit._1.offsetWindow(orders, ResetScope(topic, Set(partition(0))), None)
+      noCommit <- rig(committed = Right(BatchResult.complete(Map(orders -> Nil))))
+      absent <- noCommit._1.offsetWindow(orders, ResetScope(topic, Set(partition(0))), None)
+    } yield {
+      assert(bounds.isLeft)
+      assert(commit.isLeft)
+      assertEquals(absent.map(_.committed), Right(Map.empty[TopicPartition, Offset]))
+    }
+  }
+
+  test("a relevant skipped bound refuses a reset window even if a value is also present") {
+    for {
+      rigged <- rig(endsSkipped = Map(partition(0) -> SkipReason.NotAuthorized("end denied")))
+      result <- rigged._1.offsetWindow(orders, ResetScope(topic, Set(partition(0))), None)
+    } yield assertEquals(result.left.toOption.map(_.message), Some("end denied"))
+  }
+
+  test("a failed metadata lookup is not a topic without leaderless partitions") {
+    val error = InfrastructureError.Unreachable("kafka", "metadata unavailable")
+    for {
+      rigged <- rig(metadataFailure = Some(error))
+      result <- rigged._1.offsetWindow(orders, ResetScope(topic, Set(partition(0))), None)
+    } yield assertEquals(result, Left(error))
+  }
 
   test("a described group carries its members, its commits and the lag between them") {
     for {

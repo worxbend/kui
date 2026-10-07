@@ -27,6 +27,11 @@ object KuiTopicAdminResults {
   def describeTopics(values: JMap[String, KafkaFuture[TopicDescription]]): DescribeTopicsResult =
     DescribeTopicsResult.ofTopicNames(values)
 
+  def deleteTopicIds(
+      values: JMap[org.apache.kafka.common.Uuid, KafkaFuture[java.lang.Void]]
+  ): DeleteTopicsResult =
+    DeleteTopicsResult.ofTopicIds(values)
+
   def describeConfigs(values: JMap[ConfigResource, KafkaFuture[Config]]): DescribeConfigsResult =
     new DescribeConfigsResult(values)
 

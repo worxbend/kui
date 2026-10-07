@@ -51,7 +51,8 @@ trait MutationGuard[F[_]] {
       principal: Principal,
       cluster: ClusterId,
       statement: KsqlStatement,
-      operation: String
+      operation: String,
+      outcomeOf: A => MutationOutcome = (_: A) => MutationOutcome.Succeeded
   )(op: F[Either[KuiError, A]]): F[Either[KuiError, A]]
 }
 
@@ -68,7 +69,8 @@ object MutationGuard {
           principal: Principal,
           cluster: ClusterId,
           statement: KsqlStatement,
-          operation: String
+          operation: String,
+          outcomeOf: A => MutationOutcome
       )(op: F[Either[KuiError, A]]): F[Either[KuiError, A]] = {
         val resource = KsqlStatementRecord.resourceOf(cluster)
 
@@ -130,7 +132,12 @@ object MutationGuard {
                   Some("the statement was cancelled after the ksqlDB cluster was asked to run it")
                 )
             }.flatMap {
-              case Right(value) => write(MutationOutcome.Succeeded, None).as(value.asRight[KuiError])
+              case Right(value) =>
+                val outcome = outcomeOf(value)
+                val reason = Option.when(outcome == MutationOutcome.Unknown)(
+                  "the command is accepted but completion is still pending"
+                )
+                write(outcome, reason).as(value.asRight[KuiError])
               case Left(error) =>
                 val outcome =
                   if error.code.httpStatus < 500 then MutationOutcome.Refused else MutationOutcome.Failed

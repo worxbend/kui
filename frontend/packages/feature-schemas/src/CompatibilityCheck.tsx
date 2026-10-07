@@ -30,7 +30,7 @@
  * production, so the control is disabled and the reason is the sentence explaining it — disabled
  * rather than hidden, because a missing control teaches an operator the product cannot do the thing.
  */
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, untrack } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { Banner, Button, Select, StatusPill, type Mutation } from "@kui/kernel";
 import {
@@ -68,13 +68,32 @@ export interface CompatibilityCheckProps {
 }
 
 export function CompatibilityCheck(props: CompatibilityCheckProps): JSX.Element {
-  /*
-   * The panel's own state from the moment it renders. Reading the props on every render would
-   * rewrite the box under the operator's cursor the instant the page behind it re-fetched — which is
-   * the same defect `SmartFilterDialog` avoids, for the same reason.
-   */
-  const [schemaType, setSchemaType] = createSignal(props.initialSchemaType ?? "AVRO");
-  const [definition, setDefinition] = createSignal(props.initialDefinition ?? "");
+  // Initialize late-arriving definitions while pristine, never over an operator's edits.
+  // A different subject is a different proposal and deliberately starts a fresh editor.
+  const [schemaType, setSchemaType] = createSignal("AVRO");
+  const [definition, setDefinition] = createSignal("");
+  const fingerprint = () => JSON.stringify([props.subject, props.level, schemaType(), definition(), props.initialSchemaType, props.initialDefinition]);
+  // Preloaded story results describe the initial inputs; live results are bound at submission.
+  const [submitted, setSubmitted] = createSignal<string | undefined>(untrack(() =>
+    JSON.stringify([props.subject, props.level, props.initialSchemaType ?? "AVRO", props.initialDefinition ?? "", props.initialSchemaType, props.initialDefinition]),
+  ));
+  const resultCurrent = () => submitted() === fingerprint();
+  let dirty = false;
+  let subject: string | undefined;
+  createEffect(
+    () => [props.subject, props.initialSchemaType, props.initialDefinition] as const,
+    ([nextSubject, initialType, initialDefinition]) => {
+      if (subject !== nextSubject) {
+        if (subject !== undefined) setSubmitted(undefined);
+        subject = nextSubject;
+        dirty = false;
+      }
+      if (!dirty) {
+        setSchemaType(initialType ?? "AVRO");
+        setDefinition(initialDefinition ?? "");
+      }
+    },
+  );
 
   const problem = createMemo(() => proposedSchemaProblem(schemaType(), definition()));
   const busy = () => props.state.kind === "running";
@@ -90,7 +109,7 @@ export function CompatibilityCheck(props: CompatibilityCheckProps): JSX.Element 
     });
 
   const verdict = (): CompatibilityVerdict | undefined =>
-    props.state.kind === "done" ? props.state.value : undefined;
+    resultCurrent() && props.state.kind === "done" ? props.state.value : undefined;
 
   return (
     <section class="kui-schema-check" aria-label={`Check a schema against ${props.subject}`}>
@@ -118,7 +137,7 @@ export function CompatibilityCheck(props: CompatibilityCheckProps): JSX.Element 
           size="sm"
           value={schemaType()}
           options={SCHEMA_TYPES.map((one) => ({ value: one, label: one }))}
-          onChange={setSchemaType}
+          onChange={(value) => { dirty = true; setSubmitted(undefined); setSchemaType(value); }}
         />
         <span class="kui-schema-check__against">
           Checked against the latest registered version of{" "}
@@ -140,7 +159,7 @@ export function CompatibilityCheck(props: CompatibilityCheckProps): JSX.Element 
           autocorrect="off"
           autocomplete="off"
           value={definition()}
-          onInput={(event) => setDefinition(event.currentTarget.value)}
+          onInput={(event) => { dirty = true; setSubmitted(undefined); setDefinition(event.currentTarget.value); }}
         />
       </label>
 
@@ -173,16 +192,17 @@ export function CompatibilityCheck(props: CompatibilityCheckProps): JSX.Element 
           <Button
             variant="secondary"
             icon="check"
-            onClick={() =>
-              props.onCheck({ schemaType: schemaType(), definition: definition() })
-            }
+            onClick={() => {
+              setSubmitted(fingerprint());
+              props.onCheck({ schemaType: schemaType(), definition: definition() });
+            }}
           >
             Check compatibility
           </Button>
         </Show>
       </div>
 
-      <Show when={props.state.kind === "forbidden" || props.state.kind === "failed"}>
+      <Show when={resultCurrent() && (props.state.kind === "forbidden" || props.state.kind === "failed")}>
         <Banner
           tone="danger"
           message={

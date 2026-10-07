@@ -26,7 +26,7 @@
  * most misleading thing this screen could do, because the operator's next action is to go and look
  * at a destination they believe now holds their records.
  *
- * So the answer is read through {@link readingOf} and gets four different panels, and the figures
+ * So the answer is read through {@link readingOf} into distinct panels, and the figures
  * are always drawn as figures. **0 is a fact.** It renders as `0`, never as a blank and never as an
  * em dash — the never-zero rule in the direction it is usually forgotten: a zero that is known is
  * not the same as a number nobody could read, and here the zero is the whole message.
@@ -76,6 +76,7 @@ export interface ResendDialogProps {
   readonly initial?: ResendDraft | undefined;
   readonly onSend: (draft: ResendDraft) => void;
   readonly state: Mutation<ResendOutcome>;
+  readonly destinationBlocked?: ((topic: string) => string | undefined) | undefined;
 }
 
 /** One empty range on partition 0: a form with no rows at all reads as a form that is still loading. */
@@ -135,6 +136,8 @@ export function ResendDialog(props: ResendDialogProps): JSX.Element {
   /** Why the copy cannot be started. Every branch is a sentence, because the button demands one. */
   const blockedReason = (): string | undefined => {
     if (busy()) return "The copy is running.";
+    const denied = props.destinationBlocked?.(draft().toTopic);
+    if (denied !== undefined) return denied;
     const stated = problem();
     if (stated !== undefined) return stated;
     if (typed() !== draft().toTopic) {
@@ -411,12 +414,38 @@ function Receipt(props: {
       </dl>
 
       <p class="kui-resend__receipt-detail">{detailOf(reading(), props.outcome)}</p>
+      <Show when={(props.outcome.failures?.length ?? 0) > 0}>
+        <section aria-label="Failed source records">
+          <h3 class="kui-resend__heading">Failed source records</h3>
+          <ul>
+            <For each={props.outcome.failures}>
+              {(failure) => <li>
+                Partition {failure.partition}, offset {failure.offset}: {failure.error} <code>{failure.code}</code>
+              </li>}
+            </For>
+          </ul>
+        </section>
+      </Show>
+      <Show when={(props.outcome.rangeFailures?.length ?? 0) > 0}>
+        <section aria-label="Incomplete source ranges">
+          <h3 class="kui-resend__heading">Incomplete source ranges</h3>
+          <ul>
+            <For each={props.outcome.rangeFailures}>
+              {(failure) => <li>
+                Partition {failure.range.partition}, from {failure.range.from} until {failure.range.until} (exclusive): {failure.error} <code>{failure.code}</code>
+              </li>}
+            </For>
+          </ul>
+        </section>
+      </Show>
     </div>
   );
 }
 
 function headlineOf(kind: ReturnType<typeof readingOf>["kind"]): string {
   switch (kind) {
+    case "incomplete":
+      return "Copy incomplete";
     case "complete":
       return "Copied";
     case "nothing":
@@ -430,6 +459,12 @@ function headlineOf(kind: ReturnType<typeof readingOf>["kind"]): string {
 
 function detailOf(reading: ReturnType<typeof readingOf>, outcome: ResendOutcome): string {
   switch (reading.kind) {
+    case "incomplete":
+      return (
+        `The server reported failed records or incomplete ranges. ${outcome.written.toLocaleString()} records were written to ${outcome.toTopic} and remain there. ` +
+        "Do not repeat the whole batch: that would duplicate successful writes. Check the destination, resolve the reasons below, " +
+        "then select only the failed source offsets or incomplete ranges for a new copy."
+      );
     case "complete":
       return `Every record your ranges named is now in ${outcome.toTopic}, with the original producer's bytes and headers.`;
     case "nothing":

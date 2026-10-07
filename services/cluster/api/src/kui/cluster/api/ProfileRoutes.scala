@@ -83,11 +83,11 @@ object ProfileRoutes {
       config: SseConfig
   ): ServerEndpoint[Fs2Streams[F], F] =
     ClusterApi.Securing[F](principals, rejections, logger, guard).stream(ClusterStreamEndpoint.endpoint[F]) {
-      _ => _ => _ =>
+      principal => _ => _ =>
         Sse
           .encode(
             Sse.stream(
-              changes[F](registry),
+              visibleChanges[F](registry, principal, guard),
               config,
               ClusterStreamEndpoint.EventName,
               telemetry,
@@ -97,6 +97,21 @@ object ProfileRoutes {
           .asRight[KuiError]
           .pure[F]
     }
+
+  private[api] def visibleChanges[F[_]: Async](
+      registry: ClusterRegistry[F],
+      principal: kui.security.Principal,
+      guard: RbacGuard[F]
+  ): Stream[F, SseEvent] =
+    changes[F](registry).evalFilter(event =>
+      event.data.hcursor.get[String]("id") match {
+        case Left(_) => false.pure[F]
+        case Right(id) =>
+          guard
+            .authorize(principal, ProfileEndpoints.profile, s"/internal/v1/clusters/$id/profile")
+            .map(_.isRight)
+      }
+    )
 
   /** The registry's snapshots, as the differences between them.
     *

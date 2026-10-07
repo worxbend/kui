@@ -188,21 +188,16 @@ final class SchemaEndpointClassificationSuite extends munit.FunSuite {
     assertEquals(fromContract, fromAudit)
   }
 
-  test("the registration is a mutation the audit vocabulary cannot name, and this is where that is said") {
-    // ADR-047 §3 wants a MutationRecord for every mutation. `MutationKind` is a sealed enum in
-    // libs/security-core and has no case for a registration, so `RegisterSchemaUseCase` writes a log line
-    // instead and this build ships one unaudited mutation. That is a real gap, and it is asserted rather
-    // than described so that it cannot be forgotten: the day somebody adds
-    // `case RegisterSchema extends MutationKind("schema.subject.version.register")`, this goes red and the
-    // use case has to be given an AuditSink.
+  test("the registration operation matches the structured audit vocabulary") {
+    // The endpoint and its audit record must name the same mutation.
     assertEquals(
       SchemaMutationEndpoints.RegisterVersionOperation,
       RegisterSchemaUseCase.Operation
     )
 
     assert(
-      !MutationKind.values.map(_.operation).contains(SchemaMutationEndpoints.RegisterVersionOperation),
-      "MutationKind now names the registration; give RegisterSchemaUseCase an AuditSink and delete this"
+      MutationKind.values.map(_.operation).contains(SchemaMutationEndpoints.RegisterVersionOperation),
+      "schema registration must have a structured audit kind"
     )
   }
 

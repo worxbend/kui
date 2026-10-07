@@ -3,6 +3,7 @@ package kui.alerts.app
 import cats.Parallel
 import cats.effect.kernel.{Async, Resource}
 import cats.syntax.all.*
+import fs2.Stream
 import fs2.io.file.Files
 import org.typelevel.log4cats.{LoggerFactory, StructuredLogger}
 import sttp.capabilities.fs2.Fs2Streams
@@ -20,8 +21,9 @@ import kui.alerts.infrastructure.{
   LoggingAcknowledgementSink
 }
 import kui.cache.CacheMetrics
+import kui.cluster.client.ClusterProfiles
 import kui.config.store.ConfigStoreResource
-import kui.config.{AlertThresholds, AlertsConfig, ClusterConfig, StoreConfig}
+import kui.config.{AlertThresholds, AlertsConfig, ClusterConfig, KuiConfig, StoreConfig, UrlPolicy}
 import kui.contracts.capability.ServiceCapabilities
 import kui.http.ProcessLoggerFactory
 import kui.http.health.ReadinessCheck
@@ -67,6 +69,39 @@ final case class AlertsServer[F[_]](
   */
 object AlertsWiring {
 
+  /** Standalone production entry point: the remote profile resource outlives its collectors. */
+  def standalone[F[_]: {Async, Parallel, Files}](
+      config: KuiConfig,
+      telemetry: Telemetry[F],
+      principals: PrincipalCodec[F],
+      logger: StructuredLogger[F],
+      policy: UrlPolicy = UrlPolicy.fromEnv(sys.env)
+  ): Resource[F, AlertsServer[F]] =
+    ClusterProfileSource
+      .remote(config, telemetry, principals, logger, policy)
+      .flatMap(profiles => fromProfiles(profiles, config, telemetry, principals, logger))
+
+  /** Both deployment shapes attach an authoritative, snapshot-on-subscription source here. */
+  def fromProfiles[F[_]: {Async, Parallel, Files}](
+      profiles: ClusterProfiles[F],
+      config: KuiConfig,
+      telemetry: Telemetry[F],
+      principals: PrincipalCodec[F],
+      logger: StructuredLogger[F]
+  ): Resource[F, AlertsServer[F]] =
+    Resource.eval(ClusterProfileSource.snapshot(profiles)).flatMap { current =>
+      make(
+        current,
+        config.alerts,
+        config.store,
+        config.rbac,
+        telemetry,
+        principals,
+        logger,
+        clusterChanges = Some(ClusterProfileSource.changes(profiles))
+      )
+    }
+
   /** The instrumentation scope this service's tracer and meter are named after. */
   val Instrumentation: String = AlertsService.Instrumentation
 
@@ -82,6 +117,9 @@ object AlertsWiring {
     * @param alerts
     *   the `kui.alerts` section: `retention` bounds the store, `evaluationInterval` is the cadence, and
     *   `thresholds` are the five numbers the rules compare against.
+    * @param clusterChanges
+    *   the shared profile source's resolved snapshots, emitting its current snapshot on subscription. Each
+    *   change replaces only affected collectors and updates authorization and capability lookups.
     */
   def make[F[_]: {Async, Parallel, Files}](
       clusters: List[ClusterConfig],
@@ -90,7 +128,8 @@ object AlertsWiring {
       rbac: RbacPolicy,
       telemetry: Telemetry[F],
       principals: PrincipalCodec[F],
-      logger: StructuredLogger[F]
+      logger: StructuredLogger[F],
+      clusterChanges: Option[Stream[F, List[ClusterConfig]]] = None
   ): Resource[F, AlertsServer[F]] = {
     given LoggerFactory[F] = ProcessLoggerFactory.of(logger)
 
@@ -99,11 +138,15 @@ object AlertsWiring {
       rejections <- Resource.eval(PrincipalVerification.rejectionCounter[F](meter))
       interceptors <- Resource.eval(AlertsApi.interceptors[F](telemetry, rejections, logger))
 
-      profiles = new ConfiguredProfileSource[F](clusters)
       cacheMetrics <- Resource.eval(CacheMetrics.otel4s[F](meter))
       store <- alertStore[F](storeConfig, alerts, cacheMetrics, logger)
 
-      _ <- evaluators[F](clusters, alerts, store, telemetry, logger)
+      collectors <- ClusterCollectors.resource[F, Unit](clusters)(cluster =>
+        evaluators[F](List(cluster), alerts, store, telemetry, logger)
+      )
+      _ <- collectors.watch(clusterChanges.getOrElse(Stream.empty), logger)
+      currentClusters = collectors.current.map(_.values.toList.map(_._1))
+      profiles = ConfiguredProfileSource.live[F](currentClusters)
 
       audit = LoggingAcknowledgementSink.make[F](logger)
       // Who did it is not wired here. It is a parameter of every `guard` call, threaded from the
@@ -121,13 +164,24 @@ object AlertsWiring {
       readiness = List.empty[ReadinessCheck[F]]
 
       // The permission check this service runs for itself, over the same declaration on the same
-      // endpoints the gateway read (ADR-021). Read-only comes from this process's own `kui.clusters[]`,
+      // endpoints the gateway read (ADR-021). Read-only comes from the current resolved profiles,
       // so an acknowledgement on a read-only cluster is refused here whether or not the gateway was asked.
-      permissions = RbacGuard.fromPolicy[F](
-        rbac,
-        cluster => ClusterFlags(clusters.find(_.id == cluster).exists(_.readOnly)),
-        logger
-      )
+      permissions = new RbacGuard[F] {
+        def authorize(
+            principal: kui.security.Principal,
+            endpoint: sttp.tapir.AnyEndpoint,
+            requestPath: String
+        ): F[Either[kui.kernel.error.KuiError, Unit]] =
+          currentClusters.flatMap(current =>
+            RbacGuard
+              .fromPolicy[F](
+                rbac,
+                cluster => ClusterFlags(current.find(_.id == cluster).forall(_.readOnly)),
+                logger
+              )
+              .authorize(principal, endpoint, requestPath)
+          )
+      }
     } yield AlertsServer(
       routes = AlertsApi.routes[F](
         useCases,

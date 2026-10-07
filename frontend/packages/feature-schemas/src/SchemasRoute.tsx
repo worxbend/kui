@@ -52,6 +52,7 @@ import {
   registerBlockedReason,
   registerSchema,
   setCompatibility,
+  schemaKeys,
   type Compatibility,
   type CompatibilityLevel,
   type ProposedSchema,
@@ -66,8 +67,8 @@ const PageSize = 50;
 export default function Schemas(): JSX.Element {
   const params = useParams<{ readonly clusterId?: string; readonly subject?: string }>();
   return (
-    <Show when={params.clusterId} fallback={<NoCluster />}>
-      {(clusterId) => <Registry clusterId={clusterId()} subject={params.subject} />}
+    <Show keyed when={params.clusterId} fallback={<NoCluster />}>
+      {(clusterId) => <Registry clusterId={clusterId} subject={params.subject} />}
     </Show>
   );
 }
@@ -210,7 +211,7 @@ function Registry(props: {
 
   const subjects = useQuery<SubjectListResult>({
     key: () =>
-      `schemas:subjects:${props.clusterId}:${search()}:${direction()}:${page()}:${PageSize}`,
+      schemaKeys.subjects(props.clusterId, { q: search(), direction: direction(), page: page(), pageSize: PageSize }),
     load: () =>
       fetchSubjects(kui.api, props.clusterId, {
         q: search(),
@@ -221,7 +222,7 @@ function Registry(props: {
   });
 
   const globalLevel = useQuery<Compatibility>({
-    key: () => `schemas:global:${props.clusterId}`,
+    key: () => schemaKeys.global(props.clusterId),
     load: () => fetchGlobalCompatibility(kui.api, props.clusterId),
   });
 
@@ -234,7 +235,10 @@ function Registry(props: {
     registerSchema(kui.api, props.clusterId, subject, proposed),
   );
 
-  const mayRegister = (): boolean => kui.permits(Actions.SchemaCreate);
+  const registerRefusal = (subject?: string): string | undefined => kui.writeBlocked !== undefined
+    ? kui.writeBlocked(props.clusterId, Actions.SchemaCreate, subject)
+    : registerBlockedReason(kui.permits(Actions.SchemaCreate, subject));
+  const mayRegister = (): boolean => registerRefusal() === undefined;
 
   createEffect(
     () => subjects.state(),
@@ -251,7 +255,11 @@ function Registry(props: {
 
   const global = (): Compatibility | undefined => optional(globalLevel.state());
 
-  const mayEditGlobal = (): boolean => kui.permits(Actions.SchemaModifyGlobalCompatibility);
+  const globalRefusal = (): string | undefined => kui.writeBlocked !== undefined
+    ? kui.writeBlocked(props.clusterId, Actions.SchemaModifyGlobalCompatibility)
+    : writeBlockedReason({ permitted: kui.permits(Actions.SchemaModifyGlobalCompatibility), readOnly: false,
+        action: "change the registry's compatibility level" });
+  const mayEditGlobal = (): boolean => globalRefusal() === undefined;
 
   const listHref = (): string =>
     `${kui.paths.clusters()}/${encodeURIComponent(props.clusterId)}/schemas`;
@@ -287,19 +295,15 @@ function Registry(props: {
       onSetGlobal={
         mayEditGlobal()
           ? (level) => {
+              if (!mayEditGlobal()) return;
               void setGlobal.run(level).then((outcome) => {
                 if (outcome.kind !== "done") return;
-                globalLevel.reload();
                 notifyLevelSet(level, "every inheriting subject");
               });
             }
           : undefined
       }
-      setGlobalDisabledReason={writeBlockedReason({
-        permitted: mayEditGlobal(),
-        readOnly: false,
-        action: "change the registry's compatibility level",
-      })}
+      setGlobalDisabledReason={globalRefusal()}
       state={setGlobal.state()}
       failure={failureOf(subjects.state()) ?? mutationFailure(setGlobal.state())}
     />
@@ -321,15 +325,17 @@ function Registry(props: {
         globalLevel={global()?.level}
         loading={subjects.state().kind === "loading"}
         onRegister={mayRegister() ? () => setRegistering(true) : undefined}
-        registerDisabledReason={registerBlockedReason(mayRegister())}
+        registerDisabledReason={registerRefusal()}
         detail={
-          props.subject === undefined ? undefined : (
-            <SubjectPane
-              clusterId={props.clusterId}
-              subject={props.subject}
-              listHref={listHref()}
-            />
-          )
+          props.subject === undefined ? undefined : <Show keyed when={props.subject}>
+            {(subject) => (
+              <SubjectPane
+                clusterId={props.clusterId}
+                subject={subject}
+                listHref={listHref()}
+              />
+            )}
+          </Show>
         }
       />
 
@@ -352,21 +358,15 @@ function Registry(props: {
           }}
           state={register.state()}
           knownSubjects={result().subjects.map((row) => row.subject)}
+          writeBlocked={registerRefusal}
           onRegister={(subject, proposed) => {
+            if (registerRefusal(subject) !== undefined) return;
             void register.run(subject, proposed).then((outcome) => {
               if (outcome.kind !== "done") return;
               setRegistering(false);
               register.reset();
-              /*
-               * The refresh and the toast, in that order and both of them here.
-               *
-               * The list is paged and searched by the registry, so a newly registered subject is
-               * on screen only if this page is where the registry puts it — which is why the toast
-               * says what happened rather than the list being left to imply it. `reload` re-asks
-               * with the query that is in force; it does not reset the search or the page, because
-               * throwing away somebody's filter is a worse surprise than a row one page away.
-               */
-              subjects.reload();
+              // The data layer invalidates every affected query before resolving. Keep the
+              // current search/page and announce success even if the new subject is on another page.
               notifyRegistered(outcome.value);
             });
           }}
@@ -385,7 +385,7 @@ function SubjectPane(props: {
   const location = useLocation();
 
   const versions = useQuery<readonly number[]>({
-    key: () => `schemas:versions:${props.clusterId}:${props.subject}`,
+    key: () => schemaKeys.versions(props.clusterId, props.subject),
     load: () => fetchVersions(kui.api, props.clusterId, props.subject),
   });
 
@@ -398,12 +398,12 @@ function SubjectPane(props: {
   const version = createMemo(() => new URLSearchParams(location.search).get("version") ?? "latest");
 
   const schema = useQuery<SchemaVersion>({
-    key: () => `schemas:schema:${props.clusterId}:${props.subject}:${version()}`,
+    key: () => schemaKeys.schema(props.clusterId, props.subject, version()),
     load: () => fetchSchema(kui.api, props.clusterId, props.subject, version()),
   });
 
   const compatibility = useQuery<Compatibility>({
-    key: () => `schemas:compat:${props.clusterId}:${props.subject}`,
+    key: () => schemaKeys.compatibility(props.clusterId, props.subject),
     load: () => fetchSubjectCompatibility(kui.api, props.clusterId, props.subject),
   });
 
@@ -431,7 +431,11 @@ function SubjectPane(props: {
     },
   );
 
-  const mayEdit = (): boolean => kui.permits(Actions.SchemaEdit, props.subject);
+  const editRefusal = (): string | undefined => kui.writeBlocked !== undefined
+    ? kui.writeBlocked(props.clusterId, Actions.SchemaEdit, props.subject)
+    : writeBlockedReason({ permitted: kui.permits(Actions.SchemaEdit, props.subject), readOnly: false,
+        action: "change this subject's compatibility level" });
+  const mayEdit = (): boolean => editRefusal() === undefined;
 
   return (
     <SubjectPage
@@ -447,19 +451,15 @@ function SubjectPane(props: {
       onSetCompatibility={
         mayEdit()
           ? (level) => {
+              if (!mayEdit()) return;
               void setLevel.run(level).then((outcome) => {
                 if (outcome.kind !== "done") return;
-                compatibility.reload();
                 notifyLevelSet(level, props.subject);
               });
             }
           : undefined
       }
-      setCompatibilityDisabledReason={writeBlockedReason({
-        permitted: mayEdit(),
-        readOnly: false,
-        action: "change this subject's compatibility level",
-      })}
+      setCompatibilityDisabledReason={editRefusal()}
       state={setLevel.state()}
       failure={failureOf(schema.state()) ?? mutationFailure(setLevel.state())}
       onCheckCompatibility={(proposed) => void check.run(proposed)}

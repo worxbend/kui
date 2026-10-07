@@ -56,7 +56,7 @@
  * courtesy and never a substitute for it.
  */
 
-import type { ApiResult, KuiApiClient } from "@kui/api";
+import type { ApiResult, KuiApiClient, components } from "@kui/api";
 
 /**
  * A half-open window `[from, until)` of one partition.
@@ -194,12 +194,16 @@ export interface ResendOutcome {
   readonly toTopic: string;
   readonly read: number;
   readonly written: number;
+  readonly failures?: components["schemas"]["ResendResultDto"]["failures"];
+  readonly rangeFailures?: components["schemas"]["ResendResultDto"]["rangeFailures"];
   /** How many the ranges named, when that was knowable. */
   readonly requested?: number | undefined;
 }
 
 /** How a finished resend should be read. */
 export type ResendReading =
+  /** Explicit record or range failures outrank counts, including equal or zero counts. */
+  | { readonly kind: "incomplete" }
   /** Everything named was read and written. */
   | { readonly kind: "complete" }
   /** Nothing at all was copied — a 200 that copied no record. Never drawn as success. */
@@ -210,14 +214,16 @@ export type ResendReading =
   | { readonly kind: "partial"; readonly lost: number };
 
 /**
- * Which of the four readings this tally is.
+ * Which reading this receipt supports.
  *
- * The order is the point. "Nothing was copied" is checked first because it is the state that a bare
- * success message would hide completely; a partial write is checked before a short read because a
- * copy that lost records mid-flight is a worse fact than a source that had fewer than expected, and
- * a tally can be both.
+ * Explicit failures outrank all counts: a failed range can coexist with equal read/write counts,
+ * or with zeroes, neither of which proves retention or success. Without reported failures, keep
+ * empty copies, partial writes, short reads, and complete copies distinct.
  */
 export function readingOf(outcome: ResendOutcome): ResendReading {
+  if ((outcome.failures?.length ?? 0) > 0 || (outcome.rangeFailures?.length ?? 0) > 0) {
+    return { kind: "incomplete" };
+  }
   if (outcome.read === 0 && outcome.written === 0) {
     return {
       kind: "nothing",
@@ -265,6 +271,8 @@ export async function resend(
       toTopic: answer.value.toTopic,
       read: answer.value.read,
       written: answer.value.written,
+      failures: Array.from(answer.value.failures ?? []),
+      rangeFailures: Array.from(answer.value.rangeFailures ?? []),
       ...(requested === undefined ? {} : { requested }),
     },
   };

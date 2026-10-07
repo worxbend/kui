@@ -2,18 +2,25 @@ package kui.http.upstream
 
 import java.util.concurrent.TimeoutException
 
-import cats.effect.IO
+import scala.concurrent.duration.DurationInt
+import scala.jdk.CollectionConverters.*
+
 import cats.effect.kernel.Ref
+import cats.effect.{Deferred, IO}
 import io.opentelemetry.api.trace.SpanKind as OtelSpanKind
 import munit.CatsEffectSuite
 import org.typelevel.otel4s.metrics.MeterProvider
+import org.typelevel.otel4s.oteljava.testkit.metrics.MetricsTestkit
 import org.typelevel.otel4s.oteljava.testkit.trace.TracesTestkit
+import org.typelevel.otel4s.trace.TracerProvider
 import sttp.client4.impl.cats.implicits.*
 import sttp.client4.testing.{BackendStub, ResponseStub}
 import sttp.client4.{basicRequest, Backend, GenericRequest}
 import sttp.model.{StatusCode, Uri}
 
+import kui.kernel.ServiceId
 import kui.observability.{Telemetry, UpstreamInstrumentation, UpstreamOutcome}
+import kui.testkit.fakes.FakeStructuredLogger
 
 /** The client-side half of the observability standard, which had no suite anywhere.
   *
@@ -103,6 +110,96 @@ final class UpstreamInstrumentationSuite extends CatsEffectSuite {
           header,
           Some(s"00-${span.getTraceId}-${span.getSpanId}-01")
         )
+      }
+    }
+  }
+
+  test("logical duration counts once and attempt duration counts each retry separately") {
+    MetricsTestkit.inMemory[IO]().use { testkit =>
+      val telemetry = Telemetry.fromProviders(TracerProvider.noop[IO], testkit.meterProvider)
+      for {
+        stub <- UpstreamFixture.recording(ResponseKind.Refused)
+        logger <- FakeStructuredLogger[IO]
+        _ <- UpstreamClient
+          .resource(
+            UpstreamFixture.single().copy(retryBase = 1.millisecond),
+            stub.backend,
+            telemetry,
+            ServiceId.unsafe("kui-schema"),
+            logger
+          )
+          .use(client => basicRequest.get(target).send(client.backend).attempt)
+        metrics <- testkit.collectMetrics
+      } yield {
+        val counts =
+          metrics.map(m => m.getName -> m.getHistogramData.getPoints.asScala.map(_.getCount).sum).toMap
+        assertEquals(counts.get("kui.upstream.duration"), Some(1L))
+        assertEquals(counts.get("kui.upstream.attempt.duration"), Some(3L))
+      }
+    }
+  }
+
+  test("logical metrics retain deadline and circuit-open outcomes") {
+    MetricsTestkit.inMemory[IO]().use { testkit =>
+      val telemetry = Telemetry.fromProviders(TracerProvider.noop[IO], testkit.meterProvider)
+      for {
+        stub <- UpstreamFixture.recording(ResponseKind.Never)
+        logger <- FakeStructuredLogger[IO]
+        config = UpstreamFixture
+          .single()
+          .copy(callTimeout = 20.milliseconds, failureThreshold = kui.kernel.PositiveInt.unsafe(1))
+        _ <- UpstreamClient
+          .resource(config, stub.backend, telemetry, ServiceId.unsafe("kui-schema"), logger)
+          .use { client =>
+            basicRequest.get(target).send(client.backend).attempt >>
+              basicRequest.get(target).send(client.backend).attempt
+          }
+        metrics <- testkit.collectMetrics
+      } yield {
+        val points = metrics
+          .filter(_.getName == "kui.upstream.duration")
+          .flatMap(_.getHistogramData.getPoints.asScala)
+        val key = io.opentelemetry.api.common.AttributeKey.stringKey("outcome")
+        assertEquals(
+          points.map(p => p.getAttributes.get(key) -> p.getCount).toMap,
+          Map("timeout" -> 1L, "circuit_open" -> 1L)
+        )
+      }
+    }
+  }
+
+  test("one logical span covers retries and records external cancellation") {
+    TracesTestkit.inMemory[IO]().use { testkit =>
+      val telemetry = Telemetry.fromProviders(testkit.tracerProvider, MeterProvider.noop[IO])
+      for {
+        stub <- UpstreamFixture.recording(ResponseKind.Refused)
+        logger <- FakeStructuredLogger[IO]
+        _ <- UpstreamClient
+          .resource(
+            UpstreamFixture.single().copy(retryBase = 1.millisecond),
+            stub.backend,
+            telemetry,
+            ServiceId.unsafe("kui-schema"),
+            logger
+          )
+          .use(client => basicRequest.get(target).send(client.backend).attempt)
+        entered <- Deferred[IO, Unit]
+        hung = BackendStub[IO](summon[sttp.monad.MonadError[IO]]).whenAnyRequest.thenRespondF { _ =>
+          entered.complete(()).void >> IO.never[sttp.client4.Response[sttp.client4.testing.StubBody]]
+        }
+        _ <- UpstreamClient
+          .resource(UpstreamFixture.single(), hung, telemetry, ServiceId.unsafe("kui-schema"), logger)
+          .use { client =>
+            for {
+              fiber <- basicRequest.get(target).send(client.backend).start
+              _ <- entered.get >> fiber.cancel
+            } yield ()
+          }
+        spans <- testkit.finishedSpans
+      } yield {
+        assertEquals(spans.size, 2)
+        val key = io.opentelemetry.api.common.AttributeKey.stringKey("outcome")
+        assertEquals(spans.map(_.getAttributes.get(key)), List("unreachable", "canceled"))
       }
     }
   }

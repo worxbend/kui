@@ -6,7 +6,7 @@ import cats.effect.kernel.Sync
 import cats.syntax.all.*
 import sttp.tapir.server.ServerEndpoint
 
-import kui.config.{GatewayConfig, ServerConfig}
+import kui.config.{AuthType, GatewayConfig, ServerConfig}
 import kui.gateway.contract.InfoEndpoints
 import kui.gateway.contract.dto.{AppInfo, BuildInfoDto}
 import kui.http.BasePath
@@ -39,12 +39,15 @@ object InfoRoutes {
     * leave the process. Sorted rather than in map order so that two identical deployments produce byte-
     * identical documents, which is what makes the golden file meaningful.
     */
-  def appInfo(server: ServerConfig, gateway: GatewayConfig, build: BuildInfoDto): AppInfo =
+  def appInfo(
+      server: ServerConfig,
+      gateway: GatewayConfig,
+      build: BuildInfoDto,
+      authType: AuthType = AuthType.Disabled
+  ): AppInfo =
     AppInfo(
       build = build,
-      // `disabled` is the only value CFG-001 accepts in M0. It is read from the shape of the deployment
-      // rather than hard-coded as a literal at the call site, so M6 changes one function.
-      authType = AppInfo.AuthDisabled,
+      authType = authType.wire,
       // Normalised, so `"/"` and `""` — which an operator writes interchangeably — produce the same
       // document, and the shell does not have to cope with a double slash it did not create.
       basePath = BasePath.normalize(server.basePath),
@@ -71,9 +74,13 @@ object InfoRoutes {
     )
 
   /** The route, unprefixed. `GatewayApi` applies `/api/v1` over the whole list. */
-  def apply[F[_]: Sync](server: ServerConfig, gateway: GatewayConfig): List[ServerEndpoint[Any, F]] =
+  def apply[F[_]: Sync](
+      server: ServerConfig,
+      gateway: GatewayConfig,
+      authType: AuthType = AuthType.Disabled
+  ): List[ServerEndpoint[Any, F]] =
     List(
-      InfoEndpoints.info.serverLogicSuccess[F](_ => appInfo(server, gateway, buildInfo).pure[F])
+      InfoEndpoints.info.serverLogicSuccess[F](_ => appInfo(server, gateway, buildInfo, authType).pure[F])
     )
 
   private def parseInstant(raw: String): Instant =

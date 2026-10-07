@@ -119,6 +119,16 @@ final class KafkaBrowseConsumer[F[_]: Async] private (
         .map(rawRecordOf)
     }
 
+  def positions: F[Either[KuiError, Map[PartitionId, Long]]] =
+    attempt("position") {
+      consumer
+        .assignment()
+        .asScala
+        .toList
+        .map(partition => PartitionId.unsafe(partition.partition) -> consumer.position(partition))
+        .toMap
+    }
+
   private def attempt[A](operation: String)(thunk: => A): F[Either[KuiError, A]] =
     Async[F]
       .blocking(thunk)

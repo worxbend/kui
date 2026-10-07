@@ -116,6 +116,8 @@ object ClusterApi {
     // capability from the server" — and `ServerEndpoint` is contravariant in that parameter, so they
     // fit into a list typed on `Fs2Streams` that the streaming endpoints need.
     HealthEndpoints.make[F](readiness, capabilityDocument[F](capabilities, logger)) ++
+      // The literal /clusters/stream must win over /clusters/{clusterId}: "stream" is a valid id.
+      ProfileRoutes[F](registry, principals, rejections, telemetry, logger, guard) ++
       ClusterRoutes[F](registry, topology, brokers, principals, rejections, logger, guard) ++
       ClusterWriteRoutes[F](
         write,
@@ -126,8 +128,7 @@ object ClusterApi {
         guard,
         ClusterWriteRoutes.permissionFrom(rbac)
       ) ++
-      UiSettingsRoutes[F](uiSettings, principals, rejections, logger, guard) ++
-      ProfileRoutes[F](registry, principals, rejections, telemetry, logger, guard)
+      UiSettingsRoutes[F](uiSettings, principals, rejections, logger, guard)
 
   /** The cross-cutting chain, outermost first, exactly as `libs/http`'s server wants it.
     *

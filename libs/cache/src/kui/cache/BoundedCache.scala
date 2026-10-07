@@ -5,6 +5,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 import scala.concurrent.duration.FiniteDuration
 
+import cats.effect.std.Mutex
 import cats.effect.syntax.all.*
 import cats.effect.{Async, Clock, Deferred, Ref, Resource, Sync}
 import cats.syntax.all.*
@@ -97,7 +98,12 @@ object BoundedCache {
         clock <- Clock[F].monotonic.flatMap(d => Sync[F].delay(new AtomicLong(d.toNanos)))
         underlying <- Sync[F].delay(build[K, V](maxSize, ttl, clock))
         inFlight <- Ref.of[F, Map[K, Deferred[F, Option[Either[Throwable, V]]]]](Map.empty)
-      } yield new Impl[F, K, V](name, cluster, underlying, inFlight, clock, metrics): BoundedCache[F, K, V]
+        lock <- Mutex[F]
+      } yield new Impl[F, K, V](name, cluster, underlying, inFlight, clock, metrics, lock): BoundedCache[
+        F,
+        K,
+        V
+      ]
     )(cache => cache.invalidateAll)
 
   /** Caffeine reads `System.nanoTime` unless it is given a ticker, and `System.nanoTime` is not the clock the
@@ -125,7 +131,8 @@ object BoundedCache {
       underlying: CaffeineCache[K, V],
       inFlight: Ref[F, Map[K, Deferred[F, Option[Either[Throwable, V]]]]],
       clock: AtomicLong,
-      metrics: CacheMetrics[F]
+      metrics: CacheMetrics[F],
+      lock: Mutex[F]
   ) extends BoundedCache[F, K, V] {
 
     /** Hands the effect's current time to Caffeine's ticker before anything reads or writes. */
@@ -156,13 +163,16 @@ object BoundedCache {
     private def joinOrLoad(key: K)(load: => F[V]): F[V] =
       Async[F].uncancelable { poll =>
         Deferred[F, Option[Either[Throwable, V]]].flatMap { candidate =>
-          inFlight
-            .modify { current =>
-              current.get(key) match {
-                case Some(running) => (current, Left(running))
-                case None => (current.updated(key, candidate), Right(()))
-              }
-            }
+          lock.lock
+            .surround(
+              inFlight
+                .modify { current =>
+                  current.get(key) match {
+                    case Some(running) => (current, Left(running))
+                    case None => (current.updated(key, candidate), Right(()))
+                  }
+                }
+            )
             .flatMap {
               case Left(running) =>
                 poll(running.get).flatMap {
@@ -173,8 +183,19 @@ object BoundedCache {
                 }
 
               case Right(()) =>
-                def complete(result: Option[Either[Throwable, V]]): F[Unit] =
-                  candidate.complete(result).void >> inFlight.update(_ - key)
+                // The gate is the generation token. Publication and invalidation share this short lock;
+                // loaders never hold it while doing I/O, so unrelated keys still load concurrently.
+                def complete(result: Option[Either[Throwable, V]]): F[Boolean] =
+                  lock.lock.surround {
+                    inFlight.get.flatMap { current =>
+                      if current.get(key).contains(candidate) then
+                        result.traverse_(
+                          _.toOption.traverse_(value => tick >> Sync[F].delay(underlying.put(key, value)))
+                        ) >>
+                          inFlight.update(_ - key) >> candidate.complete(result).as(true)
+                      else candidate.complete(None).as(false)
+                    }
+                  }
 
                 // Close the race between the fast-path miss and registering this flight: an earlier leader
                 // may have populated the cache before this caller won the empty slot.
@@ -182,15 +203,16 @@ object BoundedCache {
                   peek(key).flatMap {
                     case Some(value) => metrics.hit(name, cluster).as(value)
                     case None =>
-                      metrics.miss(name, cluster) >> load.flatMap(value => put(key, value).as(value))
+                      metrics.miss(name, cluster) >> load
                   }
 
                 poll(readThrough.attempt)
-                  .onCancel(complete(None))
-                  .flatMap {
-                    case Right(value) => complete(Some(Right(value))).as(value)
-                    case Left(failure) =>
-                      complete(Some(Left(failure))) >> Async[F].raiseError(failure)
+                  .onCancel(complete(None).void)
+                  .flatMap { result =>
+                    complete(Some(result)).flatMap {
+                      case true => Async[F].fromEither(result)
+                      case false => poll(getOrLoad(key)(load))
+                    }
                   }
             }
         }
@@ -198,9 +220,21 @@ object BoundedCache {
 
     def put(key: K, value: V): F[Unit] = tick >> Sync[F].delay(underlying.put(key, value))
 
-    def invalidate(key: K): F[Unit] = Sync[F].delay(underlying.invalidate(key))
+    def invalidate(key: K): F[Unit] = Async[F].uncancelable { _ =>
+      lock.lock.surround {
+        inFlight.modify(current => (current - key, current.get(key))).flatMap { old =>
+          Sync[F].delay(underlying.invalidate(key)) >> old.traverse_(_.complete(None).void)
+        }
+      }
+    }
 
-    def invalidateAll: F[Unit] = Sync[F].delay(underlying.invalidateAll())
+    def invalidateAll: F[Unit] = Async[F].uncancelable { _ =>
+      lock.lock.surround {
+        inFlight.getAndSet(Map.empty).flatMap { old =>
+          Sync[F].delay(underlying.invalidateAll()) >> old.values.toList.traverse_(_.complete(None).void)
+        }
+      }
+    }
 
     def stats: F[CacheStats] = tick >> Sync[F].delay {
       // Caffeine's own counters are approximate under concurrency and are enough for this: the numbers

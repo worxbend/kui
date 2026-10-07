@@ -7,6 +7,7 @@ import scala.concurrent.duration.{DurationInt, FiniteDuration}
 import cats.data.NonEmptyList
 import cats.effect.IO
 import cats.effect.kernel.Resource
+import fs2.Stream
 import io.circe.Json
 import io.circe.parser.parse
 import org.typelevel.otel4s.metrics.Counter
@@ -15,6 +16,8 @@ import sttp.capabilities.fs2.Fs2Streams
 import sttp.client4.StreamBackend
 import sttp.client4.impl.cats.implicits.*
 import sttp.client4.testing.StreamBackendStub
+import sttp.tapir.server.ServerEndpoint
+import sttp.tapir.server.interceptor.Interceptor
 import sttp.tapir.server.stub4.TapirStreamStubInterpreter
 
 import kui.cluster.application.{
@@ -48,7 +51,9 @@ final case class ClusterTestServer(
     backend: StreamBackend[IO, Fs2Streams[IO]],
     logger: FakeStructuredLogger[IO],
     principals: PrincipalCodec[IO],
-    telemetry: OtelJavaTestkit[IO]
+    telemetry: OtelJavaTestkit[IO],
+    routes: List[ServerEndpoint[Fs2Streams[IO], IO]] = Nil,
+    interceptors: List[Interceptor[IO]] = Nil
 )
 
 object ClusterTestServer {
@@ -129,7 +134,8 @@ object ClusterTestServer {
       // defaults to allowing everything so that a suite about clusters is about clusters; the suite that
       // is about the guard passes a real policy.
       rbac: RbacPolicy = RbacPolicy.Disabled,
-      clusterFlags: Map[ClusterId, ClusterFlags] = Map.empty
+      clusterFlags: Map[ClusterId, ClusterFlags] = Map.empty,
+      published: Option[Stream[IO, kui.cluster.application.RegistrySnapshot]] = None
   ): Resource[IO, ClusterTestServer] =
     OtelJavaTestkit.inMemory[IO]().evalMap { testkit =>
       for {
@@ -141,7 +147,7 @@ object ClusterTestServer {
           logger
         )
       } yield {
-        val registry = new ClusterFixtures.StubRegistry(profiles)
+        val registry = new ClusterFixtures.StubRegistry(profiles, published)
         val uiSettings = new UiSettingsUseCase[IO](
           registry,
           new UiSettingsStore[IO] {
@@ -183,7 +189,9 @@ object ClusterTestServer {
             .backend(),
           logger,
           codec,
-          testkit
+          testkit,
+          routes,
+          interceptors
         )
       }
     }

@@ -12,10 +12,10 @@ import kui.http.ServiceMain
   *
   * ==It starts even when nothing is configured==
   *
-  * A deployment with no `kui.clusters[]` still starts this process and still serves its routes. There is
-  * nothing to evaluate and the feeds are empty, which is a true statement about a deployment with no
-  * clusters; a process that exited because it had nothing to watch would restart-loop in exactly the
-  * deployment an operator is halfway through configuring.
+  * An empty authoritative profile list still starts this process and serves empty feeds. Standalone
+  * deployments must name `kui.clusterProfiles.url` (or `kui.gateway.services.cluster.url`); local
+  * `kui.clusters[]` is not a substitute for that live source. A temporarily unreachable profile service is
+  * handled by the shared client's last-known-state and reconnect policy.
   *
   * ==Why `kui.alerts` has no on-switch to read here==
   *
@@ -31,15 +31,7 @@ object Main extends IOApp {
       args,
       (config, telemetry, principals, logger) =>
         AlertsWiring
-          .make[IO](
-            config.clusters,
-            config.alerts,
-            config.store,
-            config.rbac,
-            telemetry,
-            principals,
-            logger
-          )
+          .standalone[IO](config, telemetry, principals, logger)
           .map(service => ServiceMain.Serving(service.routes, service.interceptors))
     )
 }

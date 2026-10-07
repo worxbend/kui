@@ -8,7 +8,7 @@ import kui.cache.{BoundedCache, CacheMetrics}
 import kui.config.SafeUrl
 import kui.kernel.error.{InfrastructureError, KuiError}
 import kui.kernel.{ClusterId, TopicName}
-import kui.serde.{DeserializeResult, PayloadKind, Serde, Target}
+import kui.serde.{DeserializeResult, PayloadKind, Serde, SerdeAutodetect, SerdeName, Target}
 import kui.testkit.KuiIOSuite
 
 /** The serde end to end, against a registry that is a `Map` rather than a server.
@@ -199,19 +199,18 @@ final class SchemaRegistrySerdeSuite extends KuiIOSuite {
     } yield assert(result.isLeft, result)
   }
 
-  test("the picker offers this serde only for a topic that has a subject") {
+  test("decoding capability is independent of subject naming while preference is not") {
     for {
       calls <- Ref.of[IO, Int](0)
       withSubject = fake(Map.empty, Map("orders-v2-value" -> avroSchema), calls)
       without = fake(Map.empty, Map.empty, calls)
       yes <- serde(withSubject).use(_.canDeserialize(topic, Target.Value))
-      no <- serde(without).use(_.canDeserialize(topic, Target.Value))
+      no <- serde(without).use(_.preferable(topic, Target.Value))
       keyToo <- serde(withSubject).use(_.canDeserialize(topic, Target.Key))
     } yield {
       assert(yes)
       assert(!no)
-      // The key half has its own subject and this registry does not have it.
-      assert(!keyToo)
+      assert(keyToo)
     }
   }
 
@@ -219,8 +218,22 @@ final class SchemaRegistrySerdeSuite extends KuiIOSuite {
     for {
       calls <- Ref.of[IO, Int](0)
       registry = fake(Map.empty, Map.empty, calls, Some(InfrastructureError.AuthFailed("schema-registry")))
-      offered <- serde(registry).use(_.canDeserialize(topic, Target.Value))
+      offered <- serde(registry).use(_.preferable(topic, Target.Value))
     } yield assert(!offered)
+  }
+
+  test("schema-ID autodetection decodes RecordNameStrategy without a topic subject") {
+    for {
+      calls <- Ref.of[IO, Int](0)
+      registry = fake(Map(11 -> avroSchema), Map("OrderPlaced" -> avroSchema), calls)
+      ranked <- serde(registry).use(s =>
+        SerdeAutodetect.rank(List(s), topic, Target.Value, Some(avroRecord("o-1")))
+      )
+      noSample <- serde(registry).use(s => SerdeAutodetect.rank(List(s), topic, Target.Value, None))
+    } yield {
+      assertEquals(ranked, List(SerdeName.SchemaRegistry))
+      assertEquals(noSample, Nil)
+    }
   }
 
   test("the schema panel shows a JSON Schema as its own produce-form projection, and an Avro one as none") {

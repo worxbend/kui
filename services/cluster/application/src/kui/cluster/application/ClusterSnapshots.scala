@@ -4,6 +4,7 @@ import scala.concurrent.duration.FiniteDuration
 
 import cats.effect.kernel.{Async, Ref, Resource, Temporal}
 import cats.effect.std.{Semaphore, Supervisor}
+import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import org.typelevel.log4cats.StructuredLogger
 
@@ -56,6 +57,16 @@ trait ClusterSnapshots[F[_]] {
 }
 
 object ClusterSnapshots {
+
+  /** Transfer a composed resource into the dynamic owner without a cancellation gap. */
+  private[application] def handoff[F[_]: Async, A](resource: Resource[F, A])(
+      register: (A, F[Unit]) => F[Unit]
+  ): F[Unit] =
+    Async[F].uncancelable { _ =>
+      resource.allocated.flatMap { (value, release) =>
+        register(value, release).onError(_ => release)
+      }
+    }
 
   val CacheName: String = "cluster.topology"
 
@@ -120,9 +131,7 @@ object ClusterSnapshots {
       // while its fiber can still be cancelled rather than after the supervisor has torn it down.
       _ <- Resource.onFinalize(impl.releaseAll)
       _ <- Resource.eval(registry.snapshot.flatMap(impl.sync))
-      _ <- Resource.eval(
-        supervisor.supervise(registry.changes.evalMap(impl.sync).compile.drain).void
-      )
+      _ <- registry.changes.evalMap(impl.sync).compile.drain.background
     } yield impl
 
   /** The refresh: the ordered set of admin calls that produce one `ClusterTopology`.
@@ -290,14 +299,15 @@ object ClusterSnapshots {
           wanted = snapshot.profiles
           obsolete = held.filter((id, entry) => !wanted.get(id).contains(entry.profile))
           fresh = wanted.filterNot((id, profile) => held.get(id).exists(_.profile == profile))
-          _ <- obsolete.values.toList.traverse_(_.release)
-          _ <- cells.update(_ -- obsolete.keySet)
+          _ <- Async[F].uncancelable(_ =>
+            cells.update(_ -- obsolete.keySet) >> obsolete.values.toList.traverse_(_.release)
+          )
           _ <- fresh.values.toList.traverse_(start)
         } yield ()
       }
 
     def releaseAll: F[Unit] =
-      cells.getAndSet(Map.empty).flatMap(_.values.toList.traverse_(_.release))
+      gate.permit.use(_ => cells.getAndSet(Map.empty).flatMap(_.values.toList.traverse_(_.release)))
 
     private def start(profile: ClusterProfile): F[Unit] = {
       val capabilities = SnapshotCell.resource[F, ClusterFeatures](
@@ -314,46 +324,43 @@ object ClusterSnapshots {
         metrics
       )(sweep(profile))
 
-      for {
-        capsAllocated <- capabilities.allocated
-        (capsCell, releaseCaps) = capsAllocated
-        sweepAllocated <- partitions.allocated
-        (sweepCell, releaseSweep) = sweepAllocated
+      val resource = for {
+        capsCell <- capabilities
+        sweepCell <- partitions
         // The window starts collecting now, and not when the first sample lands: `startedAt` is what
         // makes the coverage refusal mean anything, and a window stamped with its first sample would
         // claim a full six hours the moment a cluster that had been down for six hours answered once.
-        startedAt <- Temporal[F].realTimeInstant
-        window <- SeriesWindowCell.create[F, Boolean](
-          UptimeSeriesName,
-          profile.id,
-          tuning.uptimeStep,
-          tuning.uptimeWindow,
-          tuning.uptimeSamples,
-          startedAt,
-          metrics
+        startedAt <- Resource.eval(Temporal[F].realTimeInstant)
+        window <- Resource.eval(
+          SeriesWindowCell.create[F, Boolean](
+            UptimeSeriesName,
+            profile.id,
+            tuning.uptimeStep,
+            tuning.uptimeWindow,
+            tuning.uptimeSamples,
+            startedAt,
+            metrics
+          )
         )
         // Was the last topology refresh a failure? It is the trigger for re-probing capabilities on
         // reconnect: the usual reason a cluster was offline is that it was being upgraded, and its
         // feature set is the thing most likely to have changed while it was away.
-        wasOffline <- Ref.of[F, Boolean](false)
+        wasOffline <- Resource.eval(Ref.of[F, Boolean](false))
         topology = SnapshotCell.resource[F, ClusterTopology](
           CacheName,
           profile.id,
           tuning.refreshInterval,
           metrics
         )(load(profile, capsCell, sweepCell, window, wasOffline))
-        topologyAllocated <- topology.allocated
-        (topologyCell, releaseTopology) = topologyAllocated
-        entry = Entry(
-          profile,
-          topologyCell,
-          capsCell,
-          sweepCell,
-          window,
-          releaseTopology >> releaseSweep >> releaseCaps
+        topologyCell <- topology
+      } yield (topologyCell, capsCell, sweepCell, window)
+
+      // Compose before allocating, then mask the handoff to the owning map.
+      handoff(resource) { case ((topologyCell, capsCell, sweepCell, window), release) =>
+        cells.update(
+          _.updated(profile.id, Entry(profile, topologyCell, capsCell, sweepCell, window, release))
         )
-        _ <- cells.update(_.updated(profile.id, entry))
-      } yield ()
+      }
     }
 
     /** The sweep cell's `load`, raising for the same reason the topology's does. */

@@ -31,7 +31,10 @@ final class SchemaRegistrationSuite extends KuiIOSuite {
   )
 
   private def useCase(registry: FakeRegistry): IO[RegisterSchemaUseCase[IO]] =
-    SchemaRig.logger.map(logger => RegisterSchemaUseCase.make[IO](SchemaRig.registries(registry), logger))
+    SchemaRig.logger.map(logger =>
+      RegisterSchemaUseCase
+        .make[IO](SchemaRig.registries(registry), kui.security.audit.AuditSink.noop[IO], logger)
+    )
 
   test("a valid schema registers and the answer carries the version") {
     for {
@@ -102,18 +105,14 @@ final class SchemaRegistrationSuite extends KuiIOSuite {
     }
   }
 
-  test("the log line that stands in for the audit record names who, which cluster and which subject") {
-    // ADR-047 §3 wants a MutationRecord here and `MutationKind` has no case for a registration, so this
-    // log line is the whole of what a later incident review has to work from. That makes it a rule the
-    // service ships rather than a debugging aid, and an unasserted log line is a line somebody deletes
-    // while tidying: `RegisterSchemaUseCase.context` can be reduced to the cluster alone with every other
-    // case in this service green.
+  test("the operational log names who, which cluster and which subject alongside the audit record") {
     val alice = Principal(UserName.unsafe("alice"), Set(RoleName.unsafe("registrar")), PrincipalKind.Session)
 
     for {
       registry <- SchemaRig.registry()
       logger <- FakeStructuredLogger[IO]
-      run = RegisterSchemaUseCase.make[IO](SchemaRig.registries(registry), logger)
+      run = RegisterSchemaUseCase
+        .make[IO](SchemaRig.registries(registry), kui.security.audit.AuditSink.noop[IO], logger)
       _ <- run.register(alice, SchemaRig.WithRegistry, orders, avro)
       entries <- logger.entriesWith("operation")
     } yield {
@@ -131,7 +130,8 @@ final class SchemaRegistrationSuite extends KuiIOSuite {
     for {
       registry <- SchemaRig.registry(rejects = Set("orders-value"))
       logger <- FakeStructuredLogger[IO]
-      run = RegisterSchemaUseCase.make[IO](SchemaRig.registries(registry), logger)
+      run = RegisterSchemaUseCase
+        .make[IO](SchemaRig.registries(registry), kui.security.audit.AuditSink.noop[IO], logger)
       _ <- run.register(alice, SchemaRig.WithRegistry, orders, avro)
       readOnly <- run.register(alice, SchemaRig.ReadOnly, orders, avro)
       entries <- logger.entriesWith("operation")

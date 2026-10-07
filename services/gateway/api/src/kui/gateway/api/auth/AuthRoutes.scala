@@ -1,7 +1,5 @@
 package kui.gateway.api.auth
 
-import java.util.Locale
-
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 import cats.effect.kernel.{Clock, Ref, Sync}
@@ -38,7 +36,7 @@ import kui.security.{Principal, PrincipalKind}
   *
   * ==Signing in replaces the session, rather than editing it==
   *
-  * [[signIn]] deletes the session the request arrived on and creates a new one for the authenticated
+  * [[signIn]] retires the session the request arrived on and creates a new one for the authenticated
   * principal. That is the session-fixation defence ADR-019 requires: an attacker who can get a victim to use
   * a session id of their choosing — through a link, a subdomain, an XSS — holds a useless value the moment
   * the victim signs in, because the id changed and the CSRF secret changed with it.
@@ -82,14 +80,15 @@ object AuthRoutes {
     // the point of throttling a login is to remember attempts *across* requests. See `RateLimiter` below:
     // the identity service's own contract leans on the edge to do this, and until now nothing here did.
     val loginLimiter: RateLimiter[F] = RateLimiter[F]
+    val oidcStates = new BrowserOidcState[F]
 
     List(
       me[F](policy, auth),
       settings[F](auth, policy),
-      login[F](store, identity, basePath, secureCookies, loginLimiter),
-      changePassword[F](identity, loginLimiter),
-      oidcStart[F](identity),
-      oidcCallback[F](store, identity, basePath, secureCookies),
+      login[F](store, identity, basePath, secureCookies, loginLimiter, auth.trustedProxies),
+      changePassword[F](identity, loginLimiter, auth.trustedProxies),
+      oidcStart[F](identity, oidcStates),
+      oidcCallback[F](store, identity, basePath, secureCookies, oidcStates),
       logout[F](store)
     )
   }
@@ -132,34 +131,34 @@ object AuthRoutes {
       identity: Option[ServiceClient[F]],
       basePath: String,
       secureCookies: Boolean,
-      limiter: RateLimiter[F]
+      limiter: RateLimiter[F],
+      trustedProxies: Set[String]
   ): ServerEndpoint[Any, F] =
     AuthEndpoints.loginWithSession
       .in(request)
       .serverLogic[F] { (credentials, req) =>
-        withinRateLimit[F, (LoginResponse, CookieValueWithMeta)](
+        withinRateLimit[F, (LoginResponse, Option[CookieValueWithMeta])](
           limiter,
           req,
           List(
-            s"login:ip:${remoteAddressOf(req)}" -> MaxLoginAttemptsPerIp,
-            s"login:user:${credentials.username.toLowerCase(Locale.ROOT)}" -> MaxLoginAttemptsPerUser
+            s"login:ip:${ClientAddress.of(req, trustedProxies)}" -> MaxLoginAttemptsPerIp,
+            s"login:user:${kui.security.AccountName.canonical(credentials.username)}" -> MaxLoginAttemptsPerUser
           )
         ) {
-          answering[F, (LoginResponse, CookieValueWithMeta)](req) {
+          answering[F, (LoginResponse, Option[CookieValueWithMeta])](req) {
             withIdentity(identity) { client =>
               call(client, req)(IdentityEndpoints.login, credentials).flatMap {
-                case Left(error) => error.asLeft[(LoginResponse, CookieValueWithMeta)].pure[F]
+                case Left(error) => error.asLeft[(LoginResponse, Option[CookieValueWithMeta])].pure[F]
 
                 case Right(LoginResponse.SignedIn(who)) =>
                   signIn[F](store, req, principalOf(who), basePath, secureCookies)
-                    .map(cookie => (LoginResponse.SignedIn(who), cookie).asRight[KuiError])
+                    .map(cookie => (LoginResponse.SignedIn(who), Some(cookie)).asRight[KuiError])
 
                 // A required password change grants no session at all, so the session the request arrived
                 // on is left exactly as it was — anonymous. Handing out a cookie here would be handing out
                 // a session to somebody the server has just decided may not have one.
                 case Right(change @ LoginResponse.PasswordChangeRequired(_)) =>
-                  currentCookie[F](req, basePath, secureCookies)
-                    .map(cookie => (change, cookie).asRight[KuiError])
+                  (change, none[CookieValueWithMeta]).asRight[KuiError].pure[F]
               }
             }
           }
@@ -168,7 +167,8 @@ object AuthRoutes {
 
   private def changePassword[F[_]: Sync](
       identity: Option[ServiceClient[F]],
-      limiter: RateLimiter[F]
+      limiter: RateLimiter[F],
+      trustedProxies: Set[String]
   ): ServerEndpoint[Any, F] =
     AuthEndpoints.changePassword
       .in(request)
@@ -176,7 +176,7 @@ object AuthRoutes {
         withinRateLimit[F, Unit](
           limiter,
           req,
-          List(s"password:ip:${remoteAddressOf(req)}" -> MaxPasswordChangeAttemptsPerIp)
+          List(s"password:ip:${ClientAddress.of(req, trustedProxies)}" -> MaxPasswordChangeAttemptsPerIp)
         ) {
           answering[F, Unit](req) {
             withIdentity(identity)(client => call(client, req)(IdentityEndpoints.changePassword, change))
@@ -184,12 +184,25 @@ object AuthRoutes {
         }
       }
 
-  private def oidcStart[F[_]: Sync](identity: Option[ServiceClient[F]]): ServerEndpoint[Any, F] =
+  private def oidcStart[F[_]: Sync](
+      identity: Option[ServiceClient[F]],
+      states: BrowserOidcState[F]
+  ): ServerEndpoint[Any, F] =
     AuthEndpoints.oidcStart
       .in(request)
       .serverLogic[F] { req =>
         answering[F, OidcStartResponse](req) {
-          withIdentity(identity)(client => call(client, req)(IdentityEndpoints.oidcStart, ()))
+          withIdentity(identity) { client =>
+            call(client, req)(IdentityEndpoints.oidcStart, ()).flatMap {
+              case Left(error) => error.asLeft[OidcStartResponse].pure[F]
+              case Right(started) =>
+                sessionOf[F](req).flatMap(session => states.bind(session.id, started.state)).map {
+                  case true => Right(started)
+                  case false =>
+                    Left(ApplicationError.Unauthenticated("too many pending sign-ins; try again later"))
+                }
+            }
+          }
         }
       }
 
@@ -198,25 +211,34 @@ object AuthRoutes {
       store: SessionStore[F],
       identity: Option[ServiceClient[F]],
       basePath: String,
-      secureCookies: Boolean
+      secureCookies: Boolean,
+      states: BrowserOidcState[F]
   ): ServerEndpoint[Any, F] =
     AuthEndpoints.oidcCallback
       .in(request)
       .serverLogic[F] { (code, state, req) =>
         answering[F, (StatusCode, String, CookieValueWithMeta)](req) {
           withIdentity(identity) { client =>
-            call(client, req)(IdentityEndpoints.oidcCallback, OidcCallbackRequest(code, state)).flatMap {
-              case Left(error) => error.asLeft[(StatusCode, String, CookieValueWithMeta)].pure[F]
-              case Right(LoginResponse.SignedIn(who)) =>
-                signIn[F](store, req, principalOf(who), basePath, secureCookies)
-                  .map(cookie => (StatusCode.Found, landingPage(basePath), cookie).asRight[KuiError])
-              case Right(LoginResponse.PasswordChangeRequired(_)) =>
-                // A provider sign-in cannot produce this: there is no KUI password behind it to change.
-                // Answering with the same refusal as an unusable callback keeps the failure honest rather
-                // than redirecting a browser into a flow that has no next step.
-                NoPasswordChangeForProvider
+            sessionOf[F](req).flatMap(session => states.consume(session.id, state)).flatMap {
+              case false =>
+                ApplicationError
+                  .Unauthenticated("invalid or expired browser sign-in state")
                   .asLeft[(StatusCode, String, CookieValueWithMeta)]
                   .pure[F]
+              case true =>
+                call(client, req)(IdentityEndpoints.oidcCallback, OidcCallbackRequest(code, state)).flatMap {
+                  case Left(error) => error.asLeft[(StatusCode, String, CookieValueWithMeta)].pure[F]
+                  case Right(LoginResponse.SignedIn(who)) =>
+                    signIn[F](store, req, principalOf(who), basePath, secureCookies)
+                      .map(cookie => (StatusCode.Found, landingPage(basePath), cookie).asRight[KuiError])
+                  case Right(LoginResponse.PasswordChangeRequired(_)) =>
+                    // A provider sign-in cannot produce this: there is no KUI password behind it to change.
+                    // Answering with the same refusal as an unusable callback keeps the failure honest rather
+                    // than redirecting a browser into a flow that has no next step.
+                    NoPasswordChangeForProvider
+                      .asLeft[(StatusCode, String, CookieValueWithMeta)]
+                      .pure[F]
+                }
             }
           }
         }
@@ -258,13 +280,6 @@ object AuthRoutes {
   private val MaxLoginAttemptsPerIp: Int = 20
   private val MaxLoginAttemptsPerUser: Int = 5
   private val MaxPasswordChangeAttemptsPerIp: Int = 10
-
-  /** The caller's address, as far as this process can tell it. `"unknown"` rather than a raised error when
-    * the connection carries none — a test harness or an unusual transport — because a throttle that cannot
-    * name its caller should still throttle, not crash the request it was trying to protect.
-    */
-  private def remoteAddressOf(req: ServerRequest): String =
-    req.connectionInfo.remote.map(_.getAddress.getHostAddress).getOrElse("unknown")
 
   /** Runs `action` only while every key in `limits` is still under its own budget for this window, and
     * answers `429 KUI-AUTH-RATE-LIMITED` the moment one of them is not. Each key is charged in order and the
@@ -343,8 +358,9 @@ object AuthRoutes {
 
   /** Replaces the session with a new one for `principal`, and answers with the cookie for it.
     *
-    * Delete then create, rather than editing the session in place: the id and the CSRF secret both have to
-    * change, because both are values an attacker may already hold.
+    * Retire then create, rather than editing the session in place: the id and the CSRF secret both have to
+    * change, because both are values an attacker may already hold. Retirement prevents late requests from
+    * minting an anonymous cookie over this new one.
     */
   private def signIn[F[_]: Sync](
       store: SessionStore[F],
@@ -357,7 +373,7 @@ object AuthRoutes {
       .flatMap(previous => replaceSession[F](store, previous, principal))
       .map(cookieOf(_, basePath, secureCookies))
 
-  /** Delete, then create. The id and the CSRF secret both have to change, because both are values an attacker
+  /** Retire, then create. The id and the CSRF secret both have to change, because both are values an attacker
     * may already hold — which is what makes a session id they planted on the victim worthless the moment that
     * victim signs in.
     *
@@ -372,22 +388,10 @@ object AuthRoutes {
       principal: Principal
   ): F[Session] =
     for {
-      _ <- store.delete(previous.id)
       now <- Clock[F].realTimeInstant
+      _ <- store.retire(previous.id, now)
       session <- store.create(principal, now)
     } yield session
-
-  /** The cookie for the session the request already has, unchanged.
-    *
-    * Answered on the paths that deliberately do *not* sign anybody in, so that the endpoint's declared output
-    * is satisfied without the response quietly clearing the browser's session.
-    */
-  private def currentCookie[F[_]: Sync](
-      req: ServerRequest,
-      basePath: String,
-      secureCookies: Boolean
-  ): F[CookieValueWithMeta] =
-    sessionOf[F](req).map(cookieOf(_, basePath, secureCookies))
 
   private def cookieOf(session: Session, basePath: String, secure: Boolean): CookieValueWithMeta =
     SessionMiddleware.setCookie(session, basePath, secure).valueWithMeta
@@ -500,6 +504,7 @@ object AuthRoutes {
       },
       resource = granted.permission.resource.wire,
       value = granted.permission.value.map(_.raw),
-      actions = granted.permission.actions.map(_.wire).toList.sorted
+      actions = granted.permission.actions.map(_.wire).toList.sorted,
+      defaultRole = granted.defaultRole
     )
 }

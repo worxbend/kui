@@ -1,6 +1,9 @@
 package kui.cluster.infrastructure
 
+import scala.concurrent.duration.*
+
 import cats.effect.IO
+import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 
 import kui.testkit.KuiIOSuite
@@ -20,6 +23,100 @@ final class ClusterAdminClientsSuite extends KuiIOSuite {
       logger <- FakeStructuredLogger[IO]
       result <- ClusterAdminClients.resource[IO](pool, logger).use(clients => use(clients, pool))
     } yield result
+
+  test("generationSelectionAndUseAreAtomicAndOlderCallsCannotRestoreOldSettings") {
+    TestControl.executeEmbed(registry { (clients, pool) =>
+      for {
+        entered <- cats.effect.Deferred[IO, Unit]
+        resume <- cats.effect.Deferred[IO, Unit]
+        old = TestProfiles.profile(version = 1L)
+        latest = TestProfiles.profile(version = 2L, bootstrap = "new-broker:9092")
+        first <- clients.withConnection(old)(_ => entered.complete(()) >> resume.get).start
+        _ <- entered.get
+        next <- clients.withConnection(latest)(c => IO.pure(c.bootstrapServers.value)).start
+        _ <- IO.sleep(1.millisecond)
+        before <- pool.events.get
+        _ <- resume.complete(())
+        _ <- first.joinWithNever
+        selected <- next.joinWithNever
+        delayed <- clients.withConnection(old)(c => IO.pure(c.bootstrapServers.value))
+      } yield {
+        assertEquals(before, Nil, "must not evict while an old generation is being acquired/used")
+        assertEquals(selected, "new-broker:9092")
+        assertEquals(delayed, "new-broker:9092")
+      }
+    })
+  }
+
+  test("closeWaitsForActiveGenerationAndCancelledWaiterCannotAcquire") {
+    TestControl.executeEmbed(for {
+      pool <- RecordingAdminPool()
+      logger <- FakeStructuredLogger[IO]
+      allocated <- ClusterAdminClients.resource[IO](pool, logger).allocated
+      (clients, release) = allocated
+      entered <- cats.effect.Deferred[IO, Unit]
+      resume <- cats.effect.Deferred[IO, Unit]
+      active <- clients.withConnection(TestProfiles.profile())(_ => entered.complete(()) >> resume.get).start
+      _ <- entered.get
+      waiter <- clients.withConnection(TestProfiles.profile(version = 2L))(_ => IO.unit).start
+      _ <- IO.sleep(1.millisecond)
+      _ <- waiter.cancel
+      closing <- release.start
+      _ <- IO.sleep(1.millisecond)
+      before <- pool.events.get
+      _ <- resume.complete(())
+      _ <- active.joinWithNever
+      _ <- closing.joinWithNever
+      after <- pool.events.get
+    } yield {
+      assertEquals(before, Nil)
+      assertEquals(after, List("evict:local"))
+    })
+  }
+
+  test("sameVersionConnectionChangeStillRebuilds") {
+    registry { (clients, pool) =>
+      for {
+        _ <- clients.withConnection(TestProfiles.profile())(_ => IO.unit)
+        _ <- clients.withConnection(TestProfiles.profile(bootstrap = "replacement:9092"))(_ => IO.unit)
+        events <- pool.events.get
+      } yield assertEquals(events, List("evict:local"))
+    }
+  }
+
+  test("authoritativeRegistryFencesRemovedAndRecreatedProfilesEvenWhenVersionRestarts") {
+    val old = TestProfiles.profile(version = 8L)
+    val replacement = TestProfiles.profile(version = 1L, bootstrap = "recreated:9092")
+    for {
+      current <- cats.effect.Ref.of[IO, Option[kui.cluster.domain.ClusterProfile]](Some(old))
+      pool <- RecordingAdminPool()
+      logger <- FakeStructuredLogger[IO]
+      _ <- ClusterAdminClients.resource[IO](pool, logger, Some(_ => current.get)).use { clients =>
+        for {
+          _ <- clients.withConnection(old)(_ => IO.unit)
+          _ <- current.set(None)
+          removed <- clients.withConnection(old)(_ => IO.unit).attempt
+          _ <- current.set(Some(replacement))
+          selected <- clients.withConnection(old)(c => IO.pure(c.bootstrapServers.value))
+        } yield {
+          assert(removed.isLeft)
+          assertEquals(selected, "recreated:9092")
+        }
+      }
+    } yield ()
+  }
+
+  test("releasedRegistryCannotAcquireAgain") {
+    for {
+      pool <- RecordingAdminPool()
+      logger <- FakeStructuredLogger[IO]
+      pair <- ClusterAdminClients.resource[IO](pool, logger).allocated
+      (clients, release) = pair
+      _ <- clients.withConnection(TestProfiles.profile())(_ => IO.unit)
+      _ <- release
+      result <- clients.withConnection(TestProfiles.profile())(_ => IO.unit).attempt
+    } yield assert(result.isLeft)
+  }
 
   test("theFirstCallRegistersTheClusterAndEvictsNothing") {
     registry { (clients, pool) =>

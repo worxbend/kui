@@ -112,17 +112,11 @@ export function ConnectScreen(props: ConnectScreenProps): JSX.Element {
    * that KUI's buttons sometimes do not work.
    */
   const refusalFor = (connector: Connector): string | undefined =>
-    writeBlockedReason({
+    kui.writeBlocked !== undefined
+      ? kui.writeBlocked(props.clusterId, Actions.ConnectOperate, operateSubject(connector))
+      : writeBlockedReason({
       permitted: kui.permits(Actions.ConnectOperate, operateSubject(connector)),
-      /*
-       * KUI's per-cluster read-only flag does not reach a feature: `KuiContextValue` carries the
-       * cluster's *id* and nothing else about it. Every feature in this workspace therefore passes
-       * `false` here, and the topic screens' seven copies of it are a live finding of wave 6 that
-       * is owned this wave (W7-08 item 3). Writing `false` with this note is the honest version of
-       * a gap four packages already have; inventing a read-only answer here would be worse. The
-       * server refuses these three on a read-only cluster in any case, and the refusal arrives as
-       * the sentence under the card.
-       */
+      // Compatibility for standalone stories without the shell's write policy.
       readOnly: false,
       action: operateAction(connector),
     });
@@ -178,6 +172,7 @@ export function ConnectScreen(props: ConnectScreenProps): JSX.Element {
   };
 
   const onCommand = (connector: Connector, which: ConnectorCommand): void => {
+    if (refusalFor(connector) !== undefined) return;
     const subject = connectorLabel(connector);
     setPending((current) => new Map(current).set(subject, which));
     // Only this connector's own prior failure is cleared by a fresh attempt — another

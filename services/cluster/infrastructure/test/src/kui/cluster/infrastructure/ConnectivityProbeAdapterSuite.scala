@@ -22,11 +22,8 @@ final class ConnectivityProbeAdapterSuite extends KuiIOSuite {
   private def probeWith(stub: IO[StubKafkaClusterAdmin]): IO[Connectivity] =
     for {
       admin <- stub
-      pool <- RecordingAdminPool()
       logger <- FakeStructuredLogger[IO]
-      verdict <- ClusterAdminClients
-        .resource[IO](pool, logger)
-        .use(clients => new ConnectivityProbeAdapter[IO](admin, clients, logger).probe(profile))
+      verdict <- new ConnectivityProbeAdapter[IO](cats.effect.Resource.pure(admin), logger).probe(profile)
     } yield verdict
 
   test("aHealthyClusterIsReachable") {
@@ -112,11 +109,8 @@ final class ConnectivityProbeAdapterSuite extends KuiIOSuite {
     }
 
     for {
-      pool <- RecordingAdminPool()
       logger <- FakeStructuredLogger[IO]
-      verdict <- ClusterAdminClients
-        .resource[IO](pool, logger)
-        .use(clients => new ConnectivityProbeAdapter[IO](exploding, clients, logger).probe(profile))
+      verdict <- new ConnectivityProbeAdapter[IO](cats.effect.Resource.pure(exploding), logger).probe(profile)
     } yield {
       assertEquals(verdict, Connectivity.Unreachable(ConnectivityProbeAdapter.CouldNotConnect))
       assertNoLeak(ConnectivityProbeAdapter.CouldNotConnect)

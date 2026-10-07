@@ -10,7 +10,7 @@ import org.typelevel.log4cats.StructuredLogger
 
 import kui.consumer.domain.*
 import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
-import kui.kernel.{ClusterId, GroupId, Offset, TopicPartition}
+import kui.kernel.{ClusterId, GroupId}
 import kui.security.Principal
 import kui.security.audit.MutationKind
 
@@ -140,7 +140,9 @@ object OffsetResetUseCase {
           // The second check. The group can have gained a member since the plan was rendered, and
           // that is precisely the race the two-phase flow widens.
           _ <- requireEmpty(port, group)
-          before <- EitherTLike(currentOffsets(port, group, plan.offsets.keySet))
+          window <- EitherTLike(port.offsetWindow(group, plan.scope, None))
+          _ <- EitherTLike(Temporal[F].pure(requireRetainedTargets(plan, window)))
+          before = window.committed.view.filterKeys(plan.offsets.contains).toMap
           _ <- EitherTLike(
             guard.guard(
               principal,
@@ -180,7 +182,14 @@ object OffsetResetUseCase {
             case Left(error) => error.asLeft[Unit]
             case Right(described) =>
               described.get(group) match {
-                case None => ().asRight[KuiError]
+                case None =>
+                  ApplicationError
+                    .InvalidState(s"consumer group ${group.value} could not be described")
+                    .asLeft[Unit]
+                case Some(found) if !found.completeness.membersKnown =>
+                  ApplicationError
+                    .InvalidState(s"consumer group ${group.value} members are unknown")
+                    .asLeft[Unit]
                 case Some(found) =>
                   found.offsetChangeRefusal match {
                     case None => ().asRight[KuiError]
@@ -192,25 +201,19 @@ object OffsetResetUseCase {
           }
         )
 
-      /** Where the offsets were before the write, for the audit record. Best effort: a reset is not refused
-        * because KUI could not write down what it was changing.
-        */
-      private def currentOffsets(
-          port: GroupAdminPort[F],
-          group: GroupId,
-          partitions: Set[TopicPartition]
-      ): F[Either[KuiError, Map[TopicPartition, Offset]]] =
-        partitions.headOption match {
-          case None => Map.empty[TopicPartition, Offset].asRight[KuiError].pure[F]
-          case Some(first) =>
-            port.offsetWindow(group, ResetScope(first.topic, partitions), None).map {
-              case Right(window) =>
-                window.committed.view.filterKeys(partitions.contains).toMap.asRight[KuiError]
-              // Best effort: a reset is not refused because KUI could not write down what it was
-              // about to change. The record carries an empty `before` instead.
-              case Left(_) => Map.empty[TopicPartition, Offset].asRight[KuiError]
-            }
-        }
+      /** Never clamp an approved target again: retention requires a new preview, not a different reset. */
+      private def requireRetainedTargets(plan: ResetPlan, window: OffsetWindow): Either[KuiError, Unit] =
+        Either.cond(
+          plan.offsets.forall { (partition, target) =>
+            !window.leaderless.contains(partition) &&
+            window.begin.get(partition).exists(_.value <= target.value) &&
+            window.end.get(partition).exists(_.value >= target.value)
+          },
+          (),
+          ApplicationError.InvalidState(
+            "reset targets are no longer within known retained offsets; preview the reset again"
+          )
+        )
     }
 
   /** A planner refusal, in the vocabulary the wire speaks. `KUI-INVALID-STATE` for everything the cluster's

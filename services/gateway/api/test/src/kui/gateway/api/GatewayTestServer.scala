@@ -129,7 +129,14 @@ object GatewayTestServer {
       routes =
         GatewayApi.routes[IO](configView(basePath, auth, rbac), readiness, sessions, extraRoutes, identity)
       interceptors = EdgeHeaders.interceptors[IO] ++
-        SessionMiddleware.interceptors[IO](sessions, logger, basePath, secureCookies = !devInsecureCookies) ++
+        SessionMiddleware.interceptors[IO](
+          sessions,
+          logger,
+          basePath,
+          secureCookies = !devInsecureCookies,
+          authenticationRequired = auth.authType != kui.config.AuthType.Disabled,
+          trustedProxies = auth.trustedProxies
+        ) ++
         ErrorInterceptor.interceptors[IO](logger)
       config = ServerConfig(Host.unsafe("localhost"), Port.unsafe(0), basePath)
       binding <- KuiServer.resource[IO](config, routes, interceptors, logger, gracefulShutdown = 10.millis)

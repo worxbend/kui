@@ -33,19 +33,15 @@ enum ParsedSchema {
   *
   * ==What "can this serde read this topic?" means here==
   *
-  * `canDeserialize` asks the registry whether the topic's subject exists. Strictly, decoding does not need
-  * that — the schema id travels in the record — but the picker does: offering a Schema-Registry row for a
-  * topic with no subject is offering a choice that will fail on every record, and `ClusterSerdes.suggest`
-  * exists to keep such rows out (ADR-032). A topic whose subject was deleted after its records were written
-  * therefore stops being *suggested* while its records remain readable by explicit choice, which is the right
-  * way round.
+  * Decoding uses the schema id in the record, independently of subject naming. `canDeserialize` therefore
+  * describes that capability, while `preferable` discovers the conventional topic subject when no sample is
+  * available. Sample-based autodetection verifies both the wire header and a successful by-id decode.
   *
   * ==Subject naming==
   *
-  * `TopicNameStrategy` only: `<topic>-key` and `<topic>-value`. Confluent's other two strategies key the
-  * subject on the record's own type name, which is inside the payload that has not been decoded yet, so they
-  * are unusable on the read path by construction. The `subject` parameter on the produce form is the escape
-  * hatch for a topic that does not follow the convention.
+  * Topic-level discovery uses `<topic>-key` and `<topic>-value`. By-id decoding also supports records written
+  * with RecordNameStrategy or TopicRecordNameStrategy. The `subject` produce parameter overrides the
+  * conventional subject for writing.
   */
 object SchemaRegistrySerde {
 
@@ -91,11 +87,11 @@ object SchemaRegistrySerde {
     private def subjectExists(topic: TopicName, target: Target): F[Boolean] =
       registry.latestForSubject(subjectOf(topic, target)).map(_.fold(_ => false, _.isDefined))
 
-    def canDeserialize(topic: TopicName, target: Target): F[Boolean] = subjectExists(topic, target)
+    def canDeserialize(topic: TopicName, target: Target): F[Boolean] = true.pure[F]
 
     def canSerialize(topic: TopicName, target: Target): F[Boolean] = subjectExists(topic, target)
 
-    /** The same question as `canDeserialize`, and that is not an oversight.
+    /** Topic-level preference is separate from decoding capability.
       *
       * `preferable` is the topic-level recommendation used when there is no sample to look at, and for this
       * serde the topic-level fact — "this topic has a registered schema" — genuinely is the recommendation. A

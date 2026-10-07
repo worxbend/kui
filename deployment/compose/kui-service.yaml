@@ -37,6 +37,11 @@ kui:
   auth:
     type: disabled
 
+  # Authoritative runtime cluster profiles and their event stream. Static bootstrap
+  # entries below do not substitute for updates to registrations and connections.
+  clusterProfiles:
+    url: "http://kui-cluster:8080"
+
   telemetry:
     # Uncomment together with docker-compose.observability.yml to send these processes' spans and
     # metrics to the collector, where they appear beside the gateway's under one trace id.

@@ -97,7 +97,8 @@ later milestone cannot accidentally reuse one for something else.
 | Metric | Labels | Live from | What it tells you |
 | --- | --- | --- | --- |
 | `kui.http.server.duration` | `service`, `route`, `status` | M0 | How long KUI took to answer, in seconds. The one metric that answers "is KUI slow". |
-| `kui.upstream.duration` | `service`, `upstream`, `outcome` | M0 | How long a call to another system took, and how it ended. |
+| `kui.upstream.duration` | `service`, `upstream`, `outcome` | M0 | Histogram in seconds for one logical call, including retries and failover, and how it ended. |
+| `kui.upstream.attempt.duration` | `service`, `upstream`, `outcome` | M0 | Histogram in seconds for individual transport attempts; distinguishes retry traffic from logical calls. |
 | `kui.upstream.circuit.state` | `upstream` | M0 | Whether an upstream's circuit breaker is closed, open or half-open. |
 | `kui.kafka.admin.duration` | `cluster`, `operation`, `outcome` | M1 | How long an admin call to a broker took. |
 | `kui.kafka.consume.records` | `cluster`, `topic` | M3 | Records read while browsing messages. |
@@ -136,8 +137,9 @@ later milestone cannot accidentally reuse one for something else.
 
 ### Reading `outcome`
 
-`kui.upstream.duration` groups by outcome rather than by HTTP status, because these six lead
-to six different actions:
+`kui.upstream.duration` groups by outcome rather than by HTTP status, because each outcome
+calls for a different action. Canceled callers are recorded too, rather than disappearing
+from the latency distribution; durations use a monotonic clock.
 
 | `outcome` | What happened | Where to look |
 | --- | --- | --- |
@@ -147,6 +149,7 @@ to six different actions:
 | `timeout` | KUI gave up waiting | the upstream is slow, or the configured timeout is too tight |
 | `circuit_open` | KUI did not even try | the breaker is open; see below |
 | `unreachable` | no connection | DNS, network policy, or the upstream is down |
+| `canceled` | the caller stopped waiting | client disconnection, shutdown, or a canceled parent operation |
 
 A dashboard grouped by status cannot tell `timeout` from `unreachable`, and those have
 different causes and different fixes.

@@ -73,7 +73,7 @@ object GatewayApi {
     // capability stream (GW-005) and the re-streamed message browser. `ServerEndpoint` is contravariant in
     // that parameter, so an endpoint requiring nothing fits wherever one that may require streaming does.
     BasePath.prefixAll(GatewayEndpoints.ApiPrefix, HealthEndpoints.probes[F](readiness)) ++
-      InfoRoutes[F](config.server, config.gateway) ++
+      InfoRoutes[F](config.server, config.gateway, config.auth.authType) ++
       AuthRoutes[F](
         sessions,
         config.rbac,

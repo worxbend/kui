@@ -34,7 +34,7 @@
  * anything. A plan that *fails* offers no confirm button at all: without a token there is nothing to
  * send, and a button that cannot work is worse than an absent one.
  */
-import { Show, createEffect, createSignal } from "solid-js";
+import { Show, createEffect, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { Banner, ConfirmDialog, Dialog, Spinner, type Mutation } from "@kui/kernel";
 import type { IconName } from "@kui/kernel";
@@ -114,9 +114,18 @@ export function PlannedActionDialog<P extends TokenPlan>(
    * against a topic that has moved on since — the plan would then describe a state the cluster is no
    * longer in, and the confirmation would be an agreement to something the operator never saw.
    */
+  let generation = 0;
+  onCleanup(() => { generation += 1; });
+  const close = (): void => {
+    generation += 1;
+    setPlan(undefined);
+    setPlanFailure(undefined);
+    props.onClose();
+  };
   createEffect(
-    () => props.open,
-    (open) => {
+    () => [props.open, props.title, props.plan] as const,
+    ([open]) => {
+      const current = ++generation;
       if (!open) {
         setPlan(undefined);
         setPlanFailure(undefined);
@@ -125,8 +134,12 @@ export function PlannedActionDialog<P extends TokenPlan>(
       setPlan(undefined);
       setPlanFailure(undefined);
       void props.plan().then((answer) => {
+        if (current !== generation || !props.open) return;
         if ("failure" in answer) setPlanFailure(answer.failure);
         else setPlan(() => answer);
+      }).catch((error: unknown) => {
+        if (current !== generation || !props.open) return;
+        setPlanFailure(error instanceof Error ? error.message : "The plan could not be loaded.");
       });
     },
   );
@@ -142,7 +155,7 @@ export function PlannedActionDialog<P extends TokenPlan>(
           has read nothing. */}
       <Dialog
         open={props.open && plan() === undefined && planFailure() === undefined}
-        onClose={props.onClose}
+        onClose={close}
         title={props.title}
         size="sm"
         testId="planned-action-planning"
@@ -157,7 +170,7 @@ export function PlannedActionDialog<P extends TokenPlan>(
           a button that cannot work is worse than one that is not there. */}
       <Dialog
         open={props.open && planFailure() !== undefined}
-        onClose={props.onClose}
+        onClose={close}
         title={props.title}
         size="sm"
         testId="planned-action-unplannable"
@@ -169,7 +182,7 @@ export function PlannedActionDialog<P extends TokenPlan>(
         {(ready) => (
           <ConfirmDialog
             open={props.open}
-            onClose={props.onClose}
+            onClose={close}
             title={props.title}
             consequence={consequenceOf(ready(), props.describe)}
             confirmLabel={props.confirmLabel}

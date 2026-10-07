@@ -179,7 +179,11 @@ object ClusterScope {
   * `Permission` alone is not enough there, because the browser has to answer "may I delete *this* topic on
   * *this* cluster" and the cluster scoping lives on the role rather than on the permission.
   */
-final case class ClusterPermission(clusters: ClusterScope, permission: Permission)
+final case class ClusterPermission(
+    clusters: ClusterScope,
+    permission: Permission,
+    defaultRole: Boolean = false
+)
 
 object ClusterPermission {
   given CanEqual[ClusterPermission, ClusterPermission] = CanEqual.derived
@@ -310,7 +314,9 @@ object Rbac {
     *
     * This is what `/auth/me` answers with and what the browser's permission store holds (E4). Every
     * permission arrives with its actions already expanded, so the browser's gate is a lookup and never a
-    * second implementation of [[Action.closure]].
+    * second implementation of [[Action.closure]]. Default-role grants are marked fallback-only. Consumers
+    * must first scope all grants to the requested cluster, then discard defaults whenever any non-default
+    * grant remains, before checking resources.
     *
     * When RBAC is off the answer is a single wildcard grant per resource over every cluster, rather than an
     * empty list. An empty list and "no restrictions" would otherwise be indistinguishable in the browser, and
@@ -335,7 +341,7 @@ object Rbac {
 
       val fromDefault = policy.defaultRole.toList
         .flatMap(_.permissions)
-        .map(ClusterPermission(ClusterScope.Every, _))
+        .map(permission => ClusterPermission(ClusterScope.Every, permission, defaultRole = true))
 
       fromRoles ++ fromDefault
     }

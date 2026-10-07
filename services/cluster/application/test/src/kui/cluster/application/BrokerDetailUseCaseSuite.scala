@@ -83,6 +83,29 @@ final class BrokerDetailUseCaseSuite extends munit.CatsEffectSuite {
     topics = 2
   )
 
+  test("skippedLiveLogDirsUseStaleSnapshotForDirectoriesAndPartitionSizes") {
+    rig().use { built =>
+      for {
+        _ <- built.admin.set(
+          _.copy(logDirs = Right(PartialResult(Map.empty, Map(broker1 -> SkipReason.Failed(unreachable)))))
+        )
+        result <- built.brokers.logDirsAndSizes(prod.id, broker1)
+      } yield result match {
+        case Right((found, sizes)) =>
+          assertEquals(found.dirs, dirs.sorted)
+          assert(found.freshness.isInstanceOf[SnapshotFreshness.Stale])
+          assertEquals(sizes.freshness, found.freshness)
+        case Left(error) => fail(s"expected stale snapshot, got $error")
+      }
+    }
+  }
+
+  test("unreportedBrokerIsUnavailableRatherThanFreshEmpty") {
+    rig(logDirs = Right(PartialResult.empty)).use { built =>
+      built.brokers.logDirs(prod.id, broker1).map(result => assert(result.isLeft))
+    }
+  }
+
   test("brokerListComesFromTheSnapshotAndMakesNoAdminCall") {
     rig().use { built =>
       for {

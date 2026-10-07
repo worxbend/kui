@@ -145,7 +145,8 @@ final class SchemaRegistrationRoutesSuite extends KuiIOSuite {
         val routes = SchemaMutationRoutes[IO](
           SetCompatibilityUseCase
             .make[IO](registries, kui.observability.audit.LoggingAuditSink.make[IO](logger), logger),
-          RegisterSchemaUseCase.make[IO](registries, logger),
+          RegisterSchemaUseCase
+            .make[IO](registries, kui.observability.audit.LoggingAuditSink.make[IO](logger), logger),
           CompatibilityCheckUseCase.make[IO](registries),
           secured
         )

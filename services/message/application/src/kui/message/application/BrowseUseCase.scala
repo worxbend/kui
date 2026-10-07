@@ -241,7 +241,12 @@ object BrowseUseCase {
           Stream
             .eval((Clock[F].monotonic, Ref.of[F, State](State.empty)).tupled)
             .flatMap { case (startedAt, state) =>
-              records(request, budget, state, filter, mask) ++ ending(request, budget, state, startedAt)
+              records(request, budget, state, filter, mask, startedAt) ++ ending(
+                request,
+                budget,
+                state,
+                startedAt
+              )
             }
 
       /** The record events, and the progress events between them. */
@@ -250,7 +255,8 @@ object BrowseUseCase {
           budget: PollBudget,
           state: Ref[F, State],
           filter: Option[CompiledFilter[F]],
-          mask: RecordMask
+          mask: RecordMask,
+          startedAt: FiniteDuration
       ): Stream[F, BrowseEvent] =
         source
           .browse(request, budget)
@@ -260,7 +266,7 @@ object BrowseUseCase {
           .takeThrough(_.isRight)
           .evalMap {
             case Left(error) => state.update(_.copy(failure = Some(error))).as(Step.stop)
-            case Right(raw) => deliver(request, budget, state, raw, filter, mask)
+            case Right(raw) => deliver(request, budget, state, raw, filter, mask, startedAt)
           }
           .takeThrough(_.more)
           .flatMap(step => Stream.chunk(step.events))
@@ -272,7 +278,8 @@ object BrowseUseCase {
           state: Ref[F, State],
           raw: RawRecord,
           filter: Option[CompiledFilter[F]],
-          mask: RecordMask
+          mask: RecordMask,
+          startedAt: FiniteDuration
       ): F[Step] =
         for {
           record <- decode(request, raw, mask)
@@ -286,10 +293,17 @@ object BrowseUseCase {
           next <- state.updateAndGet(_.saw(raw, matched, failed(verdict)))
           progress <-
             if next.read % ProgressEvery.toLong == 0L then
-              Clock[F].monotonic.map(elapsed =>
+              Clock[F].monotonic.map(now =>
                 Chunk.singleton(
                   BrowseEvent
-                    .Consumed(next.bytes, next.read, next.delivered, next.filterErrors, elapsed, budget)
+                    .Consumed(
+                      next.bytes,
+                      next.read,
+                      next.delivered,
+                      next.filterErrors,
+                      now - startedAt,
+                      budget
+                    )
                 )
               )
             else Chunk.empty[BrowseEvent].pure[F]

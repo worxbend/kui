@@ -68,7 +68,7 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
 
   createEffect(
     () => [props.clusterId, props.groupId, attempt()] as const,
-    () => {
+    ([clusterId, groupId]) => {
       let cancelled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       setState({ kind: "loading" });
@@ -77,17 +77,20 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
       // actively watching stays live the way the group list does — via `pollLag` — instead of going
       // stale the moment it is opened and only moving again on the next manual reload or mutation.
       const refresh = (background: boolean): void => {
-        void fetchGroup(kui.api, props.clusterId, props.groupId).then((next) => {
+        void fetchGroup(kui.api, clusterId, groupId).then((next) => {
           // Switching group while a request is out must not land the old group's offsets on the new
           // group's page: real figures for the wrong subject is the most convincing wrong data there
           // is, and this page's figures are what a reset is composed from.
           if (cancelled) return;
-          // A background poll that fails leaves the figures on screen alone rather than replacing
-          // them with a spinner or an error: they were real when they were fetched and are still the
-          // best answer available, the same reasoning `pollLag` gives for the group list. `stale`
-          // is a real answer too — the coordinator's own cached snapshot with a reason attached, not
-          // a failure — so it replaces the figures on screen same as `ready` does, badged for it.
-          if (next.kind === "ready" || next.kind === "stale" || !background) setState(() => next);
+          // Keep last-known data only for transient failures, explicitly marked stale. An
+          // authorization refusal must replace it rather than retaining now-forbidden offsets.
+          setState((previous) => {
+            if (background && next.kind === "failed" &&
+                (previous.kind === "ready" || previous.kind === "stale")) {
+              return { kind: "stale", value: previous.value, reason: next.message };
+            }
+            return next;
+          });
           timer = setTimeout(() => refresh(true), DEFAULT_POLL_MS);
         });
       };
@@ -112,8 +115,16 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
     deleteOffsets(kui.api, props.clusterId, props.groupId, topic),
   );
 
-  const mayReset = () => kui.permits(Actions.ConsumerGroupResetOffsets, props.groupId);
-  const mayDelete = () => kui.permits(Actions.ConsumerGroupDelete, props.groupId);
+  const resetRefusal = () => kui.writeBlocked !== undefined
+    ? kui.writeBlocked(props.clusterId, Actions.ConsumerGroupResetOffsets, props.groupId)
+    : kui.permits(Actions.ConsumerGroupResetOffsets, props.groupId) ? undefined
+      : "You do not have permission to reset this group's offsets.";
+  const deleteRefusal = () => kui.writeBlocked !== undefined
+    ? kui.writeBlocked(props.clusterId, Actions.ConsumerGroupDelete, props.groupId)
+    : kui.permits(Actions.ConsumerGroupDelete, props.groupId) ? undefined
+      : "You do not have permission to delete this consumer group.";
+  const mayReset = () => resetRefusal() === undefined;
+  const mayDelete = () => deleteRefusal() === undefined;
 
   const group = () => (state().kind === "loading" ? undefined : valueOf(state(), undefined));
   const staleReason = (): string | undefined => {
@@ -134,8 +145,14 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
             listHref={kui.paths.consumerGroups(props.clusterId)}
             topicHref={(topic) => kui.paths.topic(props.clusterId, topic)}
             reset={{
-              plan: (request) => planReset(kui.api, props.clusterId, props.groupId, request),
+              plan: async (request) => {
+                const problem = resetRefusal();
+                return problem === undefined ? planReset(kui.api, props.clusterId, props.groupId, request)
+                  : { ok: false, problem };
+              },
               apply: async (token) => {
+                const problem = resetRefusal();
+                if (problem !== undefined) return { ok: false, problem };
                 const outcome = await applyReset(kui.api, props.clusterId, props.groupId, token);
                 // The group's committed offsets have just moved. Everything on the page behind the
                 // wizard — the lag, the per-partition positions — now describes the state before the
@@ -155,16 +172,14 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
                 return outcome;
               },
               permitted: mayReset(),
-              refusal: mayReset()
-                ? undefined
-                : "You do not have permission to reset this group's offsets.",
+              refusal: resetRefusal(),
             }}
             /* Offered only where it is permitted. `GroupDetail` handles the other refusal itself —
                a group with members cannot be deleted, and it says so before the click rather than
                after, because that is the one refusal an operator can act on directly. */
             onDelete={mayDelete() ? () => setConfirmingDelete(true) : undefined}
             deleteRefusal={
-              mayDelete() ? undefined : "You do not have permission to delete this consumer group."
+              deleteRefusal()
             }
             /* Authorized by `ConsumerGroupResetOffsets`, which is what the endpoint's own
                `EndpointAuthorization` names — the same permission the wizard needs, because both
@@ -177,8 +192,7 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
               setForgetting(topic);
             } : undefined}
             forgetRefusal={
-              mayReset()
-                ? undefined
+              kui.writeBlocked !== undefined ? resetRefusal() : mayReset() ? undefined
                 : "You do not have permission to change this group's committed offsets."
             }
           />
@@ -186,7 +200,7 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
           <Show when={forgetting()}>
             {(topic) => (
               <ConfirmDialog
-                open
+                open={mayReset()}
                 /* Named, because this page opens two confirmations and both are portalled into
                    `document.body` as `[role="dialog"]`. "This confirmation is no longer open" has
                    to be an assertion about *this* one, and by role alone it is not. */
@@ -202,6 +216,7 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
                 busy={forget.busy()}
                 error={deleteError(forget.state())}
                 onConfirm={() => {
+                  if (!mayReset()) return;
                   void forget.run(topic()).then((outcome) => {
                     if (outcome.kind !== "done") return;
                     setForgetting(undefined);
@@ -241,7 +256,7 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
           </Show>
 
           <ConfirmDialog
-            open={confirmingDelete()}
+            open={confirmingDelete() && mayDelete()}
             onClose={() => setConfirmingDelete(false)}
             title={`Delete ${props.groupId}?`}
             consequence={consequenceOfDelete(detail())}
@@ -254,6 +269,7 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
             busy={remove.busy()}
             error={deleteError(remove.state())}
             onConfirm={() => {
+              if (!mayDelete()) return;
               void remove.run().then((outcome) => {
                 if (outcome.kind !== "done") return;
                 setConfirmingDelete(false);

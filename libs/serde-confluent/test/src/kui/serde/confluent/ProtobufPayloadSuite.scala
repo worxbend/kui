@@ -116,6 +116,19 @@ final class ProtobufPayloadSuite extends FunSuite {
   // The decoder
   // -------------------------------------------------------------------------------------------
 
+  test("a repeated nested message is not a same-named enum from another scope") {
+    val schema = ProtoSchema
+      .parse("""syntax = "proto3";
+      message M { message E { int32 n = 1; } repeated E values = 1; }
+      message Other { enum E { ZERO = 0; ONE = 1; } }
+    """)
+      .fold(fail(_), identity)
+    val actual = ProtobufPayload
+      .decode(schema, Array[Byte](0, 10, 2, 8, 1))
+      .flatMap(text => parser.parse(text).left.map(_.getMessage))
+    assertEquals(actual, parser.parse("""{"values":[{"n":1}]}""").left.map(_.getMessage))
+  }
+
   test("every scalar type decodes to the value that was written") {
     val body = framed(
       Nil,
@@ -244,6 +257,104 @@ final class ProtobufPayloadSuite extends FunSuite {
     assertEquals(json.hcursor.get[String]("adjustment"), Right("-7"))
   }
 
+  List("E", "M.E", "p.M.E", ".p.M.E").foreach { reference =>
+    test(s"$reference resolves the local packed enum rather than an unrelated message") {
+      val schema = ProtoSchema
+        .parse(s"""syntax = "proto3"; package p;
+        message M { enum E { LOCAL_ZERO = 0; LOCAL_ONE = 1; } repeated $reference values = 1; }
+        message Other { message E { int32 n = 1; } }
+      """)
+        .fold(fail(_), identity)
+      val actual = ProtobufPayload
+        .decode(schema, Array[Byte](0, 10, 2, 0, 1, 8, 1))
+        .flatMap(text => parser.parse(text).left.map(_.getMessage))
+        .fold(fail(_), identity)
+      assertEquals(
+        actual.hcursor.get[List[String]]("values"),
+        Right(List("LOCAL_ZERO", "LOCAL_ONE", "LOCAL_ONE"))
+      )
+    }
+  }
+
+  test("identically named nested enums bind locally even when selected by a message-index path") {
+    val schema = ProtoSchema
+      .parse("""syntax = "proto3"; package p;
+      message A { enum E { A_ZERO = 0; A_ONE = 1; } repeated E values = 1; }
+      message B { enum E { B_ZERO = 0; B_ONE = 1; } repeated E values = 1; }
+    """)
+      .fold(fail(_), identity)
+    List((0, "A"), (1, "B")).foreach { (index, label) =>
+      val actual = ProtobufPayload
+        .decode(schema, framed(List(index), Array[Byte](10, 2, 0, 1, 8, 1)))
+        .flatMap(text => parser.parse(text).left.map(_.getMessage))
+        .fold(fail(_), identity)
+      assertEquals(
+        actual.hcursor.get[List[String]]("values"),
+        Right(List(s"${label}_ZERO", s"${label}_ONE", s"${label}_ONE"))
+      )
+    }
+  }
+
+  test("nested fields and map values resolve relative and absolute messages in their enclosing scope") {
+    val schema = ProtoSchema
+      .parse("""syntax = "proto3"; package p;
+      message M {
+        message E { int32 n = 1; }
+        message Inner { repeated E relative = 1; repeated .p.M.E absolute = 2; map<string, E> entries = 3; }
+      }
+      message Other { enum E { ZERO = 0; ONE = 1; } }
+    """)
+      .fold(fail(_), identity)
+    val nested = Encoder().varint(1, 1).result()
+    val entry = Encoder().string(1, "key").message(2, nested).result()
+    val actual = ProtobufPayload
+      .decode(
+        schema,
+        framed(List(0, 1), Encoder().message(1, nested).message(2, nested).message(3, entry).result())
+      )
+      .flatMap(text => parser.parse(text).left.map(_.getMessage))
+    assertEquals(
+      actual,
+      parser
+        .parse("""{"relative":[{"n":1}],"absolute":[{"n":1}],"entries":{"key":{"n":1}}}""")
+        .left
+        .map(_.getMessage)
+    )
+  }
+
+  test("an unrelated short-name message is not a lexical match") {
+    val schema = ProtoSchema
+      .parse("message M { E value = 1; } message Other { message E { int32 n = 1; } }")
+      .fold(fail(_), identity)
+    assert(ProtobufPayload.decode(schema, Array[Byte](0, 10, 2, 8, 1)).isLeft)
+  }
+
+  test("packed named enums decode mixed packed and unpacked values") {
+    val schema = ProtoSchema
+      .parse("message M { enum E { ZERO = 0; ONE = 1; } repeated E values = 1; }")
+      .fold(fail(_), identity)
+    val result = ProtobufPayload
+      .decode(schema, Array[Byte](0, 10, 2, 0, 1, 8, 1))
+      .flatMap(text => parser.parse(text).left.map(_.getMessage))
+      .fold(fail(_), identity)
+    assertEquals(result.hcursor.get[List[String]]("values"), Right(List("ZERO", "ONE", "ONE")))
+  }
+
+  test("nested and packed fields cannot consume their enclosing field's neighbor") {
+    val schema = ProtoSchema
+      .parse(
+        "message M { message N { bytes b = 1; } N n = 1; repeated fixed32 f = 2; repeated int32 i = 3; }"
+      )
+      .fold(fail(_), identity)
+    val malformed = List(
+      Array[Byte](0, 10, 2, 10, 2, 32, 1),
+      Array[Byte](0, 18, 1, 1, 32, 1, 32, 1),
+      Array[Byte](0, 26, 1, 0x80.toByte, 32, 1),
+      Array[Byte](0, 10, 1, 0x80.toByte, 32, 1)
+    )
+    malformed.foreach(bytes => assert(ProtobufPayload.decode(schema, bytes).isLeft, bytes.toList))
+  }
+
   private def hex(text: String): Array[Byte] =
     text.grouped(2).map(pair => Integer.parseInt(pair, 16).toByte).toArray
 
@@ -259,8 +370,8 @@ final class ProtobufPayloadSuite extends FunSuite {
     val prefix = new ByteArrayOutputStream()
     if path.isEmpty then prefix.write(0)
     else {
-      writeVarint(prefix, path.size.toLong)
-      path.foreach(index => writeVarint(prefix, index.toLong))
+      writeVarint(prefix, path.size.toLong << 1)
+      path.foreach(index => writeVarint(prefix, index.toLong << 1))
     }
     prefix.toByteArray ++ message
   }

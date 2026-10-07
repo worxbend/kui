@@ -64,7 +64,7 @@
  * navigating away leaves a query running on somebody's cluster until
  * `kui.clusters.<n>.ksql.streamTimeout` expires — and it is one click away.
  */
-import { Show, createSignal, onCleanup } from "solid-js";
+import { Show, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { useParams } from "@solidjs/router";
 import { Actions, userMessage } from "@kui/api";
@@ -156,6 +156,12 @@ export interface KsqlScreenProps {
 }
 
 export function KsqlScreen(props: KsqlScreenProps): JSX.Element {
+  return <Show when={props.clusterId} keyed>{(clusterId) =>
+    <KsqlSession {...props} clusterId={clusterId} />
+  }</Show>;
+}
+
+function KsqlSession(props: KsqlScreenProps): JSX.Element {
   const kui = useKui();
 
   const objects = useQuery<KsqlObjects>({
@@ -183,12 +189,12 @@ export function KsqlScreen(props: KsqlScreenProps): JSX.Element {
    * mounted without the permission, so the wiring that decided it was asserted by nothing at all.
    * `KsqlWorkspace` cannot invent a permission it was not handed; this is where it is handed one.
    */
-  const runRefusal = (): string | undefined =>
-    writeBlockedReason({
+  const runRefusal = createMemo((): string | undefined =>
+    kui.writeBlocked !== undefined ? kui.writeBlocked(props.clusterId, Actions.KsqlExecute) : writeBlockedReason({
       permitted: kui.permits(Actions.KsqlExecute),
       readOnly: readOnly(),
       action: EXECUTE_ACTION,
-    });
+    }));
 
   const [sql, setSql] = createSignal("");
   const [region, setRegion] = createSignal<ResultRegion>(IDLE);
@@ -205,7 +211,7 @@ export function KsqlScreen(props: KsqlScreenProps): JSX.Element {
 
   // The leak this exists to stop: a push query the reader navigated away from goes on running on
   // the ksqlDB server until its stream budget expires. See the header.
-  onCleanup(stopStream);
+  onCleanup(() => { generation += 1; stopStream(); });
 
   const plan = createMutation((statement: string) =>
     planStatement(kui.api, props.clusterId, statement),
@@ -219,6 +225,7 @@ export function KsqlScreen(props: KsqlScreenProps): JSX.Element {
      statement the reader already cancelled or cleared finds itself superseded and leaves the
      region alone — the same guard `useQuery` already applies to a stale fetch. */
   let generation = 0;
+
   const nextGeneration = (): number => {
     generation += 1;
     return generation;
@@ -233,12 +240,15 @@ export function KsqlScreen(props: KsqlScreenProps): JSX.Element {
   };
 
   const onRun = (): void => {
+    if (untrack(runRefusal) !== undefined) return;
+    const gen = nextGeneration();
     stopStream();
     setConfirming(undefined);
     setRegion({ kind: "running" });
-    const gen = nextGeneration();
     void plan.run(sql()).then((outcome) => {
       if (gen !== generation) return;
+      const refusal = untrack(runRefusal);
+      if (refusal !== undefined) { failWith({ kind: "forbidden", message: refusal }); return; }
       if (outcome.kind !== "done") {
         failWith(outcome);
         return;
@@ -263,6 +273,8 @@ export function KsqlScreen(props: KsqlScreenProps): JSX.Element {
   };
 
   const applyNow = (planned: StatementPlan, gen: number = nextGeneration()): void => {
+    const refusal = untrack(runRefusal);
+    if (refusal !== undefined) { failWith({ kind: "forbidden", message: refusal }); return; }
     setRegion({ kind: "running" });
     void apply.run(planned).then((outcome) => {
       if (gen !== generation) return;
@@ -276,17 +288,27 @@ export function KsqlScreen(props: KsqlScreenProps): JSX.Element {
   };
 
   const openStream = (statement: string): void => {
-    const open: PushQueryOpener = props.openStream ?? openPushQuery;
+    const open: PushQueryOpener = props.openStream ?? ((clusterId, sql, subscriber) =>
+      openPushQuery(clusterId, sql, subscriber, undefined, (path) => kui.api.url(path)));
+    const gen = generation;
+    // Stream frames can arrive in one microtask; do not fold from a stale signal snapshot.
+    let current: ResultRegion = OPENING;
+    const update = (change: (held: ResultRegion) => ResultRegion): void => {
+      if (gen !== generation) return;
+      current = change(current);
+      setRegion(current);
+    };
     stream = open(props.clusterId, statement, {
-      onColumns: (columns) => setRegion((held) => withColumns(held, columns)),
-      onRow: (row) => setRegion((held) => appendRow(held, row)),
+      onColumns: (columns) => update((held) => withColumns(held, columns)),
+      onRow: (row) => update((held) => appendRow(held, row)),
+      onDone: () => update((held) => endLive(held, "the server completed the query.")),
       onError: (error) => {
         /* A decode failure is informational: one malformed frame must not end a query that is
            otherwise delivering good rows, which is the kernel's rule and the message browser's too.
            The other two are terminal and the rows already received are kept. */
         if (error.kind === "decode") return;
         const message = error.kind === "server" ? userMessage(error.error) : error.cause;
-        setRegion((held) => interrupt(held, message));
+        update((held) => interrupt(held, message));
       },
     });
   };

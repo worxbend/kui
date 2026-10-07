@@ -39,7 +39,7 @@ object ProfileSubscription {
     * spellings together: it reads a recorded capture of the real stream, so a rename on the producing side
     * fails here rather than causing this client to quietly stop hearing changes.
     */
-  val EventName: String = "cluster"
+  val EventName: String = kui.cluster.contract.ProfileEndpoints.EventName
 
   def instructionFor(event: SseEvent): Instruction =
     if event.name != EventName then Instruction.Ignored(s"'${event.name}' is not a cluster change")

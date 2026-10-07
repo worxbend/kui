@@ -121,9 +121,13 @@ object AuthEndpoints {
     * Derived from [[login]] rather than written out again, so the path, the body and the error shape have
     * exactly one definition and cannot drift apart.
     */
-  val loginWithSession
-      : PublicEndpoint[LoginRequest, (ErrorEnvelope, StatusCode), (LoginResponse, CookieValueWithMeta), Any] =
-    login.out(setCookie(SessionCookie))
+  val loginWithSession: PublicEndpoint[
+    LoginRequest,
+    (ErrorEnvelope, StatusCode),
+    (LoginResponse, Option[CookieValueWithMeta]),
+    Any
+  ] =
+    login.out(setCookieOpt(SessionCookie))
 
   /** Completing a required password change. It grants no session on its own: the caller signs in again with
     * the new password, which is one flow rather than two ways to obtain a session.

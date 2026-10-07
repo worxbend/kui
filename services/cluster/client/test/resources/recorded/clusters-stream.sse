@@ -1,15 +1,15 @@
-event: cluster
+event: clusters
 id: 1
 data: {"id":"prod-eu","version":8,"change":"updated","at":"2026-09-03T10:11:13.000Z"}
 
-event: cluster
+event: clusters
 id: 2
 data: {"id":"staging","version":3,"change":"removed","at":"2026-09-03T10:11:14.000Z"}
 
 event: heartbeat
 data: {}
 
-event: cluster
+event: clusters
 id: 3
 data: {"id":"prod-eu","version":9,"change":"renamed","at":"2026-09-03T10:11:15.000Z"}
 

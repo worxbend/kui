@@ -24,6 +24,7 @@ final class MetricNamesSuite extends FunSuite {
   private val expected = List(
     "kui.http.server.duration",
     "kui.upstream.duration",
+    "kui.upstream.attempt.duration",
     "kui.upstream.circuit.state",
     "kui.kafka.admin.duration",
     "kui.kafka.consume.records",
@@ -167,7 +168,7 @@ final class MetricNamesSuite extends FunSuite {
   test("an upstream outcome has one spelling, and it round-trips") {
     assertEquals(
       UpstreamOutcome.values.toList.map(_.wire),
-      List("success", "client_error", "server_error", "timeout", "circuit_open", "unreachable")
+      List("success", "client_error", "server_error", "timeout", "circuit_open", "unreachable", "canceled")
     )
     UpstreamOutcome.values.foreach { outcome =>
       assertEquals(UpstreamOutcome.fromWire(outcome.wire), Some(outcome))

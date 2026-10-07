@@ -214,9 +214,11 @@ circuit telemetry.
 ## Security notes
 
 - Production URL policy rejects loopback names and private, loopback, link-local, cloud-metadata, and other
-  non-public address literals. Host names are not resolved during configuration validation, so network egress
-  policy remains part of the SSRF boundary. `KUI_ALLOW_PRIVATE_UPSTREAMS=true` is an explicit relaxation for
-  private-network and quickstart deployments; enabling it expands that boundary.
+  non-public addresses. Host names are not resolved during configuration validation, but the HTTP transport
+  checks resolved addresses when connecting. Network egress policy remains part of the SSRF boundary.
+  `KUI_ALLOW_PRIVATE_UPSTREAMS=true` is explicitly enabled only in the shipped local-demo backends; it broadly
+  permits non-public destinations. Do not copy this relaxation into production without a security review
+  and egress controls; see [local-demo upstream policy](deployment.md#local-demo-upstream-policy).
 - Prometheus API redirects are disabled so credentials cannot be forwarded to a different destination.
   Response bodies, warning text, PromQL, URLs, and credentials are excluded from browser-facing errors,
   telemetry labels, and per-failure logs.

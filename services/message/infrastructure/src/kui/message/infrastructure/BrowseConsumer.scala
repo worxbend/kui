@@ -59,6 +59,9 @@ trait BrowseConsumer[F[_]] {
 
   def seek(topic: TopicName, partition: PartitionId, offset: Long): F[Either[KuiError, Unit]]
 
+  /** Positions advance over compacted offsets and control records, unlike delivered records. */
+  def positions: F[Either[KuiError, Map[PartitionId, Long]]]
+
   /** One poll. Returns whatever arrived within `timeout`, which is routinely nothing.
     *
     * The timeout is short by design and the caller loops. A single long poll would be fewer calls and would

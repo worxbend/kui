@@ -50,7 +50,7 @@ object ClusterRoutes {
     val secured = ClusterApi.Securing[F](principals, rejections, logger, guard)
 
     List(
-      listClusters(registry, topology, secured),
+      listClusters(registry, topology, secured, guard),
       getCluster(registry, topology, secured),
       listBrokers(brokers, secured),
       brokerConfigs(brokers, secured),
@@ -67,11 +67,17 @@ object ClusterRoutes {
   private def listClusters[F[_]: Async](
       registry: ClusterRegistry[F],
       topology: ClusterTopologyUseCase[F],
-      secured: ClusterApi.Securing[F]
+      secured: ClusterApi.Securing[F],
+      guard: RbacGuard[F]
   ): ServerEndpoint[Any, F] =
-    secured(ClusterEndpoints.listClusters) { _ => _ =>
+    secured(ClusterEndpoints.listClusters) { ctx => _ =>
       for {
-        profiles <- registry.list
+        configured <- registry.list
+        profiles <- configured.filterA(profile =>
+          guard
+            .authorize(ctx, ClusterEndpoints.getCluster, s"/internal/v1/clusters/${profile.id.value}")
+            .map(_.isRight)
+        )
         views <- topology.viewAll
         now <- Clock[F].realTimeInstant
       } yield {

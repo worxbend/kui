@@ -143,6 +143,16 @@ final class RegistryHttpSuite extends KuiIOSuite {
     registry(nothing).subjectCompatibility(orders).assertEquals(Right(None))
   }
 
+  test("compatibility PUT 404 is a rejected write, not successful absence") {
+    for {
+      global <- registry(nothing).setGlobalCompatibility(CompatibilityLevel.Full)
+      subject <- registry(nothing).setSubjectCompatibility(orders, CompatibilityLevel.Full)
+    } yield {
+      assert(global.isLeft, clue = global)
+      assert(subject.isLeft, clue = subject)
+    }
+  }
+
   test("a level KUI does not know is a failure naming the seven it does") {
     registry { case "/config" =>
       (StatusCode.Ok, """{"compatibilityLevel":"SIDEWAYS"}""")

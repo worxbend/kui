@@ -2,7 +2,8 @@ package kui.observability
 
 import java.util.concurrent.TimeoutException
 
-import cats.effect.kernel.Async
+import cats.effect.kernel.{Async, Outcome}
+import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import org.typelevel.otel4s.Attribute
 import org.typelevel.otel4s.metrics.Histogram
@@ -20,10 +21,10 @@ import sttp.client4.{Backend, GenericRequest, Response}
   *
   * ==Why the outcome matters more than the status==
   *
-  * `outcome` collapses everything that can happen into six values — success, client error, server error,
-  * timeout, circuit open, unreachable — because those are the six that lead to different actions. A dashboard
-  * grouped by HTTP status cannot distinguish "the upstream refused the connection" from "we gave up waiting",
-  * and those have different causes and different fixes.
+  * `outcome` distinguishes success, client error, server error, timeout, circuit open, unreachable and
+  * external cancellation because these lead to different actions. A dashboard grouped by HTTP status cannot
+  * distinguish "the upstream refused the connection" from "we gave up waiting", and those have different
+  * causes and different fixes.
   */
 object UpstreamInstrumentation {
 
@@ -42,7 +43,8 @@ object UpstreamInstrumentation {
       backend: Backend[F],
       telemetry: Telemetry[F],
       serviceName: String,
-      upstream: String
+      upstream: String,
+      classify: Either[Throwable, Int] => UpstreamOutcome = outcomeOf
   ): F[Backend[F]] =
     for {
       tracer <- telemetry.tracer(s"kui.${KuiInterceptors.contextOf(serviceName)}.upstream")
@@ -52,7 +54,51 @@ object UpstreamInstrumentation {
         .withUnit("s")
         .withDescription("How long a call to another system took, and how it ended")
         .create
-    } yield new InstrumentedBackend[F](backend, tracer, duration, serviceName, upstream)
+    } yield new InstrumentedBackend[F](backend, tracer, duration, serviceName, upstream, classify)
+
+  /** Attempt measurements are separate from logical calls and do not create extra logical spans. */
+  def measureAttempts[F[_]: Async](
+      backend: Backend[F],
+      telemetry: Telemetry[F],
+      serviceName: String,
+      upstream: String
+  ): F[Backend[F]] =
+    telemetry.meter(s"kui.${KuiInterceptors.contextOf(serviceName)}.upstream").flatMap { meter =>
+      meter
+        .histogram[Double](MetricNames.UpstreamAttemptDuration)
+        .withUnit("s")
+        .withDescription("Duration of individual transport attempts, excluding retry backoff")
+        .create
+        .map { histogram =>
+          new DelegateBackend[F, Any](backend) with Backend[F] {
+            override def send[T](request: GenericRequest[T, Any & Effect[F]]): F[Response[T]] =
+              Async[F].monotonic.flatMap { started =>
+                backend.send(request).guaranteeCase { exit =>
+                  for {
+                    outcome <- classifyExit(exit, outcomeOf)
+                    ended <- Async[F].monotonic
+                    _ <- record(
+                      histogram,
+                      serviceName,
+                      upstream,
+                      outcome,
+                      (ended - started).toNanos.toDouble / 1e9
+                    )
+                  } yield ()
+                }
+              }
+          }
+        }
+    }
+
+  private def classifyExit[F[_]: Async, T](
+      exit: Outcome[F, Throwable, Response[T]],
+      classify: Either[Throwable, Int] => UpstreamOutcome
+  ): F[UpstreamOutcome] = exit match {
+    case Outcome.Succeeded(value) => value.map(response => classify(Right(response.code.code)))
+    case Outcome.Errored(error) => Async[F].pure(classify(Left(error)))
+    case Outcome.Canceled() => Async[F].pure(UpstreamOutcome.Canceled)
+  }
 
   /** How a call ended, from what came back.
     *
@@ -89,7 +135,8 @@ object UpstreamInstrumentation {
       tracer: Tracer[F],
       duration: Histogram[F, Double],
       serviceName: String,
-      upstream: String
+      upstream: String,
+      classify: Either[Throwable, Int] => UpstreamOutcome
   ) extends DelegateBackend[F, Any](delegate)
       with Backend[F] {
 
@@ -104,23 +151,25 @@ object UpstreamInstrumentation {
         .build
         .use { span =>
           for {
-            startedAt <- Async[F].realTime
+            startedAt <- Async[F].monotonic
             propagated <- withTraceparent(request, span)
-            attempt <- delegate.send(propagated).attempt
-            endedAt <- Async[F].realTime
-            outcome = outcomeOf(attempt.map(_.code.code))
-            _ <- record(
-              duration,
-              serviceName,
-              upstream,
-              outcome,
-              (endedAt - startedAt).toNanos.toDouble / 1e9
-            )
-            _ <- span.addAttributes(
-              Attribute(MetricNames.Attr.Upstream, upstream),
-              Attribute(MetricNames.Attr.Outcome, outcome.wire)
-            )
-            result <- Async[F].fromEither(attempt)
+            result <- delegate.send(propagated).guaranteeCase { exit =>
+              for {
+                outcome <- classifyExit(exit, classify)
+                endedAt <- Async[F].monotonic
+                _ <- record(
+                  duration,
+                  serviceName,
+                  upstream,
+                  outcome,
+                  (endedAt - startedAt).toNanos.toDouble / 1e9
+                )
+                _ <- span.addAttributes(
+                  Attribute(MetricNames.Attr.Upstream, upstream),
+                  Attribute(MetricNames.Attr.Outcome, outcome.wire)
+                )
+              } yield ()
+            }
           } yield result
         }
     }

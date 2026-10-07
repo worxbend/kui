@@ -214,7 +214,7 @@ describe("createBrowseTransport", () => {
      * `data: {` is not JSON, so `decodeBrowseEvent` refuses it and the kernel reports a decode
      * error on the `message` event, which is exactly the frame this mapping is about.
      */
-    const body = ["event: message", "data: {", "", ""].join("\n");
+    const body = ["event: message", "data: {", "", "event: done", 'data: {"reason":"exhausted"}', "", ""].join("\n");
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -263,6 +263,9 @@ describe("createBrowseTransport", () => {
       "",
       "event: message",
       `data: ${valid}`,
+      "",
+      "event: done",
+      'data: {"reason":"exhausted"}',
       "",
       "",
     ].join("\n");

@@ -170,6 +170,37 @@ final class BoundedCacheSuite extends KuiIOSuite {
     }
   }
 
+  List(false, true).foreach { all =>
+    test(s"invalidation fences active loaders and their waiters (all=$all)") {
+      TestControl.executeEmbed {
+        cacheOf(10, None).use { (cache, _) =>
+          for {
+            entered <- Deferred[IO, Unit]
+            release <- Deferred[IO, Unit]
+            attempts <- Ref.of[IO, Int](0)
+            load = attempts.getAndUpdate(_ + 1).flatMap {
+              case 0 => entered.complete(()).void >> release.get.as("old")
+              case _ => IO.pure("new")
+            }
+            first <- cache.getOrLoad("k")(load).start
+            _ <- entered.get
+            waiter <- cache.getOrLoad("k")(load).start
+            _ <- IO.sleep(1.millisecond)
+            _ <- if all then cache.invalidateAll else cache.invalidate("k")
+            _ <- release.complete(())
+            a <- first.joinWithNever
+            b <- waiter.joinWithNever
+            stored <- cache.get("k")
+          } yield {
+            assertEquals(a, "new")
+            assertEquals(b, "new")
+            assertEquals(stored, Some("new"))
+          }
+        }
+      }
+    }
+  }
+
   test("invalidate removes one key and leaves the rest") {
     cacheOf(10, None).use { (cache, _) =>
       for {

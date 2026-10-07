@@ -17,6 +17,19 @@ import kui.security.Principal
   */
 final class InMemorySessionStoreSuite extends CatsEffectSuite {
 
+  test("anonymous churn cannot evict an authenticated session") {
+    val now = java.time.Instant.EPOCH
+    val principal =
+      kui.security.Principal(kui.kernel.UserName.unsafe("ada"), Set.empty, kui.security.PrincipalKind.Session)
+    InMemorySessionStore.resource[IO](SessionConfig.Default.copy(maxSessions = 2)).use { sessions =>
+      for {
+        authenticated <- sessions.create(principal, now)
+        _ <- List.fill(10)(()).traverse_(_ => sessions.create(Principal.Anonymous, now))
+        retained <- sessions.get(authenticated.id, now)
+      } yield assert(retained.isDefined)
+    }
+  }
+
   private val shortConfig: SessionConfig =
     SessionConfig(
       idleTimeout = 30.minutes,
@@ -81,6 +94,67 @@ final class InMemorySessionStoreSuite extends CatsEffectSuite {
       assertNotEquals(rotatedId, None)
       assertEquals(oldStillWorks, None, "a stolen pre-rotation id must be worthless")
       assert(newWorks)
+    }
+  }
+
+  test("rotation retires the old id without making it an authenticated alias") {
+    val now = java.time.Instant.EPOCH
+    InMemorySessionStore.resource[IO](shortConfig).use { sessions =>
+      for {
+        original <- sessions.create(Principal.Anonymous, now)
+        rotated <- sessions.rotate(original.id, now)
+        retired <- sessions.isRetired(original.id, now)
+        old <- sessions.get(original.id, now)
+        active <- sessions.get(rotated.get.id, now)
+      } yield {
+        assert(retired)
+        assertEquals(old, None)
+        assert(active.isDefined)
+      }
+    }
+  }
+
+  test("retirement tombstones have a separate capacity bound and expire without reads extending their TTL") {
+    val now = java.time.Instant.EPOCH
+    InMemorySessionStore.resource[IO](shortConfig.copy(maxSessions = 2)).use { sessions =>
+      for {
+        ids <- List.fill(3)(()).traverse { _ =>
+          sessions.create(Principal.Anonymous, now).flatTap(session => sessions.retire(session.id, now))
+        }
+        bounded <- ids.traverse(session => sessions.isRetired(session.id, now))
+        beforeExpiry <- sessions.isRetired(ids.last.id, now.plusSeconds(299))
+        expired <- sessions.isRetired(ids.last.id, now.plusSeconds(300))
+        removed <- sessions.sweep(now.plusSeconds(300))
+        swept <- sessions.isRetired(ids.last.id, now.plusSeconds(300))
+      } yield {
+        assertEquals(bounded, List(false, true, true))
+        assert(beforeExpiry)
+        assert(!expired)
+        assert(!swept)
+        assertEquals(removed, 0)
+      }
+    }
+  }
+
+  test("genuinely expired sessions are not retired and live operations preserve retirement markers") {
+    val now = java.time.Instant.EPOCH
+    InMemorySessionStore.resource[IO](shortConfig).use { sessions =>
+      for {
+        expired <- sessions.create(Principal.Anonymous, now.minusSeconds(3600))
+        original <- sessions.create(Principal.Anonymous, now)
+        _ <- sessions.retire(original.id, now)
+        active <- sessions.create(Principal.Anonymous, now)
+        _ <- sessions.get(active.id, now)
+        _ <- sessions.delete(active.id)
+        _ <- sessions.sweep(now)
+        retired <- sessions.isRetired(original.id, now)
+        notRetired <- sessions.isRetired(expired.id, now)
+        old <- sessions.get(original.id, now)
+      } yield {
+        assert(retired)
+        assert(!notRetired)
+        assertEquals(old, None)
+      }
     }
   }
 

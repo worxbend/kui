@@ -63,6 +63,23 @@ final class KafkaTopicWriteCallSuite extends KuiIOSuite {
       logger <- FakeStructuredLogger[IO]
     } yield new KafkaTopicWriter[IO](pool, id => Option.when(id == cluster)(connection), logger)
 
+  test("confirmed deletion sends the approved UUID, never the reusable topic name") {
+    val id = org.apache.kafka.common.Uuid.fromString("AAAAAAAAAAAAAAAAAAAAAQ")
+    val seen = new AtomicReference[List[org.apache.kafka.common.Uuid]](Nil)
+    val admin = StubAdmin {
+      case ("deleteTopics", (asked: org.apache.kafka.common.TopicCollection.TopicIdCollection) :: _) =>
+        val _ = seen.set(asked.topicIds.asScala.toList)
+        KuiTopicAdminResults.deleteTopicIds(Map(id -> KuiTopicAdminResults.completedVoid).asJava)
+    }
+    for {
+      writer <- writerOver(admin)
+      result <- writer.deleteById(cluster, orders, id.toString)
+    } yield {
+      assertEquals(result, Right(()))
+      assertEquals(seen.get, List(id))
+    }
+  }
+
   // --------------------------------------------------------------------------------- alterConfig
 
   /** An admin that accepts every `incrementalAlterConfigs` and remembers what it was handed. */

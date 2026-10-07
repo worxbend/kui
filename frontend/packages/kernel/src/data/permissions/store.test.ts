@@ -188,12 +188,12 @@ describe("the permission store", () => {
   it("reads the wire shape, including the fields the server omits when they are empty", () => {
     expect(
       grantsFromWire([
-        { resource: "TOPIC", clusters: ["prod"], actions: ["VIEW"], value: ".*" },
-        { resource: "AUDIT" },
+        { resource: "TOPIC", clusters: ["prod"], actions: ["VIEW"], value: ".*", defaultRole: false },
+        { resource: "AUDIT", defaultRole: false },
       ]),
     ).toEqual([
-      { resource: "TOPIC", clusters: ["prod"], actions: ["VIEW"], value: ".*" },
-      { resource: "AUDIT", clusters: [], actions: [], value: undefined },
+      { resource: "TOPIC", clusters: ["prod"], actions: ["VIEW"], value: ".*", defaultRole: false },
+      { resource: "AUDIT", clusters: [], actions: [], value: undefined, defaultRole: false },
     ]);
     expect(grantsFromWire(undefined)).toEqual([]);
   });

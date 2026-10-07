@@ -483,6 +483,8 @@ services:
     ports:
       - "${KUI_PORT:-18080}:8080"
     environment:
+      # Local demo only: the schema registry resolves to a private Docker address.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       # Human-readable log lines. The images default to one JSON object per line, which is right for
       # a log collector and unreadable for the person who just started the demonstration.
       KUI_TELEMETRY_LOGFORMAT: text

@@ -203,13 +203,53 @@ object ResendRequestDto {
   given CanEqual[ResendRequestDto, ResendRequestDto] = CanEqual.derived
 }
 
-/** What a resend did.
-  *
-  * `read` and `written` are reported separately, and they differ whenever a range named offsets that
-  * retention has already removed. Reporting only `written` would make a resend that copied nothing because
-  * the source had been compacted away look exactly like one that had nothing to copy.
-  */
-final case class ResendResultDto(toTopic: TopicName, read: Long, written: Long)
+/** A failed write identified by its source partition and offset, for selective retry. */
+final case class ResendFailureDto(partition: PartitionId, offset: Offset, code: String, error: String)
+
+object ResendFailureDto {
+  given Codec[ResendFailureDto] = Codec.from(
+    (c: HCursor) =>
+      for {
+        partition <- c.get[PartitionId]("partition")
+        offset <- c.get[Offset]("offset")
+        code <- c.get[String]("code")
+        error <- c.get[String]("error")
+      } yield ResendFailureDto(partition, offset, code, error),
+    (v: ResendFailureDto) =>
+      Json.obj(
+        "partition" -> v.partition.asJson,
+        "offset" -> v.offset.asJson,
+        "code" -> v.code.asJson,
+        "error" -> v.error.asJson
+      )
+  )
+  given Schema[ResendFailureDto] = Schema.derived[ResendFailureDto]
+}
+
+final case class ResendRangeFailureDto(range: OffsetRangeDto, code: String, error: String)
+
+object ResendRangeFailureDto {
+  given Codec[ResendRangeFailureDto] = Codec.from(
+    (c: HCursor) =>
+      for {
+        range <- c.get[OffsetRangeDto]("range")
+        code <- c.get[String]("code")
+        error <- c.get[String]("error")
+      } yield ResendRangeFailureDto(range, code, error),
+    (v: ResendRangeFailureDto) =>
+      Json.obj("range" -> v.range.asJson, "code" -> v.code.asJson, "error" -> v.error.asJson)
+  )
+  given Schema[ResendRangeFailureDto] = Schema.derived[ResendRangeFailureDto]
+}
+
+/** Successful counts alongside individual write failures and source ranges that could not be copied. */
+final case class ResendResultDto(
+    toTopic: TopicName,
+    read: Long,
+    written: Long,
+    failures: List[ResendFailureDto] = Nil,
+    rangeFailures: List[ResendRangeFailureDto] = Nil
+)
 
 object ResendResultDto {
 
@@ -219,18 +259,22 @@ object ResendResultDto {
         toTopic <- cursor.get[TopicName]("toTopic")
         read <- cursor.get[Long]("read")
         written <- cursor.get[Long]("written")
-      } yield ResendResultDto(toTopic, read, written),
+        failures <- cursor.getOrElse[List[ResendFailureDto]]("failures")(Nil)
+        rangeFailures <- cursor.getOrElse[List[ResendRangeFailureDto]]("rangeFailures")(Nil)
+      } yield ResendResultDto(toTopic, read, written, failures, rangeFailures),
     (dto: ResendResultDto) =>
       Json.obj(
         "toTopic" -> dto.toTopic.asJson,
         "read" -> dto.read.asJson,
-        "written" -> dto.written.asJson
+        "written" -> dto.written.asJson,
+        "failures" -> dto.failures.asJson,
+        "rangeFailures" -> dto.rangeFailures.asJson
       )
   )
 
   given Schema[ResendResultDto] = Schema
     .derived[ResendResultDto]
-    .description("A resend's tally; read and written differ when retention removed part of the source")
+    .description("A resend's tally, failed source records and ranges; retry only the reported failures")
 
   given CanEqual[ResendResultDto, ResendResultDto] = CanEqual.derived
 }

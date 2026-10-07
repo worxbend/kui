@@ -132,7 +132,8 @@ object OidcConfig {
 final case class AuthConfig(
     authType: AuthType,
     users: List[FormUserConfig],
-    oidc: Option[OidcConfig]
+    oidc: Option[OidcConfig],
+    trustedProxies: Set[String] = Set.empty
 )
 
 object AuthConfig {

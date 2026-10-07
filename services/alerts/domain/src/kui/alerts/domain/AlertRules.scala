@@ -66,7 +66,7 @@ object AlertRuleState {
   *
   * @param opened
   *   events for conditions that were not already open. A condition that is *still* firing opens nothing: it
-  *   is the same event, and [[refreshed]] carries its id so the store can move its `lastSeenAt`.
+  *   is the same event, and [[refreshed]] carries its latest severity, text and observation time.
   * @param resolved
   *   ids of events whose rule ran and no longer fires. An event whose rule could **not** run is not here:
   *   closing an alert because KUI stopped being able to check it is the single most dangerous thing an
@@ -74,7 +74,7 @@ object AlertRuleState {
   */
 final case class Evaluation(
     opened: List[AlertEvent],
-    refreshed: List[AlertEventId],
+    refreshed: List[AlertEvent],
     resolved: List[AlertEventId],
     state: AlertRuleState,
     reports: List[RuleReport]
@@ -129,16 +129,36 @@ object AlertRules {
     }.toSet
 
     val openByKey = open.filter(_.isOpen).map(event => event.key -> event).toMap
+    // Absence from a partial broker response is not a healthy measurement. Disk alerts may only
+    // clear when this exact directory supplied a percentage on this pass.
+    val measuredDisks = facts.logDirectories.toOption.toList.flatten
+      .filter(_.usedPercent.nonEmpty)
+      .map(directory => AlertKey(AlertRule.DiskUsage, directory.label))
+      .toSet
 
     val opened = fired.collect {
       case (key, firing) if !openByKey.contains(key) =>
         AlertEvent.open(key, firing.severity, now, firing.title, firing.detail)
     }.toList
 
-    val refreshed = openByKey.collect { case (key, event) if fired.contains(key) => event.id }.toList
+    val refreshed = openByKey.toList.flatMap { (key, event) =>
+      fired
+        .get(key)
+        .map(firing =>
+          event.copy(
+            severity = firing.severity,
+            title = firing.title,
+            detail = firing.detail,
+            lastSeenAt = now
+          )
+        )
+    }
 
     val resolved = openByKey.collect {
-      case (key, event) if ran.contains(key.rule) && !fired.contains(key) => event.id
+      case (key, event)
+          if ran.contains(key.rule) && !fired.contains(key) &&
+            (key.rule != AlertRule.DiskUsage || measuredDisks.contains(key)) =>
+        event.id
     }.toList
 
     Evaluation(

@@ -30,6 +30,8 @@ import type { paths } from "./schema.js";
  * explicit action a user takes.
  */
 export interface KuiApiClient {
+  /** Resolves a full public API path (including /api/v1) with the same base as requests. */
+  readonly url: (path: string) => string;
   readonly get: ResultMethod<"get">;
   readonly post: ResultMethod<"post">;
   readonly put: ResultMethod<"put">;
@@ -157,13 +159,16 @@ export interface ApiClientOptions {
   /** The session's CSRF token and the gate that waits for it. */
   readonly csrf: CsrfTokens;
   /**
-   * Told when the server says the session has lapsed, before the caller sees the failure.
+   * Decides whether a protected 401 means the session has lapsed, before the caller sees it.
+   * Return false to retain the token: an anonymous session may legitimately be refused a
+   * protected resource while still needing its valid CSRF token for sign-in. Otherwise the
+   * token is invalidated. Session owners must make this decision together with identity expiry.
    *
    * The status is inspected rather than the body, because a `401` has to be noticed whether or not
    * the endpoint declared that status — and a session that silently stopped working is exactly the
    * failure a user cannot diagnose on their own.
    */
-  readonly onUnauthorized?: () => void;
+  readonly onUnauthorized?: () => boolean | void;
   /** A `fetch` to use instead of the browser's. Tests pass one; nothing else does. */
   readonly fetch?: (input: Request) => Promise<Response>;
   /**
@@ -192,37 +197,38 @@ const RequestTimeoutMs = 30_000;
  * Bounds every request to {@link RequestTimeoutMs} (or the override a test supplies), so a request
  * that never answers becomes a `timeout` {@link ApiError} instead of a promise that never settles.
  *
- * The deadline is enforced independently of whether `fetchImpl` itself honours the abort signal —
+ * The deadline is enforced independently of whether the transport honours the abort signal —
  * `Promise.race` against a timer that always fires — because the one thing this must never do is
  * trust an unknown transport (a test's stub, a service worker, a future fetch polyfill) to behave.
  * The signal is still attached to the outgoing request, and merged with the caller's own if it set
  * one, so a real `fetch` also stops the underlying connection rather than leaking it.
  */
-function withDeadline(
-  fetchImpl: (input: Request) => Promise<Response>,
+function withDeadline<T>(
+  send: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
-): (input: Request) => Promise<Response> {
-  return (request) => {
-    const deadline = new AbortController();
-    const timer = setTimeout(() => deadline.abort(), timeoutMs);
-    const signal = AbortSignal.any([request.signal, deadline.signal]);
-
-    const sent = fetchImpl(new Request(request, { signal }));
-    // Never surfaced: a race that loses still keeps running, and an unhandled rejection from it
-    // would otherwise land in the console — or, in a strict test runner, fail the suite — for a
-    // request nobody is listening to any more.
-    sent.catch(() => {});
-
-    const timedOut = new Promise<Response>((_resolve, reject) => {
-      deadline.signal.addEventListener(
-        "abort",
-        () => reject(new DOMException("The request timed out", "TimeoutError")),
-        { once: true },
-      );
-    });
-
-    return Promise.race([sent, timedOut]).finally(() => clearTimeout(timer));
-  };
+  caller?: AbortSignal,
+): Promise<T> {
+  const deadline = new AbortController();
+  const signal = caller === undefined ? deadline.signal : AbortSignal.any([caller, deadline.signal]);
+  const timer = setTimeout(
+    () => deadline.abort(new DOMException("The request timed out", "TimeoutError")),
+    timeoutMs,
+  );
+  let onAbort = (): void => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  // Race the entire operation, including middleware and JSON decoding, not fetch's headers.
+  const sent = Promise.resolve().then(() => {
+    signal.throwIfAborted();
+    return send(signal);
+  });
+  return Promise.race([sent, aborted]).finally(() => {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", onAbort);
+  });
 }
 
 /**
@@ -267,8 +273,9 @@ function isSessionCall(url: string): boolean {
 const CorrelationResponseHeader = "X-Kui-Correlation-Id";
 
 export function createApiClient(options: ApiClientOptions): KuiApiClient {
+  const baseUrl = apiBaseUrl(options.bootstrap, options.origin);
   const raw = createOpenApiClient<paths>({
-    baseUrl: apiBaseUrl(options.bootstrap, options.origin),
+    baseUrl,
 
     // What makes the session cookie travel. Without it `fetch` omits cookies on anything it
     // considers cross-origin, and a reverse proxy that rewrites the origin is enough to make a
@@ -276,12 +283,10 @@ export function createApiClient(options: ApiClientOptions): KuiApiClient {
     // production.
     credentials: "include",
 
-    fetch: withDeadline(
-      options.fetch ?? ((request) => fetch(request)),
-      options.requestTimeoutMs ?? RequestTimeoutMs,
-    ),
+    fetch: options.fetch ?? ((request) => fetch(request)),
   });
 
+  const sentTokens = new WeakMap<Request, string | undefined>();
   raw.use({
     /**
      * Adds the CSRF header to everything except `GET`.
@@ -317,17 +322,20 @@ export function createApiClient(options: ApiClientOptions): KuiApiClient {
        * legibly rather than hanging for ever.
        */
       if (!isSessionCall(request.url)) await options.csrf.waitForToken();
+      request.signal.throwIfAborted();
+      sentTokens.set(request, options.csrf.currentToken());
 
       if (request.method === "GET" || request.method === "HEAD") return request;
       const token = await options.csrf.waitForToken();
+      request.signal.throwIfAborted();
       if (token !== undefined) request.headers.set(CsrfHeaderName, token);
       return request;
     },
 
     onResponse({ request, response }) {
       /*
-       * A 401 means "your session has ended" everywhere except on the sign-in call itself, where it
-       * means "those credentials are wrong".
+       * A protected 401 may mean expiry or an expected refusal of an anonymous session.
+       * The session owner decides; a credentials 401 means "those credentials are wrong".
        *
        * Treating them alike was a real defect and a bad one. The shell's handler for an expired
        * session clears the identity, and `mustSignIn()` needs an identity to decide that the
@@ -342,9 +350,11 @@ export function createApiClient(options: ApiClientOptions): KuiApiClient {
       // The *request's* URL, not the response's: a `Response` constructed by hand — which is what a
       // test transport returns, and what a service worker may return — has an empty `url`, and the
       // exemption would then silently never apply in exactly the place it is being tested.
-      if (response.status === UnauthorizedStatus && !isCredentialsCall(request.url)) {
-        options.csrf.invalidate();
-        options.onUnauthorized?.();
+      // Ignore a late failure for a token that a newer session has already replaced.
+      if (response.status === UnauthorizedStatus && !isCredentialsCall(request.url)
+        && !request.signal.aborted
+        && sentTokens.get(request) === options.csrf.currentToken()) {
+        if (options.onUnauthorized?.() !== false) options.csrf.invalidate();
       }
       return response;
     },
@@ -384,12 +394,17 @@ export function createApiClient(options: ApiClientOptions): KuiApiClient {
   const wrap = <Method extends HttpMethod>(
     send: (...args: readonly unknown[]) => Promise<AnyFetchResponse>,
   ): ResultMethod<Method> =>
-    ((...args: readonly unknown[]) => run(() => send(...args))) as ResultMethod<Method>;
+    ((path: unknown, init?: RequestInit) => run(() => withDeadline(
+      (signal) => send(path, { ...init, signal }),
+      options.requestTimeoutMs ?? RequestTimeoutMs,
+      init?.signal ?? undefined,
+    ))) as ResultMethod<Method>;
 
   const erase = (send: unknown): ((...args: readonly unknown[]) => Promise<AnyFetchResponse>) =>
     send as (...args: readonly unknown[]) => Promise<AnyFetchResponse>;
 
   return {
+    url: (path) => `${baseUrl}/${path.replace(/^\/+/, "")}`,
     get: wrap<"get">(erase(raw.GET)),
     post: wrap<"post">(erase(raw.POST)),
     put: wrap<"put">(erase(raw.PUT)),

@@ -87,7 +87,7 @@ export interface ClusterAdminProps {
   readonly onFormChange: (form: ClusterForm) => void;
   readonly onSave: () => void;
   readonly onTest: () => void;
-  readonly onDelete: (cluster: ManagedCluster) => void;
+  readonly onDelete: (cluster: ManagedCluster) => void | Promise<boolean>;
   readonly connectivity?: Connectivity | undefined;
   readonly saveState: Mutation<unknown>;
   readonly testState: Mutation<unknown>;
@@ -244,7 +244,7 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
               class="kui-cluster-admin__form"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (props.saveState.kind !== "running") props.onSave();
+                if (props.disabledReason === undefined && props.saveState.kind !== "running") props.onSave();
               }}
             >
               <TextField
@@ -402,6 +402,13 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
                 )}
               </Show>
 
+              <Show when={failure(props.testState)}>
+                {(problem) => (
+                  <Banner tone="danger" message={problem().message}
+                    code={problem().kind === "failed" ? (problem() as { code: string }).code : undefined} />
+                )}
+              </Show>
+
               <Show when={failure(props.saveState)}>
                 {(problem) => (
                   <Banner
@@ -421,16 +428,16 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
                 {/* Before Save, not after: getting a broker address or a mechanism wrong is the
                     ordinary failure here, and finding out at save time leaves a cluster registered
                     in a state that does not work — which then shows on the dashboard as an outage. */}
-                <Button
-                  variant="secondary"
-                  icon="refresh"
-                  busy={props.testState.kind === "running"}
-                  onClick={props.onTest}
-                >
-                  Test the connection
-                </Button>
+                <Show when={props.disabledReason === undefined} fallback={
+                  <Button variant="secondary" icon="refresh" disabled disabledReason={props.disabledReason ?? "Configuration changes are not permitted."}>Test the connection</Button>
+                }>
+                  <Button variant="secondary" icon="refresh" busy={props.testState.kind === "running"}
+                    onClick={() => { if (props.disabledReason === undefined) props.onTest(); }}>
+                    Test the connection
+                  </Button>
+                </Show>
                 <Show
-                  when={problems().length === 0 && props.saveState.kind !== "running"}
+                  when={props.disabledReason === undefined && problems().length === 0 && props.saveState.kind !== "running"}
                   fallback={
                     <Button
                       variant="primary"
@@ -438,9 +445,9 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
                       busy={props.saveState.kind === "running"}
                       disabled
                       disabledReason={
-                        props.saveState.kind === "running"
+                        props.disabledReason ?? (props.saveState.kind === "running"
                           ? "The cluster is being saved."
-                          : (problems()[0] ?? "This form is not complete.")
+                          : (problems()[0] ?? "This form is not complete."))
                       }
                     >
                       Save
@@ -460,7 +467,7 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
       <Show when={confirming()}>
         {(cluster) => (
           <ConfirmDialog
-            open
+            open={props.disabledReason === undefined}
             onClose={() => setConfirming(undefined)}
             title={`Remove ${cluster().name}?`}
             /* What is destroyed is the *registration*, not the cluster. Saying so plainly is the
@@ -477,8 +484,11 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
                 : { message: failure(props.deleteState)!.message }
             }
             onConfirm={() => {
-              props.onDelete(cluster());
-              setConfirming(undefined);
+              if (props.disabledReason !== undefined) return;
+              const target = cluster();
+              void Promise.resolve(props.onDelete(target)).then((removed) => {
+                if (removed && confirming() === target) setConfirming(undefined);
+              });
             }}
           />
         )}

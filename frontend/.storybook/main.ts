@@ -26,6 +26,7 @@
  * 3. The accessibility addon, which runs axe against every story on every render.
  */
 import type { StorybookConfig } from "storybook-solidjs-vite";
+import ts from "typescript";
 
 const config: StorybookConfig = {
   stories: ["../packages/*/src/**/*.stories.tsx"],
@@ -33,6 +34,42 @@ const config: StorybookConfig = {
   framework: {
     name: "storybook-solidjs-vite",
     options: {},
+  },
+  async viteFinal(viteConfig) {
+    // storybook-solidjs-vite 10.7.1 uses the export symbol's name ("default") as the
+    // docgen assignment target, even for `export default function JsonTree(...)`.
+    // Repair only its appended metadata, not component code or the Solid compiler output.
+    // Keep docgen enabled; remove this workaround when the upstream regression test passes
+    // without it: node --experimental-strip-types --test .storybook/docgen.test.mjs
+    for (const plugin of await Promise.all(viteConfig.plugins ?? [])) {
+      if (!plugin || Array.isArray(plugin) || plugin.name !== "storybook:solid-component-meta") continue;
+      if (!("transform" in plugin) || typeof plugin.transform !== "function") {
+        throw new Error("Revisit the Solid Storybook docgen workaround: transform hook changed");
+      }
+      const original = plugin.transform;
+      plugin.transform = async function (code, id, ...options) {
+        const result = await original.call(this, code, id, ...options);
+        if (!result || typeof result === "string" || typeof result.code !== "string" || !result.code.startsWith(code)) return result;
+        const appended = result.code.slice(code.length);
+        const invalidTarget = /^default\.__docgenInfo = /m;
+        if (!invalidTarget.test(appended)) return result;
+        const source = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+        const declaration = source.statements.find(
+          (statement): statement is ts.FunctionDeclaration =>
+            ts.isFunctionDeclaration(statement) &&
+            statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword) === true,
+        );
+        if (!declaration?.name) {
+          throw new Error(`Cannot resolve the default component binding for Storybook docgen: ${id}`);
+        }
+        const name = declaration.name.text;
+        return {
+          ...result,
+          code: code + appended.replace(invalidTarget, () => `${name}.__docgenInfo = `),
+        };
+      };
+    }
+    return viteConfig;
   },
   core: {
     // Nothing about this product phones home, and a component workshop is not the place to make an

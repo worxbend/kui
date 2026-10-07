@@ -69,6 +69,49 @@ final case class ProtoFile(
     (topLevel ++ messages.flatMap(collect(root, _))).toMap
   }
 
+  /** Bind named fields against the shared message/enum namespace before decoding wire types. A leading dot is
+    * absolute; otherwise search the enclosing message and its parents, not unrelated symbols with the same
+    * suffix. https://protobuf.dev/programming-guides/proto3/#name-resolution
+    */
+  private[confluent] lazy val resolved: ProtoFile = {
+    val symbols = messagesByName.keySet ++ enumsByName.keySet
+
+    def qualify(prefix: String, name: String): String =
+      if prefix.isEmpty then name else s"$prefix.$name"
+
+    def reference(scope: String, name: String): String = {
+      @tailrec
+      def search(prefix: String): String = {
+        val candidate = qualify(prefix, name)
+        if symbols.contains(candidate) || prefix.isEmpty then s".$candidate"
+        else
+          search(prefix.lastIndexOf('.') match {
+            case -1 => ""
+            case index => prefix.take(index)
+          })
+      }
+      if name.startsWith(".") then name else search(scope)
+    }
+
+    def message(prefix: String, declared: ProtoMessage): ProtoMessage = {
+      val scope = qualify(prefix, declared.name)
+      declared.copy(
+        fields = declared.fields.map(field =>
+          field.copy(
+            fieldType = field.fieldType match {
+              case ProtoType.Named(name) => ProtoType.Named(reference(scope, name))
+              case scalar => scalar
+            },
+            mapEntry = field.mapEntry.map(message(scope, _))
+          )
+        ),
+        nested = declared.nested.map(message(scope, _))
+      )
+    }
+
+    copy(messages = messages.map(message(packageName.getOrElse(""), _)))
+  }
+
   /** The message a Confluent message-index path selects.
     *
     * A Protobuf payload does not name its message type; it carries a path of indexes into the file's

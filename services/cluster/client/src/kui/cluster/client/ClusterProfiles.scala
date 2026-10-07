@@ -10,8 +10,8 @@ import kui.kernel.error.KuiError
   *
   * @param version
   *   the metadata-store version this profile was resolved at. A consumer rebuilds its Kafka clients when this
-  *   moves and not when the document is merely re-serialised: rebuilding a client is expensive, and a
-  *   comparison of two payloads would call a re-scrape a change
+  *   moves or revalidation finds different effective settings after recreation. A version can reset on
+  *   recreation; a re-serialised wire document alone is not a settings change.
   */
 final case class ClusterProfile(
     id: ClusterId,
@@ -28,7 +28,9 @@ object ClusterProfile {
 /** What happened to one cluster's profile. */
 enum ProfileChange {
 
-  /** Its version moved. `from` is `None` for a cluster this client had never seen. */
+  /** Its version or effective settings moved. Recreation can reuse a version, so `from` can equal `to`.
+    * `from` is `None` for a cluster this client had never seen.
+    */
   case Updated(id: ClusterId, from: Option[Long], to: Long)
 
   /** It is gone from a **successful** listing. Never fired because a fetch failed: "I cannot see the list" is

@@ -1,6 +1,8 @@
 package kui.message.application
 
-import cats.effect.kernel.{Concurrent, Ref}
+import scala.concurrent.duration.FiniteDuration
+
+import cats.effect.kernel.{Ref, Temporal}
 import cats.syntax.all.*
 import fs2.Stream
 
@@ -32,8 +34,9 @@ enum TrackEvent {
     */
   case Scanned(topic: TopicName, read: Long, matched: Long)
 
-  /** The scan finished. `truncated` is true when it stopped because it had found `limit` hits, which is the
-    * one ending a user must not mistake for "that is all there is".
+  /** The scan finished. `truncated` is true unless every topic positively reached its captured end and the
+    * hit limit was not reached. Budget exhaustion and unavailable topics must not look like a complete
+    * search.
     */
   case Finished(read: Long, matched: Long, truncated: Boolean)
 
@@ -89,7 +92,7 @@ object TrackUseCase {
     */
   val ProgressEvery: Long = 500L
 
-  def make[F[_]: Concurrent](
+  def make[F[_]: Temporal](
       clusters: ClusterProfileSource[F],
       serdes: SerdeSource[F],
       source: RecordSource[F],
@@ -102,8 +105,10 @@ object TrackUseCase {
         Stream.eval(clusters.cluster(query.cluster)).flatMap {
           case Left(error) => Stream.emit(TrackEvent.Failed(error))
           case Right(_) =>
-            Stream.eval(Ref.of[F, Progress](Progress.empty)).flatMap { progress =>
-              scanning(query, budget, progress) ++ ending(query, progress)
+            Stream.eval((Ref.of[F, Progress](Progress.empty), Temporal[F].monotonic).tupled).flatMap {
+              case (progress, startedAt) =>
+                scanning(query, budget, progress, startedAt)
+                  .interruptAfter(budget.deadline) ++ ending(query, progress)
             }
         }
 
@@ -111,13 +116,14 @@ object TrackUseCase {
       private def scanning(
           query: TrackQuery,
           budget: PollBudget,
-          progress: Ref[F, Progress]
+          progress: Ref[F, Progress],
+          startedAt: FiniteDuration
       ): Stream[F, TrackEvent] = {
         val prepared = PreparedMatch.of(query.matcher)
 
         Stream
           .emits(query.topics.toList)
-          .flatMap(topic => topicScan(query, topic, prepared, budget, progress))
+          .flatMap(topic => topicScan(query, topic, prepared, budget, progress, startedAt))
           // The scan stops as soon as the limit is reached. It also stops *between* topics — `topicScan`
           // checks before it opens anything — because without that a track whose first topic filled the
           // limit would still open a consumer on the other five and read them to no purpose.
@@ -129,26 +135,36 @@ object TrackUseCase {
           topic: TopicName,
           prepared: PreparedMatch,
           budget: PollBudget,
-          progress: Ref[F, Progress]
+          progress: Ref[F, Progress],
+          startedAt: FiniteDuration
       ): Stream[F, TrackEvent] =
         requestFor(query, topic) match {
           // A topic name that will not make a legal browse is reported and skipped rather than failing the
           // whole track: five topics' worth of answers is a better answer than none.
           case Left(error) => Stream.emit(TrackEvent.Failed(error))
           case Right(request) =>
-            Stream.eval(progress.get).flatMap { before =>
-              if before.matched >= query.limit.toLong then Stream.empty
+            Stream.eval((progress.get, Temporal[F].monotonic).tupled).flatMap { case (before, now) =>
+              val remaining = budget.consume(before.read.toInt, before.bytes, now - startedAt)
+              if before.matched >= query.limit.toLong || remaining.isExhausted then Stream.empty
               else
                 // Once per topic, not once per record, and not once per track: masking rules are scoped
                 // by topic pattern, so a track over six topics has six answers and each is constant for
                 // the whole of its topic's scan.
                 Stream.eval(masking.forTopic(query.cluster, topic)).flatMap { mask =>
                   source
-                    .browse(request, budget)
-                    .takeThrough(_.isRight)
+                    .scan(request, remaining)
+                    .takeThrough {
+                      case ScanEvent.Failed(_) => false
+                      case _ => true
+                    }
                     .evalMap {
-                      case Left(error) => (TrackEvent.Failed(error): TrackEvent).some.pure[F]
-                      case Right(raw) => consider(query, topic, prepared, progress, raw, mask)
+                      case ScanEvent.Failed(error) => (TrackEvent.Failed(error): TrackEvent).some.pure[F]
+                      case ScanEvent.Completed(ScanCompletion.End) =>
+                        progress
+                          .update(now => now.copy(completedTopics = now.completedTopics + 1))
+                          .as(Option.empty[TrackEvent])
+                      case ScanEvent.Completed(_) => Option.empty[TrackEvent].pure[F]
+                      case ScanEvent.Record(raw) => consider(query, topic, prepared, progress, raw, mask)
                     }
                     .unNone
                 }
@@ -158,8 +174,8 @@ object TrackUseCase {
       /** One record: decode it, count it, and say so if it matched or if enough have gone by.
         *
         * The window's far end is checked here rather than by the browse, because a browse has no notion of
-        * "until": it seeks to a timestamp and reads forwards. A record past the window ends this topic's
-        * contribution, which is what `until` means.
+        * "until": it seeks to a timestamp and reads forwards. Both endpoints are checked for every record:
+        * CreateTime timestamps can regress at later offsets, so neither endpoint is a stopping condition.
         */
       private def consider(
           query: TrackQuery,
@@ -169,12 +185,13 @@ object TrackUseCase {
           raw: RawRecord,
           mask: RecordMask
       ): F[Option[TrackEvent]] =
-        if raw.timestamp.isAfter(query.until) then Option.empty[TrackEvent].pure[F]
+        if raw.timestamp.isBefore(query.from) || raw.timestamp.isAfter(query.until) then
+          progress.update(_.saw(raw, false)).as(Option.empty[TrackEvent])
         else
           decode(query, topic, raw, mask).flatMap { record =>
             val matched = prepared.matches(record)
 
-            progress.updateAndGet(_.saw(matched)).map { now =>
+            progress.updateAndGet(_.saw(raw, matched)).map { now =>
               if matched && now.matched <= query.limit.toLong then
                 Some(TrackEvent.Hit(TrackHit(topic, record)))
               else if now.read % ProgressEvery == 0L then
@@ -194,7 +211,11 @@ object TrackUseCase {
 
       private def ending(query: TrackQuery, progress: Ref[F, Progress]): Stream[F, TrackEvent] =
         Stream.eval(progress.get).map { now =>
-          TrackEvent.Finished(now.read, now.matched, truncated = now.matched >= query.limit.toLong)
+          TrackEvent.Finished(
+            now.read,
+            now.matched,
+            truncated = now.matched >= query.limit.toLong || now.completedTopics < query.topics.size
+          )
         }
 
       /** One topic's slice of the track, as an ordinary browse.
@@ -262,12 +283,19 @@ object TrackUseCase {
     }
 
   /** How much has been read and how much has matched, across every topic in the scan. */
-  final private case class Progress(read: Long, matched: Long) {
-    def saw(hit: Boolean): Progress =
-      Progress(read + 1L, if hit then matched + 1L else matched)
+  final private case class Progress(read: Long, matched: Long, bytes: Long, completedTopics: Int) {
+    def saw(record: RawRecord, hit: Boolean): Progress = {
+      val size = math.max(0, record.keySize).toLong + math.max(0, record.valueSize).toLong +
+        math.max(0, record.headersSize).toLong
+      copy(
+        read = read + 1L,
+        matched = if hit then matched + 1L else matched,
+        bytes = if size > Long.MaxValue - bytes then Long.MaxValue else bytes + size
+      )
+    }
   }
 
   private object Progress {
-    val empty: Progress = Progress(0L, 0L)
+    val empty: Progress = Progress(0L, 0L, 0L, 0)
   }
 }

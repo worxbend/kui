@@ -6,11 +6,17 @@ import cats.effect.kernel.{Async, Resource}
 import cats.syntax.all.*
 import org.typelevel.log4cats.StructuredLogger
 import sttp.client4.Backend
-import sttp.client4.httpclient.fs2.HttpClientFs2Backend
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.interceptor.Interceptor
 
-import kui.config.{ClusterConfig, ConnectClusterSettings, SafeUrl, UpstreamAuthConfig, UrlPolicy}
+import kui.config.{
+  ClusterConfig,
+  ConnectClusterSettings,
+  HttpTlsConfig,
+  SafeUrl,
+  UpstreamAuthConfig,
+  UrlPolicy
+}
 import kui.connect.api.{ConnectApi, ConnectCapabilities}
 import kui.connect.application.*
 import kui.connect.domain.ConnectWorkerPort
@@ -18,7 +24,7 @@ import kui.connect.infrastructure.*
 import kui.contracts.capability.ServiceCapabilities
 import kui.http.health.ReadinessCheck
 import kui.http.principal.{PrincipalVerification, RbacGuard}
-import kui.http.upstream.{UpstreamClient, UpstreamConfig}
+import kui.http.upstream.{HttpTls, UpstreamClient, UpstreamConfig}
 import kui.kernel.{ClusterId, ConnectName, PositiveInt}
 import kui.observability.Telemetry
 import kui.security.PrincipalCodec
@@ -108,7 +114,7 @@ object ConnectWiring {
       interceptors <- Resource.eval(ConnectApi.interceptors[F](telemetry, rejections, logger))
 
       // One connection pool for the process, and none at all when no cluster configures Kafka Connect.
-      backend <- httpBackend[F](clusters)
+      backend <- httpBackend[F](clusters, policy)
       workers <- workersFor[F](clusters, backend, policy, telemetry, logger)
       _ <- Resource.eval(startupLog[F](clusters, logger))
 
@@ -152,9 +158,12 @@ object ConnectWiring {
     )
 
   /** The process's one HTTP connection pool, or none at all. */
-  private def httpBackend[F[_]: Async](clusters: List[ClusterConfig]): Resource[F, Option[Backend[F]]] =
+  private def httpBackend[F[_]: Async](
+      clusters: List[ClusterConfig],
+      policy: UrlPolicy
+  ): Resource[F, Option[Backend[F]]] =
     if clusters.exists(_.connect.nonEmpty) then
-      HttpClientFs2Backend.resource[F]().map(backend => Some(backend: Backend[F]))
+      HttpTls.resource[F](HttpTlsConfig.Default, policy).map(backend => Some(backend: Backend[F]))
     else Resource.pure[F, Option[Backend[F]]](None)
 
   /** One client per configured Connect cluster, each with its own breaker, bulkhead and failover list. */

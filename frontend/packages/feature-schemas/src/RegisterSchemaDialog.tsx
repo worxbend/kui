@@ -53,6 +53,7 @@ export interface RegisterSchemaDialogProps {
    * that is absent from this list is not a name the registry does not have.
    */
   readonly knownSubjects: readonly string[];
+  readonly writeBlocked?: ((subject: string) => string | undefined) | undefined;
 }
 
 export function RegisterSchemaDialog(props: RegisterSchemaDialogProps): JSX.Element {
@@ -67,10 +68,13 @@ export function RegisterSchemaDialog(props: RegisterSchemaDialogProps): JSX.Elem
   const existing = () => props.knownSubjects.includes(subject().trim());
 
   const canRegister = () =>
+    props.writeBlocked?.(subject().trim()) === undefined &&
     subject().trim() !== "" && definition().trim() !== "" && problem() === undefined && !busy();
 
   /** Why the button will not press. Never empty: `Button`'s type refuses that. */
   const blockedReason = (): string => {
+    const refusal = props.writeBlocked?.(subject().trim());
+    if (refusal !== undefined) return refusal;
     if (busy()) return "The registry is being asked to accept this schema.";
     if (subject().trim() === "") return "Name the subject this schema belongs to first.";
     if (definition().trim() === "") return "Paste the schema you want to register first.";
@@ -122,12 +126,13 @@ export function RegisterSchemaDialog(props: RegisterSchemaDialogProps): JSX.Elem
             <Button
               variant="primary"
               icon="plus"
-              onClick={() =>
+              onClick={() => {
+                if (!canRegister()) return;
                 props.onRegister(subject().trim(), {
                   schemaType: schemaType(),
                   definition: definition(),
-                })
-              }
+                });
+              }}
             >
               Register
             </Button>

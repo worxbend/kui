@@ -140,6 +140,19 @@ final class KafkaTopicWriter[F[_]: Async](
       }
     }
 
+  def deleteById(cluster: ClusterId, topic: TopicName, topicId: String): F[Either[dom.TopicError, Unit]] =
+    withConnection(cluster, Some(topic)) { connection =>
+      pool.run(connection, "deleteTopics") { admin =>
+        KafkaFutures
+          .fromFuture(Async[F].delay {
+            val id = org.apache.kafka.common.Uuid.fromString(topicId)
+            require(id != org.apache.kafka.common.Uuid.ZERO_UUID, "topic identity must be known")
+            admin.deleteTopics(org.apache.kafka.common.TopicCollection.ofTopicIds(List(id).asJava)).all()
+          })
+          .void
+      }
+    }
+
   /** `auto.create.topics.enable`, read off any one broker.
     *
     * It is a static broker setting, so every broker in a healthy cluster has the same value and the first one

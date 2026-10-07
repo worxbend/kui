@@ -134,6 +134,7 @@ export function ManageScreen(): JSX.Element {
     { readonly id: string | undefined; readonly form: ClusterForm } | undefined
   >(undefined);
   const [connectivity, setConnectivity] = createSignal<Connectivity | undefined>(undefined);
+  const [tested, setTested] = createSignal<ReturnType<typeof editing>>(undefined);
 
   /** The version of the record being replaced, or `undefined` for a create. */
   const version = (): number | undefined => rows().find((row) => row.id === editing()?.id)?.version;
@@ -161,6 +162,8 @@ export function ManageScreen(): JSX.Element {
     deleteCluster(kui.api, cluster.id, cluster.version),
   );
 
+  // Registration changes application configuration, not Kafka data. Do not use the cluster
+  // write policy here: new clusters have no policy yet, and read-only must remain editable.
   const mayEdit = () => kui.permits(Actions.ApplicationConfigEdit);
 
   /**
@@ -172,6 +175,7 @@ export function ManageScreen(): JSX.Element {
    */
   const forget = (): void => {
     setConnectivity(undefined);
+    setTested(undefined);
     save.reset();
     test.reset();
   };
@@ -199,8 +203,10 @@ export function ManageScreen(): JSX.Element {
         if (current !== undefined) setEditing({ id: current.id, form });
         // The result described the settings as they were, not as they now are.
         setConnectivity(undefined);
+        test.reset();
       }}
       onSave={() => {
+        if (!mayEdit()) return;
         const current = editing();
         if (current === undefined) return;
         const built = toRequest(current.form);
@@ -223,10 +229,12 @@ export function ManageScreen(): JSX.Element {
           });
       }}
       onTest={() => {
+        if (!mayEdit()) return;
         const current = editing();
-        if (current === undefined) return;
+        if (current === undefined || test.busy()) return;
         const built = toRequest(current.form);
         if (!built.ok) return;
+        setTested(current);
         void test.run(built.request).then((outcome) => {
           if (outcome.kind !== "done") return;
           // `editing()` is replaced wholesale on every keystroke and on cancel/switch, so identity
@@ -237,9 +245,10 @@ export function ManageScreen(): JSX.Element {
           setConnectivity(outcome.value as Connectivity);
         });
       }}
-      onDelete={(cluster) => {
-        void remove.run(cluster).then((outcome) => {
-          if (outcome.kind !== "done") return;
+      onDelete={async (cluster): Promise<boolean> => {
+        if (!mayEdit()) return false;
+        return remove.run(cluster).then((outcome) => {
+          if (outcome.kind !== "done") return false;
           /* A destructive success is the one case with nothing left on screen to confirm it: the
              row is gone, and a row that is gone looks exactly like one that was never there. */
           notify("Cluster removed", {
@@ -248,11 +257,12 @@ export function ManageScreen(): JSX.Element {
           });
           forgetClusters();
           reload();
+          return true;
         });
       }}
       connectivity={connectivity()}
       saveState={save.state()}
-      testState={test.state()}
+      testState={test.busy() || tested() === editing() ? test.state() : { kind: "idle" }}
       deleteState={remove.state()}
       disabledReason={
         mayEdit()
@@ -410,7 +420,7 @@ function BrokerScreen(props: {
             const here = kui.paths.broker(props.clusterId, found().id);
             // The default tab carries no query at all, so the canonical address of this page is the
             // bare one and two links to the same view cannot be spelled two ways.
-            navigate(next === "logdirs" ? here : `${here}?tab=${next}`);
+            navigate(next === "logdirs" ? here : `${here}?tab=${next}`, { resolve: false });
           }}
         />
       )}

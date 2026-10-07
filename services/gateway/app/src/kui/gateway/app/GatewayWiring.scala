@@ -9,11 +9,10 @@ import cats.syntax.all.*
 import org.typelevel.log4cats.StructuredLogger
 import sttp.capabilities.fs2.Fs2Streams
 import sttp.client4.StreamBackend
-import sttp.client4.httpclient.fs2.HttpClientFs2Backend
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.interceptor.Interceptor
 
-import kui.config.PrincipalKeyConfig
+import kui.config.{HttpTlsConfig, PrincipalKeyConfig}
 import kui.gateway.api.auth.SessionMiddleware
 import kui.gateway.api.client.SttpServiceClient
 import kui.gateway.api.openapi.DocsRoutes
@@ -44,6 +43,7 @@ import kui.gateway.application.search.{SearchSource, SearchUseCase}
 import kui.gateway.application.session.{InMemorySessionStore, SessionConfig}
 import kui.gateway.application.topic.{ConsumerGroupsSource, TopicOverviewUseCase}
 import kui.http.health.ReadinessCheck
+import kui.http.upstream.HttpTls
 import kui.http.{BasePath, Cors, ErrorInterceptor}
 import kui.kernel.ServiceId
 import kui.observability.{KuiInterceptors, Telemetry}
@@ -247,7 +247,7 @@ object GatewayWiring {
         config.view,
         readiness,
         sessions,
-        CapabilityRoutes[F](registry, trigger, telemetry, logger) ++
+        CapabilityRoutes[F](registry, trigger, telemetry, logger, rbac = config.rbac) ++
           overview.toList.flatMap(ClusterOverviewRoutes[F](_)) ++
           topicOverview.toList.flatMap(TopicOverviewRoutes[F](_)) ++
           search.toList.flatMap(SearchRoutes[F](_)) ++
@@ -264,7 +264,9 @@ object GatewayWiring {
           sessions,
           logger,
           BasePath.normalize(config.server.basePath),
-          secureCookies = !config.gateway.devInsecureCookies
+          secureCookies = !config.gateway.devInsecureCookies,
+          authenticationRequired = config.auth.authType != kui.config.AuthType.Disabled,
+          trustedProxies = config.auth.trustedProxies
         ) ++
         instrumentation ++
         ErrorInterceptor.interceptors[F](logger),
@@ -324,8 +326,8 @@ object GatewayWiring {
       telemetry: Telemetry[F],
       logger: StructuredLogger[F]
   ): Resource[F, ServiceClients[F]] =
-    HttpClientFs2Backend
-      .resource[F]()
+    HttpTls
+      .resource[F](HttpTlsConfig.Default, config.urlPolicy)
       .flatMap(backend => upstreams[F](config, telemetry, logger, backend))
 
   /** One client per configured service, each with its own bulkhead and circuit breaker (PLAN §16.4).

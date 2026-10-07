@@ -63,13 +63,7 @@ object SchemaMutationEndpoints {
   val SetGlobalCompatibilityOperation: String = "schema.compatibility.global.set"
   val SetSubjectCompatibilityOperation: String = "schema.compatibility.subject.set"
 
-  /** Registration's operation name.
-    *
-    * The audit vocabulary has **no** case for it: `MutationKind` is a sealed enum in `libs/security-core` and
-    * this string is not one of its twelve `operation` values, so this is the one mutation in the product that
-    * writes no `MutationRecord`. `SchemaEndpointClassificationSuite` asserts that gap rather than letting it
-    * be discovered, and `RegisterSchemaUseCase` explains what closing it costs.
-    */
+  /** Registration's operation name, also used by the structured mutation audit record. */
   val RegisterVersionOperation: String = "schema.subject.version.register"
 
   private val clustersBase = "internal" / "v1" / ClustersSegment

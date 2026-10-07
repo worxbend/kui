@@ -1,14 +1,12 @@
 package kui.identity.infrastructure
 
-import java.util.Locale
-
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 import io.circe.{Json, JsonObject}
 import org.typelevel.log4cats.StructuredLogger
 
 import kui.config.FormUserConfig
-import kui.config.store.{ConfigStore, SecretJson, StoreKey, StoreRecord, StoreSection}
+import kui.config.store.{ConfigStore, SecretJson, StoreHealth, StoreKey, StoreRecord, StoreSection}
 import kui.identity.domain.{PasswordHash, UpdateRefused, UserDirectory, UserRecord}
 import kui.kernel.{Secret, UserName}
 
@@ -75,7 +73,7 @@ object ConfiguredUserDirectory {
         "passwords have somewhere to live"
     )
 
-  private[infrastructure] def key(username: String): String = username.trim.toLowerCase(Locale.ROOT)
+  private[infrastructure] def key(username: String): String = kui.security.AccountName.canonical(username)
 }
 
 /** The configured accounts, with any password somebody has since changed laid over the top.
@@ -122,30 +120,32 @@ object StoredUserDirectory {
           case Some(configured) =>
             store
               .get(keyFor(username))
+              .flatMap(record => store.health.map(health => (record, health)))
               .flatMap {
-                case None => configured.some.pure[F]
-                case Some(record) =>
+                case (_, health) if health.unreadableKeys.contains(keyFor(username)) || (health match {
+                      case StoreHealth.Degraded(_, _, _, _) => true
+                      case _ => false
+                    }) =>
+                  logger
+                    .error("identity: credential store view is not trustworthy; authentication refused")
+                    .as(none[UserRecord])
+                case (None, _) => configured.some.pure[F]
+                case (Some(record), _) =>
                   hashOf(record) match {
                     case Right(hash) => configured.withPassword(hash).some.pure[F]
-                    case Left(problem) =>
-                      // A stored record that will not parse must not lock somebody out silently, and must
-                      // not be ignored silently either. The configured password still works, and the log
-                      // says why the newer one did not.
+                    case Left(_) =>
+                      // An unreadable override is not an uninitialized account. Never revive an old hash.
                       logger
                         .error(
-                          s"identity: the stored password for '$username' could not be read ($problem); " +
-                            "falling back to the configured one"
+                          "identity: a stored password could not be read; authentication refused"
                         )
-                        .as(configured.some)
+                        .as(none[UserRecord])
                   }
               }
               .handleErrorWith(error =>
-                // The store being unreachable must not take sign-in down with it: the configured password
-                // is still a correct answer, and a KUI nobody can sign in to during a Kafka outage is a KUI
-                // nobody can use to diagnose the outage.
                 logger
-                  .error(error)("identity: the metadata store could not be read; using configured accounts")
-                  .as(configured.some)
+                  .error(error)("identity: the metadata store could not be read; authentication refused")
+                  .as(none[UserRecord])
               )
         }
 

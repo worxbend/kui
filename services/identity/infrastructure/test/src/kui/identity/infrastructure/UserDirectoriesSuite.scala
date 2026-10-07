@@ -32,8 +32,7 @@ import kui.testkit.fakes.FakeStructuredLogger
   *   - `ConfiguredUserDirectory.update` answering `Right(())`, so a password change against a file-backed
   *     deployment reports success and is gone at the next restart — the exact failure the refusal's own
   *     message was written to prevent;
-  *   - `StoredUserDirectory.find` answering `None` when a stored record will not parse, which locks an
-  *     operator out of the KUI they would use to fix it while their configured password still works.
+  * Stored credential failures deliberately deny sign-in: falling back revives a replaced password.
   */
 final class UserDirectoriesSuite extends KuiIOSuite {
 
@@ -95,27 +94,54 @@ final class UserDirectoriesSuite extends KuiIOSuite {
     } yield assertEquals(found.map(_.hash), Some(changed))
   }
 
-  test("a stored record that will not parse leaves the configured password working") {
-    // Not `None`. A record KUI cannot read is a reason to log loudly and carry on, not a reason to lock an
-    // operator out of the interface they would use to fix it.
+  test("an unreadable override never resurrects the configured password") {
     for {
       logger <- FakeStructuredLogger[IO]
       stored = StoredUserDirectory.make[IO](configured, holding(Json.obj()), logger)
       found <- stored.find("admin")
       lines <- logger.entries
     } yield {
-      assertEquals(found.map(_.hash), Some(hash))
+      assertEquals(found, None)
       assert(lines.nonEmpty, "an unreadable stored password must not be ignored silently")
     }
   }
 
-  test("a metadata store that will not answer leaves the configured password working") {
-    // A KUI nobody can sign in to during a Kafka outage is a KUI nobody can use to diagnose the outage.
+  test("a metadata store failure denies authentication rather than resurrecting old credentials") {
     for {
       logger <- FakeStructuredLogger[IO]
       stored = StoredUserDirectory.make[IO](configured, unreachable, logger)
       found <- stored.find("admin")
+    } yield assertEquals(found, None)
+  }
+
+  test("an uninitialized account can still use its configured password") {
+    for {
+      logger <- FakeStructuredLogger[IO]
+      stored = StoredUserDirectory.make[IO](configured, new StubStore {}, logger)
+      found <- stored.find("admin")
     } yield assertEquals(found.map(_.hash), Some(hash))
+  }
+
+  test("a store-skipped unreadable credential is not an uninitialized account") {
+    for {
+      logger <- FakeStructuredLogger[IO]
+      store = new StubStore {
+        override def health: IO[StoreHealth] =
+          IO.pure(StoreHealth.ReadOnly("unreadable", List(StoredUserDirectory.keyFor("admin"))))
+      }
+      found <- StoredUserDirectory.make[IO](configured, store, logger).find("admin")
+    } yield assertEquals(found, None)
+  }
+
+  test("a disconnected store cannot authorize against its stale credential view") {
+    for {
+      logger <- FakeStructuredLogger[IO]
+      store = new StubStore {
+        override def health: IO[StoreHealth] =
+          IO.pure(StoreHealth.Degraded("offline", Instant.EPOCH, 0L, Nil))
+      }
+      found <- StoredUserDirectory.make[IO](configured, store, logger).find("admin")
+    } yield assertEquals(found, None)
   }
 
   test("the store may not introduce an account the configuration does not declare") {

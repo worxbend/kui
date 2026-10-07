@@ -75,11 +75,11 @@ export default function Messages(): JSX.Element {
   const tracking = () => location.pathname.replace(/\/+$/, "").endsWith("/messages/track");
 
   return (
-    <Show when={params.clusterId} fallback={<NoSubject what="cluster" />}>
+    <Show when={params.clusterId} fallback={<NoSubject what="cluster" />} keyed>
       {(clusterId) => (
-        <Show when={!tracking()} fallback={<TrackScreen clusterId={clusterId()} />}>
+        <Show when={!tracking()} fallback={<TrackScreen clusterId={clusterId} />}>
           <Show when={params.topicName} fallback={<NoSubject what="topic" />} keyed>
-            {(topicName) => <BrowserScreen clusterId={clusterId()} topicName={topicName} />}
+            {(topicName) => <BrowserScreen clusterId={clusterId} topicName={topicName} />}
           </Show>
         </Show>
       )}
@@ -135,7 +135,7 @@ function BrowserScreen(props: {
   // One session for the life of this screen. Changing the *query* restarts the stream inside it;
   // changing the topic unmounts the route, which disposes it.
   const session = createBrowseSession({
-    streamUrl: streamUrl(),
+    streamUrl: kui.api.url(streamUrl()),
     transport: createBrowseTransport(),
   });
 
@@ -372,13 +372,17 @@ function BrowserScreen(props: {
    * live `Produce message` over `orders.payments`, and the refusal arrived from the gateway after
    * the record had been typed.
    */
-  const mayProduce = () => kui.permits(Actions.TopicMessagesProduce, props.topicName);
+  const produceBlocked = (topic: string = props.topicName): string | undefined =>
+    kui.writeBlocked !== undefined
+      ? kui.writeBlocked(props.clusterId, Actions.TopicMessagesProduce, topic)
+      : kui.permits(Actions.TopicMessagesProduce, topic) ? undefined
+        : "You do not have permission to publish into this topic.";
+  const mayProduce = () => produceBlocked() === undefined;
   /* A resend reads this topic and writes another. The gateway checks both, and the second is a
    * permission on a topic that has not been named yet — so this only gates on the half that can be
    * checked here, and the server refuses the other half with the destination in the message. */
   const mayResend = () =>
-    kui.permits(Actions.TopicMessagesRead, props.topicName) &&
-    kui.permits(Actions.TopicMessagesProduce, props.topicName);
+    kui.permits(Actions.TopicMessagesRead, props.topicName);
 
   /**
    * Name a preset for what is on the bar right now.
@@ -452,9 +456,7 @@ function BrowserScreen(props: {
             : { onSavePreset: savePreset })}
           session={session}
           mayProduce={mayProduce()}
-          produceDisabledReason={
-            mayProduce() ? undefined : "You do not have permission to publish into this topic."
-          }
+          produceDisabledReason={produceBlocked()}
           onProduce={() => {
             // The last attempt's receipt or error belongs to the drawer that showed it. Reopening to
             // find "written to partition 3" from ten minutes ago reads as this record having been sent.
@@ -533,10 +535,12 @@ function BrowserScreen(props: {
         {...(partitionCount() === undefined ? {} : { partitionCount: partitionCount() })}
         topic={props.topicName}
         state={copy.state()}
+        destinationBlocked={produceBlocked}
         /* Stays open on success, like the produce drawer and for a stronger reason: the answer is
            two figures, and a copy that read and wrote nothing is a 200 whose whole meaning is in
            them. Closing on success would show the operator nothing at all. */
         onSend={(draft) => {
+          if (!mayResend() || produceBlocked(draft.toTopic) !== undefined) return;
           void copy.run(draft).then((state) => {
             if (state.kind !== "done") return;
             /* The dialog already shows the figures; the toast is what survives it being closed.
@@ -562,7 +566,9 @@ function BrowserScreen(props: {
         topic={props.topicName}
         {...(partitionCount() === undefined ? {} : { partitionCount: partitionCount() })}
         state={write.state()}
+        disabledReason={produceBlocked()}
         onSend={(draft) => {
+          if (produceBlocked() !== undefined) return;
           /* The drawer deliberately stays open on success: it shows the partition and offset the
            broker assigned. "Sent" is not something an operator can go and check; a position is. */
           void write.run(draft).then((state) => {

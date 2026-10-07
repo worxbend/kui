@@ -74,26 +74,12 @@ final class KafkaRecordProducer[F[_]: Async] private (
   def send(
       records: List[RawProducerRecord]
   ): F[Either[KuiError, List[Either[KuiError, ProducedAt]]]] =
-    records
-      .traverse(record => producer.produce(Chunk.singleton(kafkaRecordOf(record))))
-      .attempt
-      .flatMap {
-        // A failure here is a failure to *buffer*: the producer could not accept the record at all, which
-        // means nothing was sent and the whole request failed rather than any particular record.
-        case Left(failure) =>
-          KafkaErrorMapper
-            .map("produce", failure)
-            .asLeft[List[Either[KuiError, ProducedAt]]]
-            .pure[F]
-
-        case Right(pending) =>
-          pending
-            .traverse(_.attempt.map {
-              case Left(failure) => KafkaErrorMapper.map("produce", failure).asLeft[ProducedAt]
-              case Right(acknowledged) => producedAt(acknowledged)
-            })
-            .map(_.asRight[KuiError])
-      }
+    KafkaRecordProducer
+      .dispatch(records)(record => producer.produce(Chunk.singleton(kafkaRecordOf(record))))
+      .map(_.map {
+        case Left(failure) => KafkaErrorMapper.map("produce", failure).asLeft[ProducedAt]
+        case Right(acknowledged) => producedAt(acknowledged)
+      }.asRight[KuiError])
 
   /** The broker's acknowledgement, as the domain's own type.
     *
@@ -147,6 +133,19 @@ final class KafkaRecordProducer[F[_]: Async] private (
 }
 
 object KafkaRecordProducer {
+
+  /** Dispatch errors belong to that record, not to the entire already-dispatched batch. */
+  private[infrastructure] def dispatch[F[_]: Async, A, B](records: List[A])(
+      send: A => F[F[B]]
+  ): F[List[Either[Throwable, B]]] =
+    records
+      .traverse(record => Async[F].defer(send(record)).attempt)
+      .flatMap(
+        _.traverse {
+          case Left(error) => error.asLeft[B].pure[F]
+          case Right(pending) => pending.attempt
+        }
+      )
 
   /** A producer per cluster, opened for one request and closed when it ends or is cancelled.
     *

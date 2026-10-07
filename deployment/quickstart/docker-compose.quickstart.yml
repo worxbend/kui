@@ -3,6 +3,7 @@
 # THIS IS A DEMONSTRATION ENVIRONMENT, NOT A PRODUCTION DEPLOYMENT. The broker speaks plain text
 # with no authentication and no encryption, and KUI serves its session cookie without `Secure` so
 # that plain HTTP on localhost works. Both are wrong anywhere a network can reach them.
+# Published ports therefore bind loopback unless KUI_QUICKSTART_BIND_ADDRESS is explicitly set.
 #
 # Do not run this file by hand — run `deployment/quickstart/quickstart.sh`, which builds the KUI
 # image if it is missing and then calls this file. The script is the documented entry point; this
@@ -28,7 +29,7 @@ services:
     ports:
       # Published so you can point your own console tools, kcat, or an IDE at the same broker.
       # KUI does not use this route; it reaches the broker over the private network below.
-      - "${KUI_QUICKSTART_KAFKA_PORT:-9092}:29092"
+      - "${KUI_QUICKSTART_BIND_ADDRESS:-127.0.0.1}:${KUI_QUICKSTART_KAFKA_PORT:-9092}:29092"
     environment:
       # A fixed cluster id. Generating one per run would work, but a fixed value means the broker
       # formats its storage identically on every machine, which makes a support question about it
@@ -208,7 +209,7 @@ services:
     image: apache/kafka:4.3.1
     container_name: kui-quickstart-kafka-connect
     ports:
-      - "${KUI_QUICKSTART_CONNECT_PORT:-8083}:8083"
+      - "${KUI_QUICKSTART_BIND_ADDRESS:-127.0.0.1}:${KUI_QUICKSTART_CONNECT_PORT:-8083}:8083"
     depends_on:
       kafka:
         condition: service_healthy
@@ -282,7 +283,7 @@ services:
     ports:
       # Published for the reason the registry's port is: so the server KUI is reading can be asked
       # the same question by hand, which is how anybody checks a screen is honest.
-      - "${KUI_QUICKSTART_KSQL_PORT:-8088}:8088"
+      - "${KUI_QUICKSTART_BIND_ADDRESS:-127.0.0.1}:${KUI_QUICKSTART_KSQL_PORT:-8088}:8088"
     environment:
       KSQL_BOOTSTRAP_SERVERS: kafka:9092
       KSQL_LISTENERS: http://0.0.0.0:8088
@@ -403,7 +404,7 @@ services:
       QUARKUS_PROFILE: prod
     ports:
       # Published so you can look at the same registry KUI is reading, with curl or a browser.
-      - "${KUI_QUICKSTART_REGISTRY_PORT:-8081}:8080"
+      - "${KUI_QUICKSTART_BIND_ADDRESS:-127.0.0.1}:${KUI_QUICKSTART_REGISTRY_PORT:-8081}:8080"
     healthcheck:
       # A real call to the API KUI uses, not a port check: the process accepts connections well
       # before Quarkus has finished publishing its routes, and a port check passes in that window.
@@ -468,7 +469,7 @@ services:
     container_name: kui-quickstart-kui
     command: ["--config", "/etc/kui/kui-quickstart.yaml"]
     ports:
-      - "${KUI_PORT:-8080}:8080"
+      - "${KUI_QUICKSTART_BIND_ADDRESS:-127.0.0.1}:${KUI_PORT:-8080}:8080"
     environment:
       # Human-readable log lines. The images default to one JSON object per line, which is right
       # for a log collector and unreadable for the person who just ran the quickstart.

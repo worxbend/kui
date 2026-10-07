@@ -19,11 +19,10 @@
  *    this file stops compiling.
  * 2. **The evaluation is a lookup, not a re-derivation.** The server sends grants with their action
  *    sets *already expanded* — `DELETE` already carries the `VIEW` it implies — so nothing here
- *    re-implements the closure, the role model or the cluster scoping. What is left is: does any
- *    grant cover this cluster, this resource and this name, and does it list this action.
+ *    re-implements the closure or role expansion. First scope grants to the cluster and select
+ *    explicit grants over fallback-only defaults, then check resource, name and action.
  *
- * The one rule that is re-stated rather than looked up is the connector fallback, and it is
- * generated too (see {@link decide}).
+ * The connector-parent fallback's action vocabulary is generated too (see {@link grantsAllow}).
  *
  * ## Before the session has answered
  *
@@ -53,6 +52,8 @@ export const EVERY_CLUSTER = "*";
  * field is checked there.
  */
 export interface PermissionGrant {
+  /** Fallback only: ignored when any explicit grant covers the requested cluster. */
+  readonly defaultRole?: boolean;
   /** The cluster ids this grant applies on, or {@link EVERY_CLUSTER}. */
   readonly clusters: readonly string[];
   /** The resource's configuration spelling: `TOPIC`, `CONSUMER`, … */
@@ -123,13 +124,14 @@ export interface Permissions {
  */
 export function grantsAllow(
   grants: readonly PermissionGrant[],
-  cluster: string,
+  cluster: string | undefined,
   action: PermissionAction,
   name: string | undefined,
 ): boolean {
-  if (holds(grants, cluster, action, name)) return true;
+  const selected = effectiveGrants(grants, cluster);
+  if (holds(selected, action, name)) return true;
 
-  // The connector fallback, and the only rule this file restates rather than looks up: a grant on
+  // The connector fallback uses the already-selected grants: a grant on
   // the connect cluster `payments` covers all forty of its connectors without a permission naming
   // each one. A connector is named `<connect>/<connector>`, and the fallback asks for the same
   // action on `CONNECT` with the connect cluster's name — which the build asserts is always the
@@ -137,7 +139,7 @@ export function grantsAllow(
   if (action.resource === Resources.Connector && name !== undefined && CONNECTOR_FALLBACK.has(action.action)) {
     const connect = name.split("/")[0];
     if (connect !== undefined) {
-      return holds(grants, cluster, { resource: Resources.Connect, action: action.action }, connect);
+      return holds(selected, { resource: Resources.Connect, action: action.action }, connect);
     }
   }
 
@@ -147,34 +149,35 @@ export function grantsAllow(
 /** Whether these grants allow this action on **some** resource of this kind. See {@link Permissions.allowsAny}. */
 export function grantsAllowAny(
   grants: readonly PermissionGrant[],
-  cluster: string,
+  cluster: string | undefined,
   action: PermissionAction,
 ): boolean {
-  return covering(grants, cluster, action.resource).some((grant) =>
-    grant.actions.includes(action.action),
+  return effectiveGrants(grants, cluster).some((grant) =>
+    grant.resource === action.resource && grant.actions.includes(action.action),
   );
 }
 
-function covering(
+/** Select roles before resources, patterns, or actions; defaults are not additive rights.
+ * A global request considers every cluster, just like Rbac.effectivePermissions(None). */
+function effectiveGrants(
   grants: readonly PermissionGrant[],
-  cluster: string,
-  resource: string,
+  cluster: string | undefined,
 ): readonly PermissionGrant[] {
-  return grants.filter(
-    (grant) =>
-      grant.resource === resource &&
-      (grant.clusters.includes(EVERY_CLUSTER) || grant.clusters.includes(cluster)),
+  const scoped = grants.filter(
+    (grant) => cluster === undefined ||
+      grant.clusters.includes(EVERY_CLUSTER) || grant.clusters.includes(cluster),
   );
+  const explicit = scoped.filter((grant) => !grant.defaultRole);
+  return explicit.length > 0 ? explicit : scoped;
 }
 
 function holds(
   grants: readonly PermissionGrant[],
-  cluster: string,
   action: PermissionAction,
   name: string | undefined,
 ): boolean {
-  return covering(grants, cluster, action.resource).some(
-    (grant) => covers(grant, name) && grant.actions.includes(action.action),
+  return grants.some(
+    (grant) => grant.resource === action.resource && covers(grant, name) && grant.actions.includes(action.action),
   );
 }
 
@@ -290,5 +293,6 @@ export function grantsFromWire(
       resource: permission.resource,
       value: permission.value,
       actions: permission.actions ?? [],
+      defaultRole: permission.defaultRole ?? false,
     }));
 }

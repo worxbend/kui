@@ -59,6 +59,22 @@ final case class RawRecord(
   */
 trait RecordSource[F[_]] {
 
+  /** A bounded scan must positively report reaching its captured end. Legacy adapters cannot prove it. */
+  def scan(
+      request: BrowseRequest,
+      budget: PollBudget,
+      upperOffsets: Map[PartitionId, Offset] = Map.empty
+  ): Stream[F, ScanEvent] =
+    browse(request, budget)
+      .filter {
+        case Right(record) => upperOffsets.get(record.partition).forall(record.offset.value < _.value)
+        case Left(_) => true
+      }
+      .map {
+        case Right(record) => ScanEvent.Record(record)
+        case Left(error) => ScanEvent.Failed(error)
+      } ++ Stream.emit(ScanEvent.Completed(ScanCompletion.Unknown))
+
   /** The records one browse asks for, in the order the browse wants them: ascending offsets for a forward
     * browse, newest first for a backward one.
     *
@@ -80,4 +96,14 @@ trait RecordSource[F[_]] {
     * per record.
     */
   def assignedStarts(request: BrowseRequest): F[Either[KuiError, Map[PartitionId, Offset]]]
+}
+
+enum ScanCompletion {
+  case End, RecordBudget, ByteBudget, Deadline, Unknown
+}
+
+enum ScanEvent {
+  case Record(record: RawRecord)
+  case Failed(error: KuiError)
+  case Completed(reason: ScanCompletion)
 }

@@ -34,6 +34,7 @@ export {
   useKui,
   type CallScope,
   type KuiContextValue,
+  type KnownAction,
   type KuiPaths,
   type MessageBrowserDefaults,
   type MessageViewMode,

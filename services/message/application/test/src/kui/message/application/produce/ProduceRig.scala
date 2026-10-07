@@ -157,6 +157,12 @@ object ProduceRig {
 
   /** A record source that answers with a fixed log, whatever is asked of it. */
   final class FakeRecords(records: List[RawRecord]) extends RecordSource[IO] {
+    override def scan(request: BrowseRequest, budget: PollBudget, upperOffsets: Map[PartitionId, Offset]) =
+      kui.message.application.FiniteRecordScan(
+        records.filter(record => upperOffsets.get(record.partition).forall(record.offset.value < _.value)),
+        budget
+      )
+
     def browse(request: BrowseRequest, budget: PollBudget): Stream[IO, Either[KuiError, RawRecord]] =
       Stream.emits(records.map(_.asRight[KuiError]))
 

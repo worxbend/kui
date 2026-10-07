@@ -153,6 +153,36 @@ final class ProfileRoutesSuite extends CatsEffectSuite {
       ClusterFixtures.At
     )
 
+  test("streamFiltersBothUpdatesAndRemovalsByPrincipalScope") {
+    import kui.security.rbac.{ClusterFlags, RbacPolicy, Role}
+    import kui.kernel.{ClusterId, RoleName, UserName}
+    val hidden = ClusterFixtures.profile(id = ClusterId.unsafe("secret-cluster"))
+    val role = RoleName.unsafe("reader")
+    val policy = RbacPolicy(List(Role(role, Set(profile.id), Nil, Nil)), None)
+    val caller = Principal(UserName.unsafe("alice"), Set(role), PrincipalKind.Session)
+    val registry = new ClusterFixtures.StubRegistry(
+      List(profile, hidden),
+      published =
+        Some(Stream.emits(List(snapshotOf(Nil, 1), snapshotOf(List(profile, hidden), 2), snapshotOf(Nil, 3))))
+    )
+    for {
+      logger <- FakeStructuredLogger[IO]
+      guard = RbacGuard.fromPolicy[IO](policy, _ => ClusterFlags.Writable, logger)
+      visible <- ProfileRoutes.visibleChanges(registry, caller, guard).compile.toList
+      anonymous <- ProfileRoutes.visibleChanges(registry, Principal.Anonymous, guard).compile.toList
+    } yield {
+      assertEquals(
+        visible.map(_.data.hcursor.get[String]("id")),
+        List(Right(profile.id.value), Right(profile.id.value))
+      )
+      assertEquals(
+        visible.map(_.data.hcursor.get[String]("change")),
+        List(Right("updated"), Right("removed"))
+      )
+      assertEquals(anonymous, Nil)
+    }
+  }
+
   test("anEditedProfileBecomesOneUpdatedEvent") {
     val edited = ClusterFixtures.profile(version = 8L)
     val events = ProfileRoutes.diff(

@@ -1,7 +1,7 @@
 package kui.alerts.infrastructure
 
-import cats.Applicative
 import cats.syntax.all.*
+import cats.{Applicative, Monad}
 
 import kui.alerts.application.{ClusterProfileSource, ClusterProfileView}
 import kui.config.ClusterConfig
@@ -50,4 +50,17 @@ final class ConfiguredProfileSource[F[_]: Applicative](clusters: List[ClusterCon
     * alerts" are different screens, and only one of them is good news.
     */
   def connectionFor(cluster: ClusterId): Option[ClusterConnection] = connections.get(cluster)
+}
+
+object ConfiguredProfileSource {
+
+  /** Resolve every lookup from the same owned profile snapshot as the evaluator resources. */
+  def live[F[_]: Monad](current: F[List[ClusterConfig]]): ClusterProfileSource[F] =
+    new ClusterProfileSource[F] {
+      def all: F[List[ClusterProfileView]] =
+        current.flatMap(clusters => new ConfiguredProfileSource[F](clusters).all)
+
+      def profileOf(cluster: ClusterId): F[Either[KuiError, ClusterProfileView]] =
+        current.flatMap(clusters => new ConfiguredProfileSource[F](clusters).profileOf(cluster))
+    }
 }

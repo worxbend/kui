@@ -8,16 +8,16 @@ import org.typelevel.log4cats.StructuredLogger
 import org.typelevel.otel4s.metrics.Meter
 import sttp.capabilities.fs2.Fs2Streams
 import sttp.client4.Backend
-import sttp.client4.httpclient.fs2.HttpClientFs2Backend
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.interceptor.Interceptor
 
 import kui.cache.CacheMetrics
-import kui.config.{ClusterConfig, UrlPolicy}
+import kui.config.{ClusterConfig, HttpTlsConfig, UrlPolicy}
 import kui.contracts.capability.ServiceCapabilities
 import kui.filter.{CelFilterEngine, FilterLimits, FilterMetrics, MessageFilterPort}
 import kui.http.health.ReadinessCheck
 import kui.http.principal.{PrincipalVerification, RbacGuard}
+import kui.http.upstream.HttpTls
 import kui.kafka.{AdminClientPool, AdminMetrics}
 import kui.kernel.{ClusterId, Secret}
 import kui.message.api.{MessageApi, MessageRoutes}
@@ -335,7 +335,7 @@ object MessageWiring {
   ): Resource[F, Map[ClusterId, ClusterSerdes[F]]] =
     for {
       policy <- Resource.eval(Async[F].delay(UrlPolicy.fromEnv(sys.env)))
-      backend <- registryBackend[F](clusters)
+      backend <- registryBackend[F](clusters, policy)
       _ <- Resource.eval(clusters.traverse_(describe[F](_, logger)))
       built <- clusters.traverse(cluster =>
         ClusterSerdes
@@ -360,10 +360,11 @@ object MessageWiring {
     * operator learns to ignore.
     */
   private def registryBackend[F[_]: Async](
-      clusters: List[ClusterConfig]
+      clusters: List[ClusterConfig],
+      policy: UrlPolicy
   ): Resource[F, Option[Backend[F]]] =
     if ClusterSerdeFactories.anyRegistryConfigured(clusters) then
-      HttpClientFs2Backend.resource[F]().map(backend => Some(backend: Backend[F]))
+      HttpTls.resource[F](HttpTlsConfig.Default, policy).map(backend => Some(backend: Backend[F]))
     else Resource.pure[F, Option[Backend[F]]](None)
 
   private def factoriesFor[F[_]: Async](

@@ -123,8 +123,7 @@ final class ClusterAdminAdapter[F[_]: Async](
     */
   def capabilities(profile: ClusterProfile): F[dom.ClusterFeatures] =
     clients
-      .connectionFor(profile)
-      .flatMap(connection => admin.capabilities(connection))
+      .withConnection(profile)(connection => admin.capabilities(connection))
       .map(KafkaToDomain.features)
       .handleErrorWith { failure =>
         Async[F].realTimeInstant.flatMap { now =>
@@ -164,11 +163,18 @@ final class ClusterAdminAdapter[F[_]: Async](
             Attribute("kui.kafka.operation", operation)
           )
           _ <- if extra.isEmpty then Async[F].unit else span.addAttributes(extra*)
-          outcome <- clients.connectionFor(profile).flatMap(call).attempt.map(flatten[A](profile))
+          outcome <- clients
+            .withConnection(profile)(connection =>
+              call(connection).attempt
+                .map(flatten[A](profile))
+                .flatTap(_.fold(reportFailure(profile, operation), _ => Async[F].unit))
+            )
+            .attempt
+            .map(flatten[A](profile))
           _ <- span.addAttributes(
             Attribute(MetricNames.Attr.Outcome, outcome.fold(_.code.wire, _ => "ok"))
           )
-          _ <- outcome.fold(reportFailure(profile, operation), _ => Async[F].unit)
+
         } yield outcome
       }
 

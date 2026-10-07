@@ -3,6 +3,7 @@ package kui.cluster.client
 import scala.concurrent.duration.{DurationLong, FiniteDuration}
 
 import cats.effect.kernel.{Async, Clock, Ref, Resource}
+import cats.effect.std.Semaphore
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import fs2.Stream
@@ -85,7 +86,18 @@ object HttpClusterProfiles {
     for {
       metrics <- Resource.eval(ProfileMetrics.of[F](telemetry))
       state <- Resource.eval(Ref.of[F, State[F]](State.empty[F]))
-      client = new Impl[F](baseUri, backend, principals, identity, config, state, metrics, logger)
+      refreshGate <- Resource.eval(Semaphore[F](1L))
+      client = new Impl[F](
+        baseUri,
+        backend,
+        principals,
+        identity,
+        config,
+        state,
+        metrics,
+        logger,
+        refreshGate
+      )
       // The first fetch runs inside acquisition rather than in a fiber, so that a service which comes up
       // against a healthy cluster service has its profiles before it serves its first request. Its
       // failure is recorded and swallowed: see behaviour 1 above.
@@ -153,7 +165,8 @@ object HttpClusterProfiles {
       config: ClusterProfilesConfig,
       state: Ref[F, State[F]],
       metrics: ProfileMetrics[F],
-      logger: StructuredLogger[F]
+      logger: StructuredLogger[F],
+      refreshGate: Semaphore[F]
   ) extends ClusterProfiles[F] {
 
     private val interpreter: SttpClientInterpreter = SttpClientInterpreter()
@@ -191,6 +204,9 @@ object HttpClusterProfiles {
 
     /** Re-read the whole set: which clusters exist, and whether each one's profile has moved. */
     def refreshAll: F[Unit] =
+      refreshGate.permit.use(_ => refreshAllLocked)
+
+    private def refreshAllLocked: F[Unit] =
       listClusters.flatMap {
         case Left(error) =>
           // No removals on a failed listing. This is behaviour 5, and it is the assertion that stops a
@@ -208,7 +224,10 @@ object HttpClusterProfiles {
 
     /** Re-read one cluster's profile, conditionally. A 304 changes nothing and fires nothing. */
     def refreshOne(id: ClusterId): F[Unit] =
-      state.get.map(_.etags.get(id)).flatMap(fetchProfile(id, _)).flatMap {
+      state.get.map(_.etags.get(id)).flatMap(refreshProfile(id, _))
+
+    private def refreshProfile(id: ClusterId, etag: Option[String]): F[Unit] =
+      fetchProfile(id, etag).flatMap {
         case Left(error) =>
           countFetch("failed") *> recordFailure(error) *> logger.debug(
             Map("cluster" -> id.value, "error" -> error.message)
@@ -221,10 +240,10 @@ object HttpClusterProfiles {
           countFetch("current") *> recordSuccess *> applyProfile(etag, dto)
       }
 
-    /** Installs a freshly fetched profile and fires `Updated` when its version actually moved.
+    /** Installs a freshly fetched profile and fires `Updated` when its effective settings or version moved.
       *
-      * The version comparison is what makes a re-serialised profile free. It is compared rather than the
-      * document, because a document comparison would call any change of field order a change of settings.
+      * A recreated profile can reuse the same store version. Compare the decoded settings as well, not the
+      * wire document (whose timestamp and field order are irrelevant), so this also detects that reset.
       */
     private def applyProfile(etag: String, dto: ClusterProfileDto): F[Unit] = {
       val profile = ClusterProfile(
@@ -237,7 +256,7 @@ object HttpClusterProfiles {
 
       state
         .modify { current =>
-          val previous = current.profiles.get(profile.id).map(_.version)
+          val previous = current.profiles.get(profile.id)
           val updated = current.copy(
             profiles = current.profiles.updated(profile.id, profile),
             etags = current.etags.updated(profile.id, etag)
@@ -245,18 +264,18 @@ object HttpClusterProfiles {
           (updated, previous)
         }
         .flatMap {
-          case Some(version) if version == profile.version => Async[F].unit
+          case Some(previous) if previous == profile => Async[F].unit
           case previous =>
             logger.info(
               Map(
                 "cluster" -> profile.id.value,
-                "from" -> previous.fold("none")(_.toString),
+                "from" -> previous.fold("none")(_.version.toString),
                 "to" -> profile.version.toString
               )
             )("a cluster profile changed; dependent clients will be rebuilt") *>
               // Never the profile itself. Its credentials are `Secret` and would redact themselves, but
               // a wall of redacted text is not a log line anybody reads.
-              fire(ProfileChange.Updated(profile.id, previous, profile.version))
+              fire(ProfileChange.Updated(profile.id, previous.map(_.version), profile.version))
         }
     }
 
@@ -273,7 +292,22 @@ object HttpClusterProfiles {
         }
         .flatMap(_.traverse_(id => fire(ProfileChange.Removed(id))))
 
-    /** Drops one cluster, named by a `removed` event on the stream. */
+    /** A removal event is an invalidation, not proof of current absence. Events can arrive after a newer
+      * fetch or a recreation, whose store version can restart at one.
+      */
+    private def revalidateRemoval(id: ClusterId): F[Unit] =
+      listClusters.flatMap {
+        case Left(error) =>
+          recordFailure(error) *> logger.debug(
+            Map("cluster" -> id.value, "error" -> error.message)
+          )("a cluster removal could not be verified; keeping the last known profile")
+        // A version-only ETag may belong to an earlier incarnation. An unconditional fetch is necessary
+        // even when the version in the delayed event is older than our cache.
+        case Right(ids) if ids.contains(id) => refreshProfile(id, None)
+        case Right(_) => recordSuccess *> forget(id)
+      }
+
+    /** Drops one cluster after the current listing confirms its absence. */
     private def forget(id: ClusterId): F[Unit] =
       state
         .modify(current =>
@@ -340,9 +374,12 @@ object HttpClusterProfiles {
       ) *> metrics.subscribed.add(if open then 1L else -1L)
 
     private def handle(event: kui.http.sse.SseEvent): F[Unit] =
+      refreshGate.permit.use(_ => handleLocked(event))
+
+    private def handleLocked(event: kui.http.sse.SseEvent): F[Unit] =
       ProfileSubscription.instructionFor(event) match {
         case ProfileSubscription.Instruction.Refetch(change) => refreshOne(change.id)
-        case ProfileSubscription.Instruction.Forget(change) => forget(change.id)
+        case ProfileSubscription.Instruction.Forget(change) => revalidateRemoval(change.id)
         case ProfileSubscription.Instruction.Ignored(reason) =>
           logger.debug(Map("reason" -> reason))("ignoring a cluster stream event")
       }

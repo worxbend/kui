@@ -111,11 +111,21 @@ final class DurableAlertStore[F[_]: Async] private (
           ().asRight[KuiError].pure[F]
         case Right((version, held)) =>
           val resolved = evaluation.resolved.toSet
-          val refreshed = evaluation.refreshed.toSet
+          val refreshed = evaluation.refreshed.map(event => event.id -> event).toMap
           val updated = held.events.map { event =>
-            if resolved.contains(event.id) then event.resolvedBy(at, AlertResolutionKind.Cleared, None)
-            else if refreshed.contains(event.id) then event.seenAt(at)
-            else event
+            if !event.isOpen then event
+            else if resolved.contains(event.id) then event.resolvedBy(at, AlertResolutionKind.Cleared, None)
+            else
+              refreshed
+                .get(event.id)
+                .fold(event)(latest =>
+                  event.copy(
+                    severity = latest.severity,
+                    title = latest.title,
+                    detail = latest.detail,
+                    lastSeenAt = at
+                  )
+                )
           }
           // Two replicas can both decide that one condition is new before either write becomes visible. Their
           // opening instants (and therefore ids) differ, so id-only deduplication would leave two open rows.
@@ -414,10 +424,15 @@ object DurableAlertStore {
         then left
         else right
       }
-      val lastSeen = duplicates.iterator.map(_.lastSeenAt).reduceLeft { (left, right) =>
-        if left.isAfter(right) then left else right
+      val latest = duplicates.reduceLeft { (left, right) =>
+        if left.lastSeenAt.isAfter(right.lastSeenAt) then left else right
       }
-      earliest.seenAt(lastSeen)
+      earliest.copy(
+        lastSeenAt = latest.lastSeenAt,
+        severity = latest.severity,
+        title = latest.title,
+        detail = latest.detail
+      )
     }
 
     closed ++ onePerCondition

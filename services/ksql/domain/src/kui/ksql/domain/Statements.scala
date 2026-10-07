@@ -1,7 +1,5 @@
 package kui.ksql.domain
 
-import java.util.Locale
-
 /** What a statement *is*, which decides which endpoint may answer it.
   *
   * The three cases are not stylistic: they are three different promises about when the answer ends.
@@ -64,6 +62,11 @@ enum StatementProblem(val message: String) {
       extends StatementProblem(
         s"a statement may be at most ${KsqlStatement.MaxLength} characters"
       )
+
+  case UnsupportedSyntax
+      extends StatementProblem(
+        "unterminated or unsupported SQL quoting/comment syntax; use doubled quotes, not backslash escapes"
+      )
 }
 
 object StatementProblem {
@@ -93,7 +96,8 @@ final case class KsqlStatement private (
     text: String,
     shape: StatementShape,
     destructive: Boolean,
-    target: Option[String]
+    target: Option[String],
+    targetKind: Option[KsqlObjectKind]
 ) {
 
   /** The text as it will be sent and as a plan token signs it: trimmed, with a single trailing `;`.
@@ -141,17 +145,6 @@ object KsqlStatement {
 
   private val DropLeading = """(?is)^\s*DROP\b.*""".r
 
-  /** The object a `DROP` names, so that a plan can say what would be destroyed rather than only that
-    * something would be.
-    *
-    * It is deliberately **not** used to decide anything — [[classify]]'s `destructive` does not depend on it,
-    * and a `DROP` whose target this does not match is still destructive. Its only job is to let the plan look
-    * the object up and name the Kafka topic behind it, and a plan that cannot name one says so in a sentence
-    * rather than leaving the warning generic. ADR-055 §7.
-    */
-  private val DropTarget =
-    """(?is)^\s*DROP\s+(?:STREAM|TABLE)\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_.`"]+).*""".r
-
   /** The one way a statement is built. `Left` carries a sentence for the person who typed it.
     *
     * There is no public constructor and no `unsafe`: every `KsqlStatement` in this service has been through
@@ -160,19 +153,16 @@ object KsqlStatement {
   def parse(raw: String): Either[StatementProblem, KsqlStatement] =
     if raw.length > MaxLength then Left(StatementProblem.TooLong)
     else {
-      val stripped = withoutComments(raw)
-
-      split(stripped) match {
+      StatementLexer.scan(raw).flatMap {
         case Nil => Left(StatementProblem.Empty)
-        case single :: Nil => Right(classify(single))
+        case single :: Nil => Right(classifyTokens(single))
         case _ => Left(StatementProblem.Multiple)
       }
     }
 
-  /** What one already-split statement is. Separate from [[parse]] so a case can drive it directly. */
-  def classify(statement: String): KsqlStatement = {
-    val body = statement.trim
-    val quoteless = withoutLiterals(body)
+  private def classifyTokens(statement: StatementLexer.Statement): KsqlStatement = {
+    val body = statement.text.trim
+    val quoteless = statement.tokens.map(token => if token.keyword then token.text else "?").mkString(" ")
 
     val shape =
       if !SelectLeading.matches(quoteless) then StatementShape.Statement
@@ -187,82 +177,13 @@ object KsqlStatement {
       // statement ask for a confirmation nobody can give it — and, far more importantly, so that neither
       // can hide a real one. `StatementsSuite` runs both directions.
       destructive = DropLeading.matches(quoteless) && DeleteTopic.findFirstIn(quoteless).isDefined,
-      target = quoteless match {
-        // ksqlDB upper-cases an unquoted identifier and keeps a quoted one, and its own `SHOW STREAMS`
-        // answers in whichever case it stored. Upper-casing here is what makes `DROP STREAM orders` find
-        // the object the server calls `ORDERS`; a statement that quoted the name is looked up as typed.
-        case DropTarget(name) if name.startsWith("`") || name.startsWith("\"") =>
-          Some(name.drop(1).dropRight(1))
-        case DropTarget(name) => Some(name.toUpperCase(Locale.ROOT))
-        case _ => None
+      target = statement.dropTarget,
+      targetKind = statement.tokens.lift(1).filter(_.keyword).flatMap { token =>
+        if token.text.equalsIgnoreCase("STREAM") then Some(KsqlObjectKind.Stream)
+        else if token.text.equalsIgnoreCase("TABLE") then Some(KsqlObjectKind.Table)
+        else None
       }
     )
-  }
-
-  /** `--` to end of line, and slash-star to star-slash, removed.
-    *
-    * Removed rather than ignored in place, because every later question — is this one statement, does it
-    * start with `SELECT`, does it say `DELETE TOPIC` — would otherwise have to ask it again with its own
-    * comment rule, and the first one that forgot would be the hole.
-    */
-  private def withoutComments(raw: String): String = {
-    @annotation.tailrec
-    def scan(index: Int, inLiteral: Boolean, out: StringBuilder): String =
-      if index >= raw.length then out.toString
-      else {
-        val current = raw.charAt(index)
-        val next = if index + 1 < raw.length then raw.charAt(index + 1) else ' '
-
-        if inLiteral then scan(index + 1, current != '\'', out.append(current))
-        else if current == '\'' then scan(index + 1, true, out.append(current))
-        // A line comment ends at the newline, and the newline itself is kept: it is whitespace that
-        // separates the tokens either side of the comment, and dropping it would join them.
-        else if current == '-' && next == '-' then scan(endOfLine(index), false, out)
-        // One space in place of a block comment, for the reason the newline above is kept.
-        else if current == '/' && next == '*' then scan(afterBlock(index + 2), false, out.append(' '))
-        else scan(index + 1, false, out.append(current))
-      }
-
-    @annotation.tailrec
-    def endOfLine(index: Int): Int =
-      if index >= raw.length || raw.charAt(index) == '\n' then index else endOfLine(index + 1)
-
-    @annotation.tailrec
-    def afterBlock(index: Int): Int =
-      if index >= raw.length then raw.length
-      else if raw.charAt(index) == '*' && index + 1 < raw.length && raw.charAt(index + 1) == '/' then
-        math.min(raw.length, index + 2)
-      else afterBlock(index + 1)
-
-    scan(0, inLiteral = false, new StringBuilder(raw.length))
-  }
-
-  /** The text with the contents of every single-quoted literal blanked out.
-    *
-    * Used only for *asking questions* about a statement, never for sending it: what goes to the server is the
-    * operator's own text. A literal's contents are blanked rather than removed so that positions and word
-    * boundaries either side of it are unchanged.
-    */
-  private def withoutLiterals(raw: String): String =
-    raw
-      .foldLeft((new StringBuilder(raw.length), false)) { case ((out, inLiteral), current) =>
-        if current == '\'' then (out.append('\''), !inLiteral)
-        else (out.append(if inLiteral then ' ' else current), inLiteral)
-      }
-      ._1
-      .toString
-
-  /** Every non-empty statement in the text, split on the `;` that are not inside a literal. */
-  private def split(raw: String): List[String] = {
-    val scanned =
-      raw.foldLeft((List.empty[String], new StringBuilder, false)) {
-        case ((done, current, inLiteral), character) =>
-          if character == '\'' then (done, current.append(character), !inLiteral)
-          else if character == ';' && !inLiteral then (done :+ current.toString, new StringBuilder, false)
-          else (done, current.append(character), inLiteral)
-      }
-
-    (scanned._1 :+ scanned._2.toString).map(_.trim).filter(_.nonEmpty)
   }
 
   given CanEqual[KsqlStatement, KsqlStatement] = CanEqual.derived
@@ -295,9 +216,13 @@ enum StatementOutcome {
     */
   case Status(message: String, entity: Option[String])
 
+  /** Accepted or running, but not yet observed in a terminal command state. */
+  case Pending(message: String, entity: Option[String])
+
   def wire: String = this match {
     case Rows(_, _) => "rows"
     case Status(_, _) => "status"
+    case Pending(_, _) => "pending"
   }
 }
 

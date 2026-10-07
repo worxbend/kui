@@ -27,6 +27,38 @@ final class RbacLawsSuite extends ScalaCheckSuite {
   private def user(roles: RoleName*): Principal =
     Principal(UserName.unsafe("tester"), roles.toSet, PrincipalKind.Session)
 
+  test("exported default-role grants are fallback-only, matching server decisions") {
+    val default =
+      DefaultRole(List(RbacPolicy.permission(Resource.Topic, Some(orders), Set(Action.TopicView))))
+    val policy = RbacPolicy(List(editors), Some(default))
+    val principal = user(RoleName.unsafe("editors"))
+    val exported = Rbac.grants(policy, principal)
+    List(Some(Cluster), Some(ClusterId.unsafe("other")), None).foreach { cluster =>
+      val scoped = exported.filter(grant => cluster.forall(grant.clusters.includes))
+      val primary = scoped.filterNot(_.defaultRole)
+      val effective = if primary.nonEmpty then primary else scoped.filter(_.defaultRole)
+      List("orders", "payments").foreach { name =>
+        val client = effective.exists(grant =>
+          grant.permission.covers(Resource.Topic, Some(name)) &&
+            grant.permission.actions.contains(Action.TopicView)
+        )
+        val server = Rbac
+          .decide(
+            policy,
+            principal,
+            Writable,
+            AccessRequest(
+              cluster,
+              List(ResourceAccess.named(Resource.Topic, name, Action.TopicView)),
+              OperationName("view")
+            )
+          )
+          .isAllowed
+        assertEquals(client, server, s"cluster=$cluster name=$name")
+      }
+    }
+  }
+
   test("RBAC vocabulary parsing does not depend on the host locale") {
     val previous = Locale.getDefault
     try {

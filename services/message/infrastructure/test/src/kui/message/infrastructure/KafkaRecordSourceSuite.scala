@@ -10,8 +10,8 @@ import cats.syntax.all.*
 
 import kui.kernel.browse.{Direction, PollBudget, SeekMode}
 import kui.kernel.error.KuiError
-import kui.kernel.{Offset, PartitionId}
-import kui.message.application.RawRecord
+import kui.kernel.{Offset, PartitionId, TopicName}
+import kui.message.application.{RawRecord, ScanCompletion, ScanEvent}
 import kui.message.domain.BrowseRequest
 import kui.testkit.KuiIOSuite
 
@@ -94,6 +94,264 @@ final class KafkaRecordSourceSuite extends KuiIOSuite {
     } yield (records, polls)
 
   // -------------------------------------------------------------------------------------- forward
+
+  test("a sparse [0,2] log finishes forwards and backwards without an exact-offset match") {
+    val log = Map(PartitionId.unsafe(0) -> Vector(0L, 2L).map(FakeBrowseConsumer.record(0, _)))
+    List(Direction.Forward, Direction.Backward).traverse_ { direction =>
+      for {
+        closed <- Ref.of[IO, Boolean](false)
+        events <- sourceOver(log, closed)
+          .scan(
+            request(
+              if direction == Direction.Forward then SeekMode.Beginning else SeekMode.Latest,
+              direction,
+              10
+            ),
+            PollBudget.unsafe(100, 10000, 200.millis)
+          )
+          .compile
+          .toList
+      } yield {
+        assertEquals(
+          events.collect { case ScanEvent.Record(record) => record.offset.value },
+          if direction == Direction.Forward then List(0L, 2L) else List(2L, 0L)
+        )
+        assertEquals(events.last, ScanEvent.Completed(ScanCompletion.End))
+      }
+    }
+  }
+
+  test("backward pages preserve descending offsets despite timestamp disorder") {
+    val records = FakeBrowseConsumer
+      .partition(0, 4)
+      ._2
+      .map(record =>
+        record.copy(timestamp = Instant.ofEpochMilli(if record.offset.value == 1L then 1000L else 0L))
+      )
+    browse(Map(PartitionId.unsafe(0) -> records), request(SeekMode.Latest, Direction.Backward, 4))
+      .map(result => assertEquals(offsets(result), List((0, 3L), (0, 2L), (0, 1L), (0, 0L))))
+  }
+
+  private def configuredScan(
+      visible: Vector[Long],
+      retained: (Long, Long),
+      batchSize: Int,
+      of: BrowseRequest,
+      over: PollBudget = budget,
+      upper: Option[Long] = None
+  ): IO[List[ScanEvent]] =
+    for {
+      consumer <- FakeBrowseConsumer.of(
+        Map(PartitionId.unsafe(0) -> visible.map(FakeBrowseConsumer.record(0, _))),
+        maxPollRecords = batchSize,
+        retainedBounds = Map(PartitionId.unsafe(0) -> retained)
+      )
+      source = new KafkaRecordSource[IO]((_, _) => Resource.pure(Right(consumer)))
+      events <- source
+        .scan(of, over, upper.map(end => PartitionId.unsafe(0) -> Offset.unsafe(end)).toMap)
+        .compile
+        .toList
+    } yield events
+
+  for {
+    direction <- List(Direction.Forward, Direction.Backward)
+    batchSize <- List(1, 10)
+  } test(s"retention and invisible head/tail holes complete $direction with batch=$batchSize") {
+    val seek = if direction == Direction.Forward then SeekMode.AtOffset(Offset.unsafe(0)) else SeekMode.Latest
+    configuredScan(Vector(7L, 9L), (5L, 12L), batchSize, request(seek, direction, 10)).map { events =>
+      assertEquals(
+        events.collect { case ScanEvent.Record(record) => record.offset.value },
+        if direction == Direction.Forward then List(7L, 9L) else List(9L, 7L)
+      )
+      assertEquals(events.last, ScanEvent.Completed(ScanCompletion.End))
+    }
+  }
+
+  for (direction <- List(Direction.Forward, Direction.Backward))
+    test(s"a wholly invisible retained log completes $direction from consumer positions") {
+      val seek = if direction == Direction.Forward then SeekMode.Beginning else SeekMode.Latest
+      configuredScan(Vector.empty, (5L, 12L), 10, request(seek, direction, 10)).map { events =>
+        assertEquals(events, List(ScanEvent.Completed(ScanCompletion.End)))
+      }
+    }
+
+  test("a batched sparse forward seek into a hole respects both bounds") {
+    configuredScan(
+      Vector(0L, 2L, 4L, 6L),
+      (0L, 8L),
+      10,
+      request(SeekMode.AtOffset(Offset.unsafe(1)), Direction.Forward, 10),
+      upper = Some(4L)
+    ).map { events =>
+      assertEquals(events.collect { case ScanEvent.Record(record) => record.offset.value }, List(2L))
+      assertEquals(events.last, ScanEvent.Completed(ScanCompletion.End))
+    }
+  }
+
+  test("a batched sparse backward window excludes the requested upper bound") {
+    configuredScan(
+      Vector(7L, 9L, 11L),
+      (5L, 14L),
+      10,
+      request(SeekMode.AtOffset(Offset.unsafe(10)), Direction.Backward, 10),
+      upper = Some(9L)
+    ).map { events =>
+      assertEquals(events.collect { case ScanEvent.Record(record) => record.offset.value }, List(7L))
+      assertEquals(events.last, ScanEvent.Completed(ScanCompletion.End))
+    }
+  }
+
+  for (direction <- List(Direction.Forward, Direction.Backward))
+    test(s"a batch at broker end is not EOF when a $direction record budget leaves records undelivered") {
+      val seek = if direction == Direction.Forward then SeekMode.Beginning else SeekMode.Latest
+      configuredScan(
+        Vector(0L, 2L, 4L),
+        (0L, 5L),
+        10,
+        request(seek, direction, 10),
+        PollBudget.unsafe(2, 10000, 30.seconds)
+      ).map { events =>
+        assertEquals(
+          events.collect { case ScanEvent.Record(record) => record.offset.value },
+          if direction == Direction.Forward then List(0L, 2L) else List(4L, 2L)
+        )
+        assertEquals(events.last, ScanEvent.Completed(ScanCompletion.RecordBudget))
+      }
+    }
+
+  for (direction <- List(Direction.Forward, Direction.Backward))
+    test(s"a batch at broker end is not EOF when a $direction byte budget leaves records undelivered") {
+      val seek = if direction == Direction.Forward then SeekMode.Beginning else SeekMode.Latest
+      configuredScan(
+        Vector(0L, 2L, 4L),
+        (0L, 5L),
+        10,
+        request(seek, direction, 10),
+        PollBudget.unsafe(100, 48L, 30.seconds)
+      ).map { events =>
+        assertEquals(
+          events.collect { case ScanEvent.Record(record) => record.offset.value },
+          if direction == Direction.Forward then List(0L, 2L) else List(4L, 2L)
+        )
+        assertEquals(events.last, ScanEvent.Completed(ScanCompletion.ByteBudget))
+      }
+    }
+
+  test("an exact batched record budget reports EOF only when the whole bounded input was delivered") {
+    configuredScan(
+      Vector(0L, 2L, 4L),
+      (0L, 6L),
+      10,
+      request(SeekMode.Beginning, Direction.Forward, 10),
+      PollBudget.unsafe(2, 10000, 30.seconds),
+      upper = Some(4L)
+    ).map { events =>
+      assertEquals(events.collect { case ScanEvent.Record(record) => record.offset.value }, List(0L, 2L))
+      assertEquals(events.last, ScanEvent.Completed(ScanCompletion.End))
+    }
+  }
+
+  test("consumer positions prove EOF across control records even when every poll is empty") {
+    for {
+      underlying <- FakeBrowseConsumer.of(Map(FakeBrowseConsumer.partition(0, 2)))
+      consumer = new BrowseConsumer[IO] {
+        def partitions(topic: TopicName) = underlying.partitions(topic)
+        def beginningOffsets(topic: TopicName, ids: List[PartitionId]) =
+          underlying.beginningOffsets(topic, ids)
+        def endOffsets(topic: TopicName, ids: List[PartitionId]) = underlying.endOffsets(topic, ids)
+        def offsetsForTimes(topic: TopicName, ids: List[PartitionId], millis: Long) =
+          underlying.offsetsForTimes(topic, ids, millis)
+        def assign(topic: TopicName, ids: List[PartitionId]) = underlying.assign(topic, ids)
+        def seek(topic: TopicName, partition: PartitionId, offset: Long) =
+          underlying.seek(topic, partition, offset)
+        def positions = underlying.positions
+        def poll(timeout: scala.concurrent.duration.FiniteDuration) =
+          underlying.poll(timeout).map(_.map(_ => Nil))
+      }
+      source = new KafkaRecordSource[IO]((_, _) => Resource.pure(Right(consumer)))
+      result <- source.scan(request(SeekMode.Beginning, Direction.Forward, 10), budget).compile.toList
+      polls <- underlying.pollCount
+    } yield {
+      assertEquals(result, List(ScanEvent.Completed(ScanCompletion.End)))
+      assertEquals(polls, 2)
+    }
+  }
+
+  test("scan completion distinguishes record budget from EOF at the same record count") {
+    for {
+      closed <- Ref.of[IO, Boolean](false)
+      source = sourceOver(Map(FakeBrowseConsumer.partition(0, 3)), closed)
+      partial <- source
+        .scan(request(SeekMode.Beginning, Direction.Forward, 10), PollBudget.unsafe(1, 10000, 30.seconds))
+        .compile
+        .toList
+      complete <- source
+        .scan(
+          request(SeekMode.Beginning, Direction.Forward, 10),
+          PollBudget.unsafe(1, 10000, 30.seconds),
+          Map(PartitionId.unsafe(0) -> Offset.unsafe(1))
+        )
+        .compile
+        .toList
+    } yield {
+      assertEquals(partial.last, ScanEvent.Completed(ScanCompletion.RecordBudget))
+      assertEquals(complete.last, ScanEvent.Completed(ScanCompletion.End))
+      assertEquals(complete.collect { case ScanEvent.Record(record) => record.offset.value }, List(0L))
+    }
+  }
+
+  test("scan reports byte exhaustion and respects both explicit window bounds") {
+    for {
+      closed <- Ref.of[IO, Boolean](false)
+      source = sourceOver(Map(FakeBrowseConsumer.partition(0, 5)), closed)
+      partial <- source
+        .scan(
+          request(SeekMode.AtOffset(Offset.unsafe(1)), Direction.Forward, 10),
+          PollBudget.unsafe(100, 1, 30.seconds),
+          Map(PartitionId.unsafe(0) -> Offset.unsafe(3))
+        )
+        .compile
+        .toList
+      complete <- source
+        .scan(
+          request(SeekMode.AtOffset(Offset.unsafe(1)), Direction.Forward, 10),
+          budget,
+          Map(PartitionId.unsafe(0) -> Offset.unsafe(3))
+        )
+        .compile
+        .toList
+    } yield {
+      assertEquals(partial.last, ScanEvent.Completed(ScanCompletion.ByteBudget))
+      assertEquals(complete.collect { case ScanEvent.Record(record) => record.offset.value }, List(1L, 2L))
+      assertEquals(complete.last, ScanEvent.Completed(ScanCompletion.End))
+    }
+  }
+
+  test("a silent consumer ends at the deadline as incomplete, never EOF") {
+    for {
+      closed <- Ref.of[IO, Boolean](false)
+      source = new KafkaRecordSource[IO](
+        FakeBrowseConsumer
+          .openingSilentAtFirst(Map(FakeBrowseConsumer.partition(0, 2)), closed, Int.MaxValue),
+        BrowseTuning(pollTimeout = 1.milli, emptyPollsBeforeEnd = 0)
+      )
+      result <- source
+        .scan(request(SeekMode.Beginning, Direction.Forward, 10), PollBudget.unsafe(100, 10000, 20.millis))
+        .compile
+        .toList
+    } yield assertEquals(result.last, ScanEvent.Completed(ScanCompletion.Deadline))
+  }
+
+  test("transient empty polls never prove the captured range empty") {
+    for {
+      closed <- Ref.of[IO, Boolean](false)
+      source = new KafkaRecordSource[IO](
+        FakeBrowseConsumer.openingSilentAtFirst(Map(FakeBrowseConsumer.partition(0, 2)), closed, 12),
+        BrowseTuning(pollTimeout = 1.milli, emptyPollsBeforeEnd = 0)
+      )
+      result <- source.browse(request(SeekMode.Beginning, Direction.Forward, 10), budget).compile.toList
+    } yield assertEquals(offsets(result), List((0, 0L), (0, 1L)))
+  }
 
   test("a forward browse from the beginning reads a partition in order and stops at its end") {
     val log = Map(FakeBrowseConsumer.partition(0, 5))
@@ -342,6 +600,23 @@ final class KafkaRecordSourceSuite extends KuiIOSuite {
       assertEquals(firstOffsets, (8 to 0 by -1).map(id => (id, 0L)).toList)
       assertEquals(second._2, 9)
       assertEquals(offsets(second._1), (17 to 9 by -1).map(id => (id, 0L)).toList)
+    }
+  }
+
+  test("backward byte exhaustion does not report EOF for unvisited partitions") {
+    for {
+      closed <- Ref.of[IO, Boolean](false)
+      source = sourceOver((0 until 4).map(id => FakeBrowseConsumer.partition(id, count = 1)).toMap, closed)
+      events <- source
+        .scan(
+          request(SeekMode.Latest, Direction.Backward, limit = 100),
+          PollBudget.unsafe(100, 24L, 30.seconds)
+        )
+        .compile
+        .toList
+    } yield {
+      assertEquals(events.collect { case ScanEvent.Record(record) => record.partition.value }, List(0))
+      assertEquals(events.last, ScanEvent.Completed(ScanCompletion.ByteBudget))
     }
   }
 

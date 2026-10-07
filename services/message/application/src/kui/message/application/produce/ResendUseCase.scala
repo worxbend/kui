@@ -5,7 +5,7 @@ import cats.syntax.all.*
 
 import kui.kernel.browse.{Direction, PollBudget, SeekMode}
 import kui.kernel.error.{ApplicationError, FieldError, KuiError}
-import kui.message.application.{RawRecord, RecordSource}
+import kui.message.application.{RawRecord, RecordSource, ScanCompletion, ScanEvent}
 import kui.message.domain.*
 import kui.security.Principal
 import kui.security.audit.MutationKind
@@ -145,18 +145,28 @@ object ResendUseCase {
           case Left(error) => error.asLeft[List[RawRecord]].pure[F]
           case Right(browse) =>
             records
-              .browse(browse, budget)
+              .scan(browse, budget, Map(request.source.partition -> request.source.offsets.until))
               .compile
               .toList
               .map(collected =>
-                collected.collectFirst { case Left(error) => error } match {
+                collected.collectFirst { case ScanEvent.Failed(error) => error } match {
                   // A failure part-way through the read is the whole request's failure: copying the first
                   // half of a range without saying so would leave the destination in a state the operator
                   // did not ask for and cannot see.
                   case Some(error) => error.asLeft[List[RawRecord]]
+                  case None if !collected.exists {
+                        case ScanEvent.Completed(ScanCompletion.End) => true
+                        case _ => false
+                      } =>
+                    ApplicationError
+                      .Refused(
+                        kui.kernel.error.ErrorCode.InvalidState,
+                        "the source range was not completely read; no records were written; use a smaller range"
+                      )
+                      .asLeft[List[RawRecord]]
                   case None =>
                     collected
-                      .collect { case Right(record) => record }
+                      .collect { case ScanEvent.Record(record) => record }
                       .filter(record => request.source.offsets.contains(record.offset))
                       .asRight[KuiError]
                 }

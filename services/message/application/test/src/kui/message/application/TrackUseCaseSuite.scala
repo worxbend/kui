@@ -5,6 +5,7 @@ import java.time.Instant
 import scala.concurrent.duration.DurationInt
 
 import cats.effect.IO
+import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import fs2.Stream
 
@@ -99,6 +100,9 @@ final class TrackUseCaseSuite extends KuiIOSuite {
     */
   private def sourceOf(logs: Map[TopicName, List[RawRecord]]): RecordSource[IO] =
     new RecordSource[IO] {
+      override def scan(request: BrowseRequest, budget: PollBudget, upperOffsets: Map[PartitionId, Offset]) =
+        FiniteRecordScan(logs.getOrElse(request.topic, Nil), budget)
+
       def browse(request: BrowseRequest, budget: PollBudget): Stream[IO, Either[KuiError, RawRecord]] =
         Stream.emits(logs.getOrElse(request.topic, Nil).map(_.asRight[KuiError]))
 
@@ -144,6 +148,58 @@ final class TrackUseCaseSuite extends KuiIOSuite {
     events
       .collectFirst { case finished: TrackEvent.Finished => finished }
       .getOrElse(fail("a track must always say how it ended"))
+
+  test("tracking uses one deadline rather than restarting it for every topic") {
+    val logs = Map(orders -> List(record(0L, "a")), shipments -> List(record(0L, "b")))
+    val slow = new RecordSource[IO] {
+      def browse(request: BrowseRequest, budget: PollBudget) = sourceOf(logs).browse(request, budget)
+      def assignedStarts(request: BrowseRequest) = sourceOf(logs).assignedStarts(request)
+      override def scan(request: BrowseRequest, budget: PollBudget, upperOffsets: Map[PartitionId, Offset]) =
+        Stream.sleep_[IO](6.seconds) ++ sourceOf(logs).scan(request, budget, upperOffsets)
+    }
+    TestControl.executeEmbed(
+      TrackUseCase
+        .make[IO](clusters, serdes, slow, RecordMasking.none[IO])
+        .track(queryOver(List(orders, shipments), "absent"), PollBudget.unsafe(100, 10000, 10.seconds))
+        .compile
+        .toList
+        .map { events =>
+          assertEquals(ending(events).read, 1L)
+          assert(ending(events).truncated)
+        }
+    )
+  }
+
+  test("tracking shares its byte budget across topics") {
+    val logs = Map(orders -> List(record(0L, "a")), shipments -> List(record(0L, "b")))
+    TrackUseCase
+      .make[IO](clusters, serdes, sourceOf(logs), RecordMasking.none[IO])
+      .track(queryOver(List(orders, shipments), "absent"), PollBudget.unsafe(100, 6, 30.seconds))
+      .compile
+      .toList
+      .map { events =>
+        assertEquals(ending(events).read, 1L)
+        assert(ending(events).truncated)
+      }
+  }
+
+  test("tracking shares its record budget across topics and reports incomplete scans") {
+    val logs = Map(orders -> List(record(0L, "a")), shipments -> List(record(0L, "b"), record(1L, "c")))
+    TrackUseCase
+      .make[IO](clusters, serdes, sourceOf(logs), RecordMasking.none[IO])
+      .track(queryOver(List(orders, shipments), "absent"), PollBudget.unsafe(2, 10000, 30.seconds))
+      .compile
+      .toList
+      .map { events =>
+        assertEquals(ending(events).read, 2L)
+        assert(ending(events).truncated)
+      }
+  }
+
+  test("tracking excludes timestamps below from even at later offsets") {
+    val logs = Map(orders -> List(record(0L, "hit"), record(1L, "hit", start.minusSeconds(120))))
+    run(logs, queryOver(List(orders), "hit")).map(events => assertEquals(hits(events).size, 1))
+  }
 
   test("a track finds the value in every topic it was given, and says which topic each hit came from") {
     // The whole point of the feature: the answer to "where did order 4711 go" spans topics, and a result

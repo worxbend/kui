@@ -40,6 +40,33 @@ The repository examples show the two shapes:
   catalog. It is not a complete orchestrator manifest and still selects disabled authentication;
   production must replace that posture as described below.
 
+### Local-demo upstream policy
+
+The distributed, all-in-one, multi-cluster demo, secured demo, and quickstart Compose
+backends explicitly set `KUI_ALLOW_PRIVATE_UPSTREAMS=true`. Docker service names resolve
+to private IPs, and KUI checks the address it actually connects to, not just the URL's
+hostname. The all-in-one and secured demos also permit private integrations registered
+later. This is a demo-only SSRF-policy relaxation, not a TLS-verification switch; it is
+not set on nginx frontends, Kafka, or other fixture containers.
+
+Do not copy this environment setting into production. Unset (or `false`) retains the
+strict policy, including for DNS names resolving to private, loopback, or link-local
+addresses. Production private upstreams require a deliberate security review and network
+egress controls; the demo switch broadly permits non-public destinations, not just Docker.
+
+In the distributed demo, standalone alerts and metrics mount `compose/kui-service.yaml`,
+whose `kui.clusterProfiles.url` points to `http://kui-cluster:8080`. Keep that authoritative
+profile source available: local bootstrap entries are not a replacement for live profile
+updates. Other standalone deployments must provide `kui.clusterProfiles.url` (or the
+fallback `kui.gateway.services.cluster.url`) in the file actually mounted by each process.
+
+Check all five topologies and the alerts/metrics mounts without starting containers or
+loading a local `.env` file:
+
+```bash
+python3 scripts/test-deployment.py DemoTopologyPolicy QuickstartBindings ToolPins
+```
+
 ## Build one release
 
 Backend images are deterministic Mill builds tagged `0.1.0-SNAPSHOT` in the current source tree.
@@ -184,6 +211,17 @@ Record browsing, live alerts, and push queries use server-sent events. Any proxy
 frontend must preserve streaming responses: disable response buffering and caching for the API
 path and set a read timeout long enough for live streams. The shipped frontend nginx configuration
 already does this for its hop to the gateway.
+
+Keep the HTTP request-line limit at least 16 KiB on every outer proxy. KUI permits an 8 KiB
+browse cursor, and its URL also carries a route, deployment prefix, and other query parameters.
+The shipped nginx and backend use a 16 KiB limit; an 8 KiB proxy default rejects otherwise valid
+continuations with HTTP 414.
+
+The quickstart and its frontend overlay publish only on `127.0.0.1` by default. For an explicitly
+network-accessible disposable demo, set `KUI_QUICKSTART_BIND_ADDRESS` to the desired host interface
+(or `0.0.0.0` for all IPv4 interfaces). This exposes unauthenticated demo services; do not use it
+as a production configuration. Kafka's advertised external address must also be reachable by
+remote clients if they connect directly to the demo broker.
 
 Preserve KUI's response security headers, forward the public host and scheme, and keep CORS disabled
 for the normal same-origin deployment. If another origin must call the API, list exact origins under

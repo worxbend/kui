@@ -18,6 +18,7 @@ object MetricNames {
 
   /** How long a call to another system took, and how it ended. */
   val UpstreamDuration: String = "kui.upstream.duration" // {service, upstream, outcome}
+  val UpstreamAttemptDuration: String = "kui.upstream.attempt.duration" // {service, upstream, outcome}
 
   /** Whether an upstream's circuit breaker is closed, open or half-open. */
   val UpstreamCircuitState: String = "kui.upstream.circuit.state" // {upstream}
@@ -123,6 +124,7 @@ object MetricNames {
   val all: List[String] = List(
     HttpServerDuration,
     UpstreamDuration,
+    UpstreamAttemptDuration,
     UpstreamCircuitState,
     KafkaAdminDuration,
     KafkaConsumeRecords,
@@ -221,7 +223,7 @@ object MetricNames {
   * grouping useless.
   */
 enum UpstreamOutcome {
-  case Success, ClientError, ServerError, Timeout, CircuitOpen, Unreachable
+  case Success, ClientError, ServerError, Timeout, CircuitOpen, Unreachable, Canceled
 
   def wire: String = this match {
     case Success => "success"
@@ -230,6 +232,7 @@ enum UpstreamOutcome {
     case Timeout => "timeout"
     case CircuitOpen => "circuit_open"
     case Unreachable => "unreachable"
+    case Canceled => "canceled"
   }
 }
 

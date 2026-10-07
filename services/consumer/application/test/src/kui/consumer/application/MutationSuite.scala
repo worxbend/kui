@@ -92,6 +92,84 @@ final class MutationSuite extends KuiIOSuite {
       logger <- FakeStructuredLogger[IO]
     } yield OffsetResetUseCase.make[IO](_ => port, guard, profiles, tokens, logger)
 
+  test("reset planning and apply refuse a missing group description") {
+    for {
+      rigged <- rig(emptyGroup)
+      (port, _, guard, _) = rigged
+      reset <- resetUseCase(port, guard, readOnly = false)
+      planned <- reset.plan(ConsumerRig.Cluster, group, scope, ResetSpec.ToEarliest)
+      token = planned.getOrElse(fail("no plan")).token
+      _ <- port.state.update(_.copy(described = Right(Map.empty)))
+      refusedPlan <- reset.plan(ConsumerRig.Cluster, group, scope, ResetSpec.ToEarliest)
+      refusedApply <- reset.apply(Caller, ConsumerRig.Cluster, group, token)
+      state <- port.state.get
+    } yield {
+      assert(refusedPlan.isLeft)
+      assert(refusedApply.isLeft)
+      assertEquals(state.applied, Nil)
+    }
+  }
+
+  test("delete mutations refuse unknown committed offsets rather than successful empty deletion") {
+    for {
+      rigged <- rig(emptyGroup.copy(completeness = emptyGroup.completeness.withoutCommittedOffsets))
+      (port, _, guard, _) = rigged
+      logger <- FakeStructuredLogger[IO]
+      offsets = DeleteOffsetsUseCase.make[IO](_ => port, guard, logger)
+      groups = DeleteGroupUseCase.make[IO](_ => port, guard, logger)
+      deletedOffsets <- offsets.delete(Caller, ConsumerRig.Cluster, group, GroupFixtures.Orders)
+      deletedGroup <- groups.delete(Caller, ConsumerRig.Cluster, group)
+      state <- port.state.get
+    } yield {
+      assert(deletedOffsets.isLeft)
+      assert(deletedGroup.isLeft)
+      assertEquals(state.deletedOffsets, Nil)
+      assertEquals(state.deletedGroups, Nil)
+    }
+  }
+
+  List(
+    "retention moved the beginning" -> Right(
+      window.copy(begin = Map(GroupFixtures.partition(0) -> Offset.unsafe(1L)))
+    ),
+    "the partition disappeared" -> Right(window.copy(begin = Map.empty)),
+    "the partition lost its leader" -> Right(window.copy(leaderless = scope.partitions)),
+    "the lookup failed" -> Left(ApplicationError.InvalidState("offset lookup failed"))
+  ).foreach { (reason, fresh) =>
+    test(s"reset apply refuses when $reason") {
+      for {
+        rigged <- rig(emptyGroup)
+        (port, _, guard, _) = rigged
+        reset <- resetUseCase(port, guard, readOnly = false)
+        planned <- reset.plan(ConsumerRig.Cluster, group, scope, ResetSpec.ToEarliest)
+        token = planned.getOrElse(fail("no plan")).token
+        _ <- port.state.update(_.copy(window = fresh))
+        result <- reset.apply(Caller, ConsumerRig.Cluster, group, token)
+        state <- port.state.get
+      } yield {
+        assert(result.isLeft)
+        assertEquals(state.applied, Nil)
+      }
+    }
+  }
+
+  test("reset apply rejects a signed target beyond a truncated log end") {
+    for {
+      rigged <- rig(emptyGroup)
+      (port, _, guard, _) = rigged
+      reset <- resetUseCase(port, guard, readOnly = false)
+      planned <- reset.plan(ConsumerRig.Cluster, group, scope, ResetSpec.ToLatest)
+      _ <- port.state.update(
+        _.copy(window = Right(window.copy(end = Map(GroupFixtures.partition(0) -> Offset.unsafe(90L)))))
+      )
+      result <- reset.apply(Caller, ConsumerRig.Cluster, group, planned.getOrElse(fail("plan")).token)
+      state <- port.state.get
+    } yield {
+      assert(result.isLeft)
+      assertEquals(state.applied, Nil)
+    }
+  }
+
   test("a plan resolves the spec against live offsets and returns what would be written") {
     for {
       rigged <- rig(emptyGroup)

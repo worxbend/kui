@@ -18,7 +18,7 @@ import org.apache.kafka.clients.admin.{
 }
 import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.errors.PolicyViolationException
-import org.apache.kafka.common.{KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionInfo}
+import org.apache.kafka.common.{KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid}
 
 import kui.kernel.cluster.{
   AdminTuning,
@@ -70,11 +70,20 @@ final class KafkaRecordDeleterSuite extends KuiIOSuite {
   private def partition(id: Int, leader: Node | Null): TopicPartitionInfo =
     new TopicPartitionInfo(id, leader, List(broker).asJava, List(broker).asJava)
 
-  private def described(partitions: List[TopicPartitionInfo]): DescribeTopicsResult =
+  private def described(
+      partitions: List[TopicPartitionInfo],
+      identity: Uuid = Uuid.ZERO_UUID
+  ): DescribeTopicsResult =
     KuiMessageAdminResults.describeTopics(
       Map(
         orders.value -> KafkaFuture.completedFuture(
-          new TopicDescription(orders.value, false, partitions.asJava)
+          new TopicDescription(
+            orders.value,
+            false,
+            partitions.asJava,
+            java.util.Collections.emptySet(),
+            identity
+          )
         )
       ).asJava
     )
@@ -111,7 +120,39 @@ final class KafkaRecordDeleterSuite extends KuiIOSuite {
 
   // -------------------------------------------------------------------------- the leaderless partition
 
-  test("a partition with no leader is left out of the plan and never asked for its offsets") {
+  test("purge identity is Kafka's UUID and absent UUIDs fail closed") {
+    val identity = Uuid.randomUuid()
+    def admin(id: Uuid): Admin = StubAdmin {
+      case ("describeTopics", (_: TopicCollection.TopicNameCollection) :: _) =>
+        described(List(partition(0, broker)), id)
+    }
+    for {
+      known <- deleterOver(admin(identity)).flatMap(_.topicId(cluster, orders))
+      unknown <- deleterOver(admin(Uuid.ZERO_UUID)).flatMap(_.topicId(cluster, orders))
+    } yield {
+      assertEquals(known, Right(identity.toString))
+      assert(unknown.isLeft)
+    }
+  }
+
+  test("a fully leaderless topic is unavailable, not an empty purge") {
+    val admin = StubAdmin { case ("describeTopics", (_: TopicCollection.TopicNameCollection) :: _) =>
+      described(List(partition(0, Node.noNode)))
+    }
+    deleterOver(admin).flatMap(_.watermarks(cluster, orders)).map(result => assert(result.isLeft))
+  }
+
+  test("missing partition offset results reject the whole plan") {
+    val admin = StubAdmin {
+      case ("describeTopics", (_: TopicCollection.TopicNameCollection) :: _) =>
+        described(List(partition(0, broker)))
+      case ("listOffsets", _) =>
+        new ListOffsetsResult(java.util.Collections.emptyMap())
+    }
+    deleterOver(admin).flatMap(_.watermarks(cluster, orders)).map(result => assert(result.isLeft))
+  }
+
+  test("a partition with no leader refuses the whole purge plan without looking up offsets") {
     /*
      * Ungated until now: dropping `.filter(info => Option(info.leader).exists(_.id >= 0))` left
      * `./mill services.message.__.test` at 1442/1442 green, because nothing in this module could build an
@@ -139,14 +180,10 @@ final class KafkaRecordDeleterSuite extends KuiIOSuite {
       deleter <- deleterOver(admin)
       plan <- deleter.watermarks(cluster, orders)
     } yield {
-      assertEquals(
-        plan.map(_.map(_.partition.value)),
-        Right(List(0)),
-        clue = "a partition with no leader reached a purge plan with offsets nobody could have measured"
-      )
+      assert(plan.isLeft, "an incomplete plan must not become an approved partial deletion")
       assertEquals(
         asked.get.map(_.partition).distinct.sorted,
-        List(0),
+        Nil,
         clue = "a leaderless partition was named in a listOffsets, which is a sixty-second timeout"
       )
     }

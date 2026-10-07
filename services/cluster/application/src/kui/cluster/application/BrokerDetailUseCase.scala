@@ -92,33 +92,47 @@ object BrokerDetailUseCase {
           broker: BrokerId
       ): F[Either[KuiError, (BrokerLogDirs, PartitionSizes)]] =
         withBroker(cluster, broker) { (profile, view) =>
-          admin.describeLogDirs(profile, NonEmptyList.one(broker)).flatMap {
-            case Right(result) =>
-              val dirs = result.get(broker).getOrElse(Nil)
+          admin
+            .describeLogDirs(profile, NonEmptyList.one(broker))
+            .map(_.flatMap { result =>
+              result
+                .get(broker)
+                .toRight(result.skipped.get(broker) match {
+                  case Some(SkipReason.Failed(error)) => error
+                  case Some(SkipReason.Unauthorized) =>
+                    ApplicationError.Forbidden("KUI is not authorized to read log directories")
+                  case reason =>
+                    InfrastructureError.Unreachable(
+                      profile.label,
+                      reason.fold("no log directories were reported for this broker")(_.describe)
+                    )
+                })
+            })
+            .flatMap {
+              case Right(dirs) =>
+                Temporal[F].realTimeInstant.map { now =>
+                  shaped(profile.ref, broker, dirs, SnapshotFreshness.Fresh(now))
+                }
 
-              Temporal[F].realTimeInstant.map { now =>
-                shaped(profile.ref, broker, dirs, SnapshotFreshness.Fresh(now))
-              }
+              case Left(error) =>
+                // The snapshot already holds this broker's directories from the last successful
+                // refresh, so a live failure greys the panel rather than emptying the page. Only a
+                // cluster that has never answered at all produces a `Left` here.
+                fallbackDirs(view, broker, error) match {
+                  case Some((dirs, freshness)) =>
+                    logger
+                      .warn(
+                        context ++ Map(
+                          "cluster.id" -> profile.id.value,
+                          "broker.id" -> broker.value.toString,
+                          "error.code" -> error.code.wire
+                        )
+                      )("the live log-directory read failed; serving the last snapshot")
+                      .as(shaped(profile.ref, broker, dirs, freshness))
 
-            case Left(error) =>
-              // The snapshot already holds this broker's directories from the last successful
-              // refresh, so a live failure greys the panel rather than emptying the page. Only a
-              // cluster that has never answered at all produces a `Left` here.
-              fallbackDirs(view, broker, error) match {
-                case Some((dirs, freshness)) =>
-                  logger
-                    .warn(
-                      context ++ Map(
-                        "cluster.id" -> profile.id.value,
-                        "broker.id" -> broker.value.toString,
-                        "error.code" -> error.code.wire
-                      )
-                    )("the live log-directory read failed; serving the last snapshot")
-                    .as(shaped(profile.ref, broker, dirs, freshness))
-
-                case None => error.asLeft[(BrokerLogDirs, PartitionSizes)].pure[F]
-              }
-          }
+                  case None => error.asLeft[(BrokerLogDirs, PartitionSizes)].pure[F]
+                }
+            }
         }
 
       def configs(

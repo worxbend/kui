@@ -79,6 +79,7 @@ function fakeApi(options: {
 }): { readonly api: KuiApiClient; readonly calls: Call[] } {
   const calls: Call[] = [];
   const api = {
+    url: (path: string) => path,
     get: async (path: string) => {
       calls.push({ method: "get", path });
       if (path === "/api/v1/clusters/{clusterId}/topics/{topicName}") {
@@ -241,7 +242,8 @@ function routeAt(
      `mayResend()` here, and a harness that can only mount permitted cannot observe either. */
   permits: KuiContextValue["permits"] = () => true,
   messageBrowser?: KuiContextValue["messageBrowser"],
-): { readonly container: HTMLElement; readonly dispose: () => void; readonly url: () => string } {
+  writeBlocked?: KuiContextValue["writeBlocked"],
+): { readonly container: HTMLElement; readonly dispose: () => void; readonly url: () => string; readonly switchCluster: (cluster: string) => void } {
   /* Mounted at `/ui`, as the product is, and this is not decoration. `navigate` resolves a `to`
    * that begins with `/` against the base, and `useLocation().pathname` already carries the base —
    * so a writer that hands the pathname back produces `/ui/ui/clusters/…`. With no base a test
@@ -263,6 +265,7 @@ function routeAt(
     paths: PATHS,
     report: () => undefined,
     ...(messageBrowser === undefined ? {} : { messageBrowser }),
+    ...(writeBlocked === undefined ? {} : { writeBlocked }),
   };
 
   const mounted = mount(() => (
@@ -270,8 +273,24 @@ function routeAt(
       <Router />
     </KuiProvider>
   ));
-  return { ...mounted, url: () => history.get() };
+  return { ...mounted, url: () => history.get(), switchCluster: (cluster) => history.set({ value: `${BASE}/clusters/${cluster}/topics/${topic}/messages` }) };
 }
+
+test("a same-topic cluster switch disposes the old stream and uses the configured API URL", async () => {
+  const fake = fakeApi({ topicAnswer: topicWith(1) });
+  const api = { ...fake.api, url: (path: string) => `https://gateway.example/custom${path}` };
+  const urls: string[] = [];
+  await withFetch((url) => urls.push(url), async () => {
+    const ui = routeAt("", api, "cluster-switch");
+    await settle(); press(ui.container, "Read"); await settle();
+    ui.switchCluster("other"); await settle();
+    press(ui.container, "Read"); await settle();
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toContain("https://gateway.example/custom/api/v1/clusters/quickstart/");
+    expect(urls[1]).toContain("https://gateway.example/custom/api/v1/clusters/other/");
+    ui.dispose();
+  });
+});
 
 /**
  * The route builds its own transport, so the fake has to be installed where it builds it.
@@ -1066,6 +1085,30 @@ describe("saving what is on the filter bar", () => {
  * single flag can produce.
  */
 describe("the write controls the route offers", () => {
+  test("copy reads the source and checks produce only on the selected destination", async () => {
+    const { api, calls } = fakeApi({ topicAnswer: topicWith(1) });
+    const ui = routeAt("", api, "source-only", (action, name) =>
+      action === Actions.TopicMessagesProduce ? name === "allowed-destination" : true);
+    await settle();
+    expect(control(ui.container, "Copy records out").getAttribute("aria-disabled")).toBeNull();
+    press(ui.container, "Copy records out"); await settle();
+    await fillCopy(overlay(), "denied-destination");
+    pressIn(overlay(), /^Copy records$/); await settle();
+    expect(calls.filter((call) => call.path.endsWith("/resend"))).toHaveLength(0);
+    await fillCopy(overlay(), "allowed-destination");
+    pressIn(overlay(), /^Copy records$/); await settle();
+    expect(calls.filter((call) => call.path.endsWith("/resend"))).toHaveLength(1);
+    ui.dispose();
+  });
+
+  test("shared write policy blocks produce even when legacy permissions allow it", async () => {
+    const { api } = fakeApi({ topicAnswer: topicWith(1) });
+    const ui = routeAt("", api, "policy-test", () => true, undefined, () => "This cluster is read-only.");
+    await settle();
+    expect(control(ui.container, "Produce message").getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonUnder(control(ui.container, "Produce message"))).toContain("read-only");
+    ui.dispose();
+  });
   /**
    * Yes to everything except these, compared field by field rather than by object identity.
    *
@@ -1147,7 +1190,7 @@ describe("the write controls the route offers", () => {
     dispose();
   });
 
-  test("refuses both write controls to a principal who may not produce", async () => {
+  test("refuses produce but permits choosing a copy destination for a source reader", async () => {
     const { api } = fakeApi({ topicAnswer: topicWith(12, "orders.unwritable") });
     const { container, dispose } = routeAt(
       "",
@@ -1165,8 +1208,8 @@ describe("the write controls the route offers", () => {
       "You do not have permission to publish into this topic.",
     );
 
-    // And the copy, which writes into another topic, is refused for the same missing permission.
-    expect(control(container, "Copy records out").getAttribute("aria-disabled")).toBe("true");
+    // Destination permission is not knowable until the operator selects it.
+    expect(control(container, "Copy records out").getAttribute("aria-disabled")).toBeNull();
 
     dispose();
   });

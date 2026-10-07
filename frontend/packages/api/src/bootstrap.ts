@@ -86,9 +86,9 @@ export function readBootstrap(source: Document = document): Bootstrap {
  * that is honoured rather than overridden.
  */
 export function apiBaseUrl(bootstrap: Bootstrap, origin: string): string {
-  if (bootstrap.apiBase.startsWith("http://") || bootstrap.apiBase.startsWith("https://")) {
-    return bootstrap.apiBase.replace(/\/+$/, "");
-  }
-  const prefix = bootstrap.basePath.replace(/\/+$/, "");
-  return `${origin.replace(/\/+$/, "")}${prefix}`;
+  const base = new URL(bootstrap.apiBase, `${origin.replace(/\/+$/, "")}/`);
+  base.pathname = base.pathname.replace(/\/+$/, "").replace(/\/api\/v1$/, "");
+  base.search = "";
+  base.hash = "";
+  return base.toString().replace(/\/+$/, "");
 }

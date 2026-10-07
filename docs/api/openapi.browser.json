@@ -6559,7 +6559,8 @@
         "title" : "PermissionDto",
         "type" : "object",
         "required" : [
-          "resource"
+          "resource",
+          "defaultRole"
         ],
         "properties" : {
           "clusters" : {
@@ -6579,6 +6580,9 @@
             "items" : {
               "type" : "string"
             }
+          },
+          "defaultRole" : {
+            "type" : "boolean"
           }
         }
       },
@@ -7126,6 +7130,54 @@
           }
         }
       },
+      "ResendFailureDto" : {
+        "title" : "ResendFailureDto",
+        "type" : "object",
+        "required" : [
+          "partition",
+          "offset",
+          "code",
+          "error"
+        ],
+        "properties" : {
+          "partition" : {
+            "description" : "a partition number, from 0",
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "offset" : {
+            "description" : "a record's position in a partition, from 0",
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "code" : {
+            "type" : "string"
+          },
+          "error" : {
+            "type" : "string"
+          }
+        }
+      },
+      "ResendRangeFailureDto" : {
+        "title" : "ResendRangeFailureDto",
+        "type" : "object",
+        "required" : [
+          "range",
+          "code",
+          "error"
+        ],
+        "properties" : {
+          "range" : {
+            "$ref" : "#/components/schemas/OffsetRangeDto"
+          },
+          "code" : {
+            "type" : "string"
+          },
+          "error" : {
+            "type" : "string"
+          }
+        }
+      },
       "ResendRequestDto" : {
         "title" : "ResendRequestDto",
         "description" : "Copy offset ranges into another topic, byte for byte",
@@ -7148,7 +7200,7 @@
       },
       "ResendResultDto" : {
         "title" : "ResendResultDto",
-        "description" : "A resend's tally; read and written differ when retention removed part of the source",
+        "description" : "A resend's tally, failed source records and ranges; retry only the reported failures",
         "type" : "object",
         "required" : [
           "toTopic",
@@ -7167,6 +7219,18 @@
           "written" : {
             "type" : "integer",
             "format" : "int64"
+          },
+          "failures" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/ResendFailureDto"
+            }
+          },
+          "rangeFailures" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/ResendRangeFailureDto"
+            }
           }
         }
       },
@@ -7613,7 +7677,7 @@
       },
       "StatementResultDto" : {
         "title" : "StatementResultDto",
-        "description" : "What a finished statement produced. `outcome` is 'rows' for a pull query — an empty rows list then means the query matched nothing — or 'status' for a DDL or DML statement, whose `message` is the server's own sentence",
+        "description" : "The statement result. `outcome` is 'rows' for a completed pull query, 'status' for a completed statement, or 'pending' for a command accepted but not yet completed. `message` is the server's own sentence and `entity` carries the command ID when supplied. Do not retry a pending command.",
         "type" : "object",
         "required" : [
           "statement",

@@ -1,6 +1,7 @@
 package kui.schema.application
 
-import cats.effect.kernel.Temporal
+import cats.effect.kernel.{Outcome, Temporal}
+import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import org.typelevel.log4cats.StructuredLogger
 
@@ -8,6 +9,7 @@ import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
 import kui.kernel.{ClusterId, Subject}
 import kui.schema.domain.*
 import kui.security.Principal
+import kui.security.audit.{AuditSink, MutationKind, MutationOutcome, MutationRecord}
 
 /** Registering a schema under a subject: the only thing KUI does that adds to a registry's contents.
   *
@@ -41,15 +43,8 @@ import kui.security.Principal
   * deliberately not re-decided here: two spellings of one rule is how the two enforcement points come to
   * disagree.
   *
-  * ==What this does not do, and it is a real gap==
-  *
-  * It writes no audit record. ADR-047 §3 requires one for every mutation, and the record's `kind` is a
-  * `kui.security.audit.MutationKind`, a sealed enum in `libs/security-core` with no case for registration.
-  * Inventing a second vocabulary here — a string, a nearest-fitting neighbour — is exactly the drift
-  * `SchemaEndpointClassificationSuite` exists to catch, so the gap is left open, logged at INFO with the same
-  * four facts a record would carry, and named in that suite by an assertion that fails the day the enum grows
-  * the case. Adding `case RegisterSchema extends MutationKind("schema.subject.version.register")` is the
-  * whole of the fix, and this use case then takes an `AuditSink` the way [[SetCompatibilityUseCase]] does.
+  * Every attempt crosses a structured audit finalizer, including cancellation and raised errors. Only schema
+  * IDs and version numbers enter that record; the schema definition is never audit data.
   */
 trait RegisterSchemaUseCase[F[_]] {
 
@@ -73,11 +68,75 @@ object RegisterSchemaUseCase {
 
   def make[F[_]: Temporal](
       registries: ClusterRegistries[F],
+      audit: AuditSink[F],
       logger: StructuredLogger[F]
   ): RegisterSchemaUseCase[F] =
     new RegisterSchemaUseCase[F] {
 
       def register(
+          principal: Principal,
+          cluster: ClusterId,
+          subject: Subject,
+          proposed: ProposedSchema
+      ): F[Either[KuiError, RegisteredVersion]] =
+        run(principal, cluster, subject, proposed).guaranteeCase {
+          case Outcome.Succeeded(result) =>
+            result.flatMap {
+              case Right(registered) =>
+                val after =
+                  s"schemaId=${registered.id.value};version=${registered.version.fold("unknown")(_.value.toString)}"
+                record(principal, cluster, subject, MutationOutcome.Succeeded, Some(after), None)
+              case Left(error) =>
+                val outcome =
+                  if error.code.httpStatus < 500 then MutationOutcome.Refused else MutationOutcome.Failed
+                record(principal, cluster, subject, outcome, None, Some(error.code.wire))
+            }
+          case Outcome.Errored(_) =>
+            record(principal, cluster, subject, MutationOutcome.Failed, None, Some(ErrorCode.Internal.wire))
+          case Outcome.Canceled() =>
+            record(
+              principal,
+              cluster,
+              subject,
+              MutationOutcome.Unknown,
+              None,
+              Some("the registration was cancelled; the registry may have applied it")
+            )
+        }
+
+      private def record(
+          principal: Principal,
+          cluster: ClusterId,
+          subject: Subject,
+          outcome: MutationOutcome,
+          after: Option[String],
+          reason: Option[String]
+      ): F[Unit] =
+        Temporal[F].realTimeInstant
+          .flatMap { at =>
+            audit.record(
+              MutationRecord(
+                at,
+                principal,
+                cluster,
+                MutationKind.RegisterSchema,
+                subject.value,
+                None,
+                after,
+                outcome,
+                reason.map("reason" -> _).toMap
+              )
+            )
+          }
+          .handleErrorWith(_ =>
+            logger
+              .error(context(cluster, subject, principal))(
+                "the registration audit record could not be written"
+              )
+              .handleError(_ => ())
+          )
+
+      private def run(
           principal: Principal,
           cluster: ClusterId,
           subject: Subject,
@@ -114,7 +173,7 @@ object RegisterSchemaUseCase {
             }
         }
 
-      /** The registry call, and the log line that stands in for the audit record this build cannot write.
+      /** The registry call and its operational log line, in addition to the structured audit finalizer.
         *
         * Both outcomes are logged, for the reason ADR-047 gives about records: what somebody *tried* to
         * register on a production cluster is often the more interesting half.

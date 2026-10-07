@@ -4,7 +4,7 @@ import java.time.Instant
 
 import scala.concurrent.duration.DurationInt
 
-import cats.effect.{IO, Ref}
+import cats.effect.{Deferred, IO, Ref}
 import fs2.Stream
 import io.circe.Json
 
@@ -72,6 +72,40 @@ final class DurableAlertStoreSuite extends KuiIOSuite {
     } yield ()
   }
 
+  test("an evaluation losing its write race retries without clearing the acknowledgement") {
+    for {
+      metadata <- TestConfigStore.create
+      logger <- FakeStructuredLogger[IO]
+      entered <- Deferred[IO, Unit]
+      resume <- Deferred[IO, Unit]
+      armed <- Ref.of[IO, Boolean](false)
+      delayed = new ConfigStore[IO] {
+        def get(key: StoreKey) = metadata.get(key)
+        def list(section: StoreSection) = metadata.list(section)
+        def health = metadata.health
+        def changes = metadata.changes
+        def delete(key: StoreKey, version: Long, by: String) = metadata.delete(key, version, by)
+        def put(key: StoreKey, payload: Json, baseVersion: Option[Long], updatedBy: String) =
+          armed.getAndSet(false).flatMap { pause =>
+            (if pause then entered.complete(()).void *> resume.get else IO.unit) *>
+              metadata.put(key, payload, baseVersion, updatedBy)
+          }
+      }
+      store = DurableAlertStore[IO](delayed, 7.days, logger)
+      acknowledger = DurableAlertStore[IO](metadata, 7.days, logger)
+      _ <- store.record(cluster, opening(event), at)
+      _ <- armed.set(true)
+      writer <- store
+        .record(cluster, Evaluation(Nil, Nil, List(event.id), AlertRuleState.empty, Nil), at.plusSeconds(60))
+        .start
+      _ <- entered.get
+      acknowledged <- acknowledger.acknowledge(cluster, event.id, at.plusSeconds(30), "ada")
+      _ <- resume.complete(())
+      _ <- writer.joinWithNever
+      feed <- store.feed(cluster, reader, 10, None)
+    } yield assertEquals(feed.events, acknowledged.toOption.toList)
+  }
+
   test("a cleared condition can open a new unread event later") {
     val clearedAt = at.plusSeconds(60)
     val reopened = AlertEvent.open(event.key, event.severity, at.plusSeconds(120), event.title, event.detail)
@@ -98,10 +132,10 @@ final class DurableAlertStoreSuite extends KuiIOSuite {
   test("a concurrent opening for an already-open condition becomes a refresh") {
     val racing = AlertEvent.open(
       event.key,
-      event.severity,
+      AlertSeverity.Critical,
       at.plusSeconds(1),
-      event.title,
-      event.detail
+      "Disk usage is critical",
+      "95% used"
     )
 
     for {
@@ -113,6 +147,9 @@ final class DurableAlertStoreSuite extends KuiIOSuite {
       feed <- store.feed(cluster, reader, 100, None)
       _ = assertEquals(feed.events.map(_.id), List(event.id))
       _ = assertEquals(feed.events.headOption.map(_.lastSeenAt), Some(racing.openedAt))
+      _ = assertEquals(feed.events.headOption.map(_.severity), Some(AlertSeverity.Critical))
+      _ = assertEquals(feed.events.headOption.map(_.title), Some(racing.title))
+      _ = assertEquals(feed.events.headOption.map(_.detail), Some(racing.detail))
       _ = assertEquals(feed.openCount, 1)
     } yield ()
   }
@@ -128,12 +165,12 @@ final class DurableAlertStoreSuite extends KuiIOSuite {
       _ <- store.record(cluster, opening(event), at)
       _ <- store.record(
         cluster,
-        Evaluation(Nil, List(event.id), Nil, AlertRuleState.empty, Nil),
+        Evaluation(Nil, List(event), Nil, AlertRuleState.empty, Nil),
         newer
       )
       _ <- store.record(
         cluster,
-        Evaluation(Nil, List(event.id), Nil, AlertRuleState.empty, Nil),
+        Evaluation(Nil, List(event), Nil, AlertRuleState.empty, Nil),
         stale
       )
       feed <- store.feed(cluster, reader, 100, None)

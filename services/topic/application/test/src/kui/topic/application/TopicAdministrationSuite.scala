@@ -55,6 +55,10 @@ final class TopicAdministrationSuite extends munit.CatsEffectSuite {
     def delete(id: ClusterId, topic: TopicName): IO[Either[TopicError, Unit]] =
       record(s"delete:${topic.value}")
 
+    def deleteById(id: ClusterId, topic: TopicName, topicId: String): IO[Either[TopicError, Unit]] =
+      if topicId == "AAAAAAAAAAAAAAAAAAAAAQ" then record(s"delete:${topic.value}")
+      else IO.pure(Left(TopicError.Rejected("unexpected topic identity")))
+
     def autoCreateEnabled(id: ClusterId): IO[Option[Boolean]] = IO.pure(autoCreate)
   }
 
@@ -91,6 +95,7 @@ final class TopicAdministrationSuite extends munit.CatsEffectSuite {
     TopicDetail.of(
       orders,
       isInternal = false,
+      topicId = Some("AAAAAAAAAAAAAAAAAAAAAQ"),
       partitions = (0 until count).toList.map(index =>
         PartitionView
           .from(
@@ -297,6 +302,108 @@ final class TopicAdministrationSuite extends munit.CatsEffectSuite {
       assertEquals(answer.map(_.target), Right(12))
       assertEquals(calls, List("increasePartitions:orders.v1:12"))
       assertEquals(records.map(_.kind), List(MutationKind.IncreasePartitions))
+    }
+  }
+
+  List(
+    "new records" -> List(topicOf(3, 8L)),
+    "new partitions" -> List(topicOf(4, 7L)),
+    "missing topic" -> Nil
+  ).foreach { (reason, changed) =>
+    test(s"deletion rechecks signed state: $reason") {
+      for {
+        original <- fixture(topics = List(topicOf(3, 7L)))
+        planned <- original.admin.planDelete(cluster, orders)
+        current <- fixture(topics = changed)
+        answer <- current.admin.applyDelete(Caller, cluster, orders, planned.getOrElse(fail("plan")).token)
+        calls <- current.writer.calls.get
+      } yield {
+        assert(answer.isLeft)
+        assertEquals(calls, Nil)
+      }
+    }
+  }
+
+  test("deletion rechecks auto-create state") {
+    for {
+      original <- fixture(autoCreate = Some(false))
+      planned <- original.admin.planDelete(cluster, orders)
+      current <- fixture(autoCreate = Some(true))
+      answer <- current.admin.applyDelete(Caller, cluster, orders, planned.getOrElse(fail("plan")).token)
+      calls <- current.writer.calls.get
+    } yield {
+      assert(answer.isLeft)
+      assertEquals(calls, Nil)
+    }
+  }
+
+  test("deletion refuses a recreated topic with identical name and offsets") {
+    for {
+      original <- fixture()
+      planned <- original.admin.planDelete(cluster, orders)
+      current <- fixture(topics = List(topicOf(3, 5L).copy(topicId = Some("AAAAAAAAAAAAAAAAAAAAAg"))))
+      answer <- current.admin.applyDelete(Caller, cluster, orders, planned.getOrElse(fail("plan")).token)
+      calls <- current.writer.calls.get
+    } yield {
+      assert(answer.isLeft)
+      assertEquals(calls, Nil)
+    }
+  }
+
+  test("deletion refuses unknown identity or offset bounds") {
+    for {
+      unknownId <- fixture(topics = List(topicOf(3, 5L).copy(topicId = None)))
+      noIdentity <- unknownId.admin.planDelete(cluster, orders)
+      detail = topicOf(3, 5L)
+      degraded = detail.copy(partitions =
+        detail.partitions.map(p =>
+          PartitionView
+            .from(
+              p.partition,
+              p.leader,
+              List(kui.kernel.BrokerId.unsafe(1)),
+              List(kui.kernel.BrokerId.unsafe(1)),
+              None,
+              None,
+              None
+            )
+            .getOrElse(fail("partition"))
+        )
+      )
+      unknownOffsets <- fixture(topics = List(degraded))
+      noOffsets <- unknownOffsets.admin.planDelete(cluster, orders)
+    } yield {
+      assert(noIdentity.isLeft)
+      assert(noOffsets.isLeft)
+    }
+  }
+
+  test("deletion rejects retention movement even if record counts are unchanged") {
+    val detail = topicOf(3, 5L)
+    val moved = detail.copy(partitions =
+      detail.partitions.map(p =>
+        PartitionView
+          .from(
+            p.partition,
+            p.leader,
+            List(kui.kernel.BrokerId.unsafe(1)),
+            List(kui.kernel.BrokerId.unsafe(1)),
+            Some(5L),
+            Some(10L),
+            None
+          )
+          .getOrElse(fail("partition"))
+      )
+    )
+    for {
+      original <- fixture()
+      planned <- original.admin.planDelete(cluster, orders)
+      current <- fixture(topics = List(moved))
+      answer <- current.admin.applyDelete(Caller, cluster, orders, planned.getOrElse(fail("plan")).token)
+      calls <- current.writer.calls.get
+    } yield {
+      assert(answer.isLeft)
+      assertEquals(calls, Nil)
     }
   }
 

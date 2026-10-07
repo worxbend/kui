@@ -10,8 +10,9 @@ import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 import cats.data.NonEmptyList
 import cats.effect.kernel.Resource
-import cats.effect.{IO, Ref}
+import cats.effect.{Deferred, IO, Ref}
 import com.sun.net.httpserver.{HttpExchange, HttpServer}
+import fs2.Stream
 import io.circe.Json
 import io.circe.parser.parse
 import org.typelevel.otel4s.metrics.MeterProvider
@@ -201,6 +202,47 @@ final class MetricsWiringSuite extends KuiIOSuite {
       clusters: List[ClusterConfig] = List(cluster(quickstart), cluster(unmeasured))
   ): Resource[IO, MetricsServer[IO]] =
     MetricsWiring.makeWith[IO](clusters, metrics, policy, Telemetry.noop[IO], codec, logger)
+
+  test("the wired capability source follows runtime add, profile change and removal events") {
+    for {
+      added <- Deferred[IO, Unit]
+      change <- Deferred[IO, Unit]
+      changed <- Deferred[IO, Unit]
+      remove <- Deferred[IO, Unit]
+      removed <- Deferred[IO, Unit]
+      logger <- FakeStructuredLogger[IO]
+      initial = cluster(quickstart)
+      changes = Stream.emit(List(initial)) ++ Stream.exec(added.complete(()).void *> change.get) ++
+        Stream.emit(List(initial.copy(name = "renamed"))) ++
+        Stream.exec(changed.complete(()).void *> remove.get) ++ Stream.emit(Nil) ++
+        Stream.exec(removed.complete(()).void) ++ Stream.never[IO]
+      _ <- MetricsWiring
+        .makeWith[IO](
+          Nil,
+          MetricsConfig.Default,
+          UrlPolicy.Dev,
+          Telemetry.noop[IO],
+          codec,
+          logger,
+          Some(changes)
+        )
+        .use { service =>
+          for {
+            _ <- added.get
+            first <- service.capabilities
+            _ = assertEquals(first.clusters.keySet, Set(quickstart))
+            _ <- change.complete(())
+            _ <- changed.get
+            next <- service.capabilities
+            _ = assertEquals(next.clusters(quickstart).name, Some("renamed"))
+            _ <- remove.complete(())
+            _ <- removed.get
+            last <- service.capabilities
+            _ = assertEquals(last.clusters.size, 0)
+          } yield ()
+        }
+    } yield ()
+  }
 
   // -----------------------------------------------------------------------------------------------
   // Asking the wiring's own routes, which is what a browser reaches

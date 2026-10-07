@@ -5,6 +5,7 @@ import sttp.capabilities.fs2.Fs2Streams
 import sttp.tapir.{stringToPath, AnyEndpoint, Endpoint}
 
 import kui.cluster.contract.{ClusterEndpoints, ProfileEndpoints}
+import kui.contracts.rbac.EndpointAuthorization
 import kui.contracts.{ErrorEnvelope, KuiEndpoint}
 import kui.http.sse.Sse
 import kui.security.SignedPrincipal
@@ -23,7 +24,7 @@ import kui.security.SignedPrincipal
 object ClusterStreamEndpoint {
 
   /** The SSE event name a consumer registers a listener for. */
-  val EventName: String = "clusters"
+  val EventName: String = ProfileEndpoints.EventName
 
   val StreamPath: String =
     s"/internal/v1/${ClusterEndpoints.ClustersSegment}/${ProfileEndpoints.StreamSegment}"
@@ -33,6 +34,8 @@ object ClusterStreamEndpoint {
       .in("internal" / "v1" / ClusterEndpoints.ClustersSegment / ProfileEndpoints.StreamSegment)
       .out(Sse.body[F])
       .name("cluster.stream")
+      // Like the cluster list, the subscription filters each item by the caller's scope in ProfileRoutes.
+      .attribute(EndpointAuthorization.Key, EndpointAuthorization.clusterScoped("cluster.stream"))
       .summary("One event whenever a cluster's profile changes or a cluster is removed")
       .description(
         "Named events: 'clusters' carries {id, version, change, at}; 'heartbeat' keeps proxies from " +

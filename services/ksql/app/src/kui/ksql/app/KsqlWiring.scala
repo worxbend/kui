@@ -9,17 +9,16 @@ import cats.effect.kernel.{Async, Resource}
 import cats.syntax.all.*
 import org.typelevel.log4cats.StructuredLogger
 import sttp.capabilities.fs2.Fs2Streams
-import sttp.client4.httpclient.fs2.HttpClientFs2Backend
 import sttp.client4.{Backend, StreamBackend}
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.interceptor.Interceptor
 
-import kui.config.{ClusterConfig, KsqlSettings, SafeUrl, UpstreamAuthConfig, UrlPolicy}
+import kui.config.{ClusterConfig, HttpTlsConfig, KsqlSettings, SafeUrl, UpstreamAuthConfig, UrlPolicy}
 import kui.contracts.capability.ServiceCapabilities
 import kui.http.health.ReadinessCheck
 import kui.http.principal.{PrincipalVerification, RbacGuard}
 import kui.http.sse.SseConfig
-import kui.http.upstream.{UpstreamClient, UpstreamConfig}
+import kui.http.upstream.{HttpTls, UpstreamClient, UpstreamConfig}
 import kui.kernel.{ClusterId, PositiveInt, Secret}
 import kui.ksql.api.{KsqlApi, KsqlCapabilities}
 import kui.ksql.application.*
@@ -112,7 +111,7 @@ object KsqlWiring {
       interceptors <- Resource.eval(KsqlApi.interceptors[F](telemetry, rejections, logger))
 
       // One connection pool for the process, and none at all when no cluster configures ksqlDB.
-      transport <- httpBackend[F](clusters)
+      transport <- httpBackend[F](clusters, policy)
       clients <- clientsFor[F](clusters, transport, policy, telemetry, logger)
       _ <- Resource.eval(startupLog[F](clusters, logger))
 
@@ -165,10 +164,13 @@ object KsqlWiring {
     * capability and the widening `ConnectWiring` does would throw it away.
     */
   private def httpBackend[F[_]: Async](
-      clusters: List[ClusterConfig]
+      clusters: List[ClusterConfig],
+      policy: UrlPolicy
   ): Resource[F, Option[StreamBackend[F, Fs2Streams[F]]]] =
     if clusters.exists(_.ksql.isDefined) then
-      HttpClientFs2Backend.resource[F]().map(backend => Some(backend: StreamBackend[F, Fs2Streams[F]]))
+      HttpTls
+        .resource[F](HttpTlsConfig.Default, policy)
+        .map(backend => Some(backend: StreamBackend[F, Fs2Streams[F]]))
     else Resource.pure[F, Option[StreamBackend[F, Fs2Streams[F]]]](None)
 
   /** One client per configured ksqlDB, each with its own breaker, bulkhead and failover list. */

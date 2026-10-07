@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import java.security.{KeyStore, SecureRandom}
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.{ExecutorService, Executors, TimeUnit}
 import javax.net.ssl.{KeyManagerFactory, SSLContext, TrustManagerFactory}
 
@@ -62,7 +63,12 @@ object HttpsUpstreamFixture {
       else HttpStoreMaterial.Location(path.toString)
   }
 
-  final case class Running(materials: Materials, url: String, wrongHostnameUrl: String)
+  final case class Running(
+      materials: Materials,
+      url: String,
+      wrongHostnameUrl: String,
+      serverName: AtomicReference[String]
+  )
 
   def resource: Resource[IO, Materials] =
     Resource
@@ -93,13 +99,15 @@ object HttpsUpstreamFixture {
     */
   def server(requireClientCertificate: Boolean): Resource[IO, Running] =
     resource.flatMap { materials =>
+      val serverName = new AtomicReference[String]("")
       for {
-        correct <- listener(materials, "127.0.0.1", requireClientCertificate)
-        wrong <- listener(materials, "127.0.0.2", requireClientCertificate)
+        correct <- listener(materials, "127.0.0.1", requireClientCertificate, serverName)
+        wrong <- listener(materials, "127.0.0.2", requireClientCertificate, serverName)
       } yield Running(
         materials,
         url(correct, "127.0.0.1"),
-        url(wrong, "127.0.0.2")
+        url(wrong, "127.0.0.2"),
+        serverName
       )
     }
 
@@ -129,21 +137,25 @@ object HttpsUpstreamFixture {
   private def listener(
       materials: Materials,
       address: String,
-      requireClientCertificate: Boolean
+      requireClientCertificate: Boolean,
+      serverName: AtomicReference[String]
   ): Resource[IO, HttpsServer] =
     for {
       executor <- Resource.make(IO.blocking(testExecutor))(shutdown)
       server <- Resource.make(
         IO.blocking(HttpsServer.create(InetSocketAddress(InetAddress.getByName(address), 0), 0))
       )(server => IO.blocking(server.stop(0)))
-      _ <- Resource.eval(IO.blocking(start(server, executor, materials, requireClientCertificate)))
+      _ <- Resource.eval(
+        IO.blocking(start(server, executor, materials, requireClientCertificate, serverName))
+      )
     } yield server
 
   private def start(
       server: HttpsServer,
       executor: ExecutorService,
       materials: Materials,
-      requireClientCertificate: Boolean
+      requireClientCertificate: Boolean,
+      serverName: AtomicReference[String]
   ): Unit = {
     val context = serverContext(materials, requireClientCertificate)
     server.setExecutor(executor)
@@ -151,6 +163,12 @@ object HttpsUpstreamFixture {
       override def configure(parameters: HttpsParameters): Unit = {
         val ssl = context.getDefaultSSLParameters
         ssl.setNeedClientAuth(requireClientCertificate)
+        ssl.setSNIMatchers(java.util.List.of(new javax.net.ssl.SNIMatcher(0) {
+          override def matches(name: javax.net.ssl.SNIServerName): Boolean = {
+            serverName.set(new javax.net.ssl.SNIHostName(name.getEncoded).getAsciiName)
+            true
+          }
+        }))
         parameters.setSSLParameters(ssl)
       }
     })

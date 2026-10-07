@@ -245,8 +245,11 @@ final class RegistryHttp[F[_]: Async](
   private def get(uri: Uri): F[Either[KuiError, Option[String]]] =
     send(basicRequest.get(uri))
 
-  private def put(uri: Uri, body: Json): F[Either[KuiError, Option[String]]] =
-    send(basicRequest.put(uri).body(body.noSpaces).contentType(VendorMediaType))
+  private def put(uri: Uri, body: Json): F[Either[KuiError, String]] =
+    send(basicRequest.put(uri).body(body.noSpaces).contentType(VendorMediaType)).map(_.flatMap {
+      case Some(answer) => Right(answer)
+      case None => Left(InfrastructureError.Upstream(UpstreamName, StatusCode.NotFound.code))
+    })
 
   /** @param rejectedField
     *   which request field a refusal belongs beside, when the registry refuses this call. It is a parameter

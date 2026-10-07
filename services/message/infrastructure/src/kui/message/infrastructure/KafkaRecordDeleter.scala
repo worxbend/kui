@@ -5,13 +5,13 @@ import scala.jdk.CollectionConverters.*
 import cats.effect.kernel.Async
 import cats.syntax.all.*
 import org.apache.kafka.clients.admin.{DescribeConfigsOptions, OffsetSpec, RecordsToDelete}
-import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.config.ConfigResource
+import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.typelevel.log4cats.StructuredLogger
 
 import kui.kafka.{AdminClientPool, KafkaErrorMapper, KafkaFutures}
 import kui.kernel.cluster.ClusterConnection
-import kui.kernel.error.KuiError
+import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
 import kui.kernel.{ClusterId, Offset, PartitionId, TopicName}
 import kui.message.domain.ports.RecordDeleter
 import kui.message.domain.{PlannedPurge, PurgeResult}
@@ -41,6 +41,39 @@ final class KafkaRecordDeleter[F[_]: Async](
 
   import KafkaRecordDeleter.*
 
+  def topicId(cluster: ClusterId, topic: TopicName): F[Either[KuiError, String]] =
+    connections(cluster) match {
+      case None => clusterNotFound(cluster).asLeft[String].pure[F]
+      case Some(connection) =>
+        pool
+          .run(connection, "describeTopics.purgeIdentity") { admin =>
+            KafkaFutures
+              .fromFuture(
+                Async[F].delay(
+                  admin
+                    .describeTopics(
+                      org.apache.kafka.common.TopicCollection.ofTopicNames(List(topic.value).asJava)
+                    )
+                    .topicNameValues
+                    .get(topic.value)
+                )
+              )
+              .map { described =>
+                Option(described.topicId)
+                  .filterNot(_ == Uuid.ZERO_UUID)
+                  .map(_.toString)
+                  .toRight(
+                    ApplicationError.Refused(
+                      ErrorCode.InvalidState,
+                      "the broker did not provide a topic UUID; a purge cannot be approved safely"
+                    ): KuiError
+                  )
+              }
+          }
+          .attempt
+          .map(_.leftMap(failure => KafkaErrorMapper.map("describeTopics", failure, ApiTimeoutMs)).flatten)
+    }
+
   def watermarks(cluster: ClusterId, topic: TopicName): F[Either[KuiError, List[PlannedPurge]]] =
     connections(cluster) match {
       case None => clusterNotFound(cluster).asLeft[List[PlannedPurge]].pure[F]
@@ -64,20 +97,33 @@ final class KafkaRecordDeleter[F[_]: Async](
               leaders = described.partitions.asScala.toList
                 .filter(info => Option(info.leader).exists(_.id >= 0))
                 .map(info => new TopicPartition(topic.value, info.partition))
-              earliest <- bound(admin, leaders, OffsetSpec.earliest())
-              latest <- bound(admin, leaders, OffsetSpec.latest())
-            } yield leaders.flatMap { partition =>
-              for {
-                low <- earliest.get(partition)
-                high <- latest.get(partition)
-                id <- PartitionId.from(partition.partition).toOption
-                from <- Offset.from(low).toOption
-                to <- Offset.from(high).toOption
-              } yield PlannedPurge(id, from, to)
+              complete = leaders.size == described.partitions.size
+              earliest <-
+                if complete then bound(admin, leaders, OffsetSpec.earliest())
+                else Map.empty[TopicPartition, Long].pure[F]
+              latest <-
+                if complete then bound(admin, leaders, OffsetSpec.latest())
+                else Map.empty[TopicPartition, Long].pure[F]
+            } yield {
+              val incomplete: KuiError = ApplicationError.Refused(
+                ErrorCode.InvalidState,
+                "not every partition has a leader and valid watermarks; no complete purge plan is available"
+              )
+              if !complete then Left(incomplete)
+              else
+                leaders.traverse { partition =>
+                  (for {
+                    low <- earliest.get(partition)
+                    high <- latest.get(partition).filter(_ >= low)
+                    id <- PartitionId.from(partition.partition).toOption
+                    from <- Offset.from(low).toOption
+                    to <- Offset.from(high).toOption
+                  } yield PlannedPurge(id, from, to)).toRight(incomplete)
+                }
             }
           }
           .attempt
-          .map(_.leftMap(failure => KafkaErrorMapper.map("listOffsets", failure, ApiTimeoutMs)))
+          .map(_.leftMap(failure => KafkaErrorMapper.map("listOffsets", failure, ApiTimeoutMs)).flatten)
     }
 
   def cleanupPolicy(cluster: ClusterId, topic: TopicName): F[Option[String]] =

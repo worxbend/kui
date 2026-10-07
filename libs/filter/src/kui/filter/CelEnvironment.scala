@@ -182,32 +182,54 @@ object CelEnvironment {
     * same navigation `CelFilterEngine.compile` already uses to count AST nodes.
     */
   private[filter] def referencedDynamicFields(ast: CelAbstractSyntaxTree): Set[String] = {
-    val fieldSelects = CelNavigableAst
+    val nodes = CelNavigableAst
       .fromAst(ast)
       .getRoot
       .allNodes()
       .iterator()
       .asScala
-      .flatMap { node =>
-        node.getKind match {
-          case CelExpr.ExprKind.Kind.SELECT =>
-            Some(node.expr().select().field())
-          case CelExpr.ExprKind.Kind.CALL =>
-            val call = node.expr().call()
-            if call.function() == "_[_]" || call.function() == "_[?_]" then
-              call.args().asScala.collectFirst {
-                case arg
-                    if arg.getKind == CelExpr.ExprKind.Kind.CONSTANT &&
-                      arg.constant().getKind == dev.cel.common.ast.CelConstant.Kind.STRING_VALUE =>
-                  arg.constant().stringValue()
-              }
-            else None
-          case _ => None
-        }
-      }
-      .toSet
+      .map(_.expr())
+      .toList
 
-    fieldSelects.intersect(AllDynamicFields)
+    // Only a direct select or a constant-key index proves that the whole map is not observed.
+    // Any other use (membership, size, computed keys, aliases in lists/macros) needs all fields.
+    val projected = nodes.flatMap { expr =>
+      expr.getKind match {
+        case CelExpr.ExprKind.Kind.SELECT => Some(expr.select().operand().id())
+        case CelExpr.ExprKind.Kind.CALL =>
+          val call = expr.call()
+          val args = call.args().asScala.toList
+          if (call.function() == "_[_]" || call.function() == "_[?_]") && args.sizeIs == 2 &&
+            args(1).getKind == CelExpr.ExprKind.Kind.CONSTANT &&
+            args(1).constant().getKind == dev.cel.common.ast.CelConstant.Kind.STRING_VALUE
+          then Some(args.head.id())
+          else None
+        case _ => None
+      }
+    }.toSet
+    val observesWholeRecord = nodes.exists(expr =>
+      expr.getKind == CelExpr.ExprKind.Kind.IDENT && expr.ident().name() == RecordVariable &&
+        !projected.contains(expr.id())
+    )
+    val fieldSelects = nodes.flatMap { node =>
+      node.getKind match {
+        case CelExpr.ExprKind.Kind.SELECT =>
+          Some(node.select().field())
+        case CelExpr.ExprKind.Kind.CALL =>
+          val call = node.call()
+          if call.function() == "_[_]" || call.function() == "_[?_]" then
+            call.args().asScala.collectFirst {
+              case arg
+                  if arg.getKind == CelExpr.ExprKind.Kind.CONSTANT &&
+                    arg.constant().getKind == dev.cel.common.ast.CelConstant.Kind.STRING_VALUE =>
+                arg.constant().stringValue()
+            }
+          else None
+        case _ => None
+      }
+    }.toSet
+
+    if observesWholeRecord then AllDynamicFields else fieldSelects.intersect(AllDynamicFields)
   }
 
   /** The default of the `JSON value nodes` limit above, used wherever a caller does not have a

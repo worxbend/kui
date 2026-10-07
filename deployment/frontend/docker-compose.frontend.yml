@@ -37,7 +37,7 @@ services:
     # rather than over a port -- is a confusing way to find that out.
     container_name: kui-quickstart-frontend
     ports:
-      - "${KUI_FRONTEND_PORT:-8090}:8082"
+      - "${KUI_QUICKSTART_BIND_ADDRESS:-127.0.0.1}:${KUI_FRONTEND_PORT:-8090}:8082"
     environment:
       # Where the API is. A service name on this network, not a published port: the browser never
       # talks to the gateway directly, so the gateway does not have to be reachable from the host at

@@ -32,6 +32,7 @@ import { render } from "@solidjs/web";
 import { flush } from "solid-js";
 
 import { Actions, CapabilityStatuses, Resources, SseEventNames } from "@kui/api";
+import * as ApiModule from "@kui/api";
 import { ALERTS_EVENT_NAME } from "@kui/kernel";
 
 import { App } from "./App.jsx";
@@ -282,6 +283,117 @@ afterEach(() => {
 });
 
 describe("the application, mounted", () => {
+  it.each([false, true])("retains anonymous CSRF after repeated protected 401s and signs in (initially anonymous: %s)", async (initiallyAnonymous) => {
+    vi.stubGlobal("EventSource", SilentEventSource);
+    const realCreate = ApiModule.createApiClient;
+    let client!: ReturnType<typeof realCreate>;
+    let csrf!: Parameters<typeof realCreate>[0]["csrf"];
+    vi.spyOn(ApiModule, "createApiClient").mockImplementation((options) => {
+      csrf = options.csrf;
+      client = realCreate(options);
+      return client;
+    });
+    let reads = 0;
+    let signedIn = false;
+    let loginHeader: string | null | undefined;
+    let releaseRefresh!: () => void;
+    const refreshHeld = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    const unauthorized = () => Response.json({ code: "KUI-UNAUTHENTICATED", message: "sign in" }, { status: 401 });
+    vi.stubGlobal("fetch", vi.fn(async (request: Request) => {
+      if (request.url.endsWith("/auth/me")) {
+        reads++;
+        if (reads === 2 && !initiallyAnonymous) await refreshHeld;
+        const anonymous = !signedIn && (initiallyAnonymous || reads > 1);
+        return Response.json({ ...SESSION, authType: "form",
+          csrfToken: anonymous ? "fresh-anonymous" : "signed-in-token",
+          principal: anonymous ? { kind: "anonymous", name: "anonymous" } : { kind: "session", name: "ada" } });
+      }
+      if (request.url.endsWith("/auth/settings")) return Response.json({ authType: "form", rbacEnabled: true });
+      if (request.url.endsWith("/auth/login")) {
+        loginHeader = request.headers.get("X-Csrf-Token");
+        if (loginHeader !== "fresh-anonymous") return Response.json({ code: "KUI-FORBIDDEN", message: "CSRF token missing" }, { status: 403 });
+        signedIn = true;
+        return Response.json({ principal: { kind: "user", name: "ada", roles: [] } } satisfies ApiModule.components["schemas"]["SignedIn"]);
+      }
+      if (request.url.endsWith("/capabilities")) return unauthorized();
+      return Response.json({ code: "KUI-NOT-FOUND", message: "unused" }, { status: 404 });
+    }));
+    let app = mountApp();
+    try {
+      await settle();
+      const first = client.get("/api/v1/capabilities");
+      const concurrent = client.get("/api/v1/capabilities");
+      await Promise.all([first, concurrent]);
+      await settle();
+      expect(reads).toBe(initiallyAnonymous ? 1 : 2);
+      releaseRefresh();
+      await settle();
+      await Promise.all([client.get("/api/v1/capabilities"), client.get("/api/v1/capabilities")]);
+      await settle();
+      expect(csrf.currentToken()).toBe("fresh-anonymous");
+      expect(reads).toBe(initiallyAnonymous ? 1 : 2);
+      const login = app.host.querySelector('[data-testid="login-page"]')!;
+      expect(login).not.toBeNull();
+      for (const [selector, value] of [['input[name="username"]', "ada"], ['input[type="password"]', "test-only-password"]]) {
+        const input = login.querySelector<HTMLInputElement>(selector!)!;
+        input.value = value!;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await flush();
+      login.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await settle();
+      await settle();
+      expect(loginHeader).toBe("fresh-anonymous");
+      expect(signedIn).toBe(true);
+      // Successful sign-in deliberately reloads the whole shell. jsdom cannot navigate documents;
+      // mount a fresh shell against the now-authenticated gateway to exercise that boundary.
+      app.dispose();
+      app = mountApp();
+      await settle();
+      expect(app.host.querySelector('[data-testid="login-page"]')).toBeNull();
+      expect(csrf.currentToken()).toBe("signed-in-token");
+      expect(reads).toBe(initiallyAnonymous ? 2 : 3);
+    } finally { releaseRefresh(); app.dispose(); }
+  });
+
+  it.each([false, true])("refreshes an expired session once (settings pending: %s) and presents sign-in", async (holdSettings) => {
+    vi.stubGlobal("EventSource", SilentEventSource);
+    let reads = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let releaseSettings!: () => void;
+    const settingsHeld = new Promise<void>((resolve) => { releaseSettings = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (request: Request) => {
+      if (request.url.includes("/auth/me")) {
+        reads += 1;
+        if (reads > 1) await held;
+        return Response.json({ ...SESSION, authType: "form", csrfToken: "fresh",
+          principal: reads === 1 ? { kind: "session", name: "ada" } : { kind: "anonymous", name: "anonymous" } });
+      }
+      if (request.url.includes("/auth/settings")) {
+        if (holdSettings) await settingsHeld;
+        return Response.json({ authType: "form", rbacEnabled: true });
+      }
+      return Response.json({ code: "KUI-UNAUTHENTICATED", message: "expired" }, { status: 401 });
+    }));
+    const app = mountApp();
+    try {
+      await settle();
+      announce(healthy("prod-kyiv-01"));
+      await settle();
+      await settle();
+      expect(app.host.querySelector("[data-testid='login-page']")).not.toBeNull();
+      releaseSettings();
+      await settle();
+      expect(reads).toBe(2);
+      release();
+      await settle();
+      await settle();
+      expect(app.host.querySelector("[data-testid='login-page']")).not.toBeNull();
+      expect(reads).toBe(2);
+    } finally { releaseSettings(); release(); app.dispose(); }
+  });
+
   it("draws its frame", () => {
     stubGateway();
     const app = mountApp();
@@ -1113,6 +1225,29 @@ describe("the frame, given a cluster in the address", () => {
    * deferred rather than stubbed: with an immediate stub there is no window for a switch to happen
    * in, and every existing case in this file has run inside that empty window.
    */
+  it("hides the previous cluster's overview immediately while the next cluster loads", async () => {
+    window.history.replaceState({}, "", "/ui/clusters/prod-kyiv-01");
+    stubCluster();
+    const original = globalThis.fetch;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    vi.stubGlobal("fetch", async (request: Request) => {
+      if (request.url.includes("/clusters/staging-eu-01")) await held;
+      return original(request);
+    });
+    const app = mountApp();
+    try {
+      await settled();
+      announce(healthy("prod-kyiv-01", "staging-eu-01"));
+      await settled();
+      const figure = () => app.host.querySelector("[data-testid='stat-brokers']")?.textContent ?? "";
+      expect(figure()).toContain("3");
+      app.host.querySelector<HTMLButtonElement>("[data-testid='env-tile-staging-eu-01']")!.click();
+      await settled();
+      expect(figure()).not.toContain("3");
+    } finally { release(); await settled(); app.dispose(); }
+  });
+
   it("keeps the new cluster's figures when the old one's answer lands later", async () => {
     window.history.replaceState({}, "", "/ui/clusters/prod-kyiv-01");
 

@@ -68,6 +68,13 @@ object UrlPolicy {
   def fromEnv(env: Map[String, String]): UrlPolicy =
     if env.get(AllowPrivateUpstreams).exists(_.trim.equalsIgnoreCase("true")) then Dev else Strict
 
+  /** Check the numeric address the transport will actually dial, without performing DNS. Configuration-time
+    * name validation is not an SSRF boundary: DNS can change after it.
+    */
+  def allowsAddress(address: InetAddress, policy: UrlPolicy): Boolean =
+    if address.isLoopbackAddress || address.isAnyLocalAddress then policy.allowLoopback
+    else !SafeUrl.addressIsNotPubliclyRoutable(address) || policy.allowPrivate
+
   given CanEqual[UrlPolicy, UrlPolicy] = CanEqual.derived
 }
 
@@ -191,13 +198,14 @@ object SafeUrl {
       isCarrierGradeOrPrivate172(host) ||
       literalAddress(host).exists(addressIsNotPubliclyRoutable)
 
-  private def addressIsNotPubliclyRoutable(address: InetAddress): Boolean = {
+  private[config] def addressIsNotPubliclyRoutable(address: InetAddress): Boolean = {
     val bytes = address.getAddress
     val carrierGrade =
       bytes.length == 4 && (bytes(0) & 0xff) == 100 && (bytes(1) & 0xff) >= 64 && (bytes(1) & 0xff) <= 127
     val uniqueLocalIpv6 = bytes.length == 16 && (bytes(0) & 0xfe) == 0xfc
     address.isLoopbackAddress ||
     address.isAnyLocalAddress ||
+    address.isMulticastAddress ||
     address.isLinkLocalAddress ||
     address.isSiteLocalAddress ||
     carrierGrade ||

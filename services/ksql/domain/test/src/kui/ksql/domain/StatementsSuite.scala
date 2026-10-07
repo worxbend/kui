@@ -17,6 +17,28 @@ final class StatementsSuite extends FunSuite {
   private def parsed(raw: String): KsqlStatement =
     KsqlStatement.parse(raw).fold(problem => fail(s"'$raw' did not parse: ${problem.message}"), identity)
 
+  test("quoted identifiers cannot hide destructive clauses or split statements") {
+    List("orders'archive", "orders;archive", "orders--archive", "orders/*archive*/", "orders``archive")
+      .foreach { name =>
+        val statement = parsed(s"DROP STREAM `$name` DELETE/* comment */ TOPIC;")
+        assert(statement.destructive, clue = name)
+        assertEquals(statement.target, Some(name.replace("``", "`")))
+      }
+    assert(!parsed("DROP STREAM `DELETE TOPIC`;").destructive)
+    assert(!parsed("SELECT `EMIT CHANGES` FROM ORDERS;").push)
+    assert(KsqlStatement.parse("DROP STREAM `orders'archive`; DROP STREAM X DELETE TOPIC;").isLeft)
+  }
+
+  test("unterminated quotes and comments and unsupported escapes are refused") {
+    List(
+      "DROP STREAM `orders DELETE TOPIC;",
+      "SELECT 'unfinished",
+      "SHOW STREAMS; /* open",
+      "SELECT 'a\\'b' FROM X;"
+    ).foreach(raw => assert(KsqlStatement.parse(raw).isLeft, clue = raw))
+    assertEquals(parsed("SELECT 'it''s; -- fine' FROM X;").shape, StatementShape.PullQuery)
+  }
+
   test("a SELECT with EMIT CHANGES is a push query and a SELECT without one is not") {
     assertEquals(parsed("SELECT * FROM ORDERS EMIT CHANGES;").shape, StatementShape.PushQuery)
     assertEquals(parsed("select * from orders emit changes;").shape, StatementShape.PushQuery)

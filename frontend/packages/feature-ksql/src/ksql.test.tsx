@@ -39,8 +39,8 @@
  * produced, and W10-06 replaced it with `testing.ts`'s `pushQueryPlan`, which is derived from a
  * golden and says which two fields it changed.
  */
-import { describe, expect, it } from "vitest";
-import { flush } from "solid-js";
+import { describe, expect, it, vi } from "vitest";
+import { createSignal, flush } from "solid-js";
 import {
   KuiProvider,
   createQueryRegistry,
@@ -117,6 +117,8 @@ function open(
     readonly openStream?: PushQueryOpener | undefined;
     /** Runs before a write is answered. See `serving`: `undefined` back means "answer normally". */
     readonly write?: (path: string) => Promise<unknown>;
+    readonly writeBlocked?: import("@kui/kernel").KuiContextValue["writeBlocked"];
+    readonly clusterId?: () => string;
   } = {},
 ): Open {
   const stub = serving(
@@ -129,10 +131,11 @@ function open(
     options.write,
   );
   const queries = createQueryRegistry();
+  const context = { ...testContext(stub.api, options.grants), ...(options.writeBlocked === undefined ? {} : { writeBlocked: options.writeBlocked }) };
   const mounted = mount(() => (
-    <KuiProvider value={testContext(stub.api, options.grants)}>
+    <KuiProvider value={context}>
       <KsqlScreen
-        clusterId={TEST_CLUSTER}
+        clusterId={options.clusterId?.() ?? TEST_CLUSTER}
         queries={queries}
         {...(options.openStream === undefined ? {} : { openStream: options.openStream })}
       />
@@ -242,6 +245,48 @@ function textTransport(body: string): StreamTransport {
 }
 
 describe("the push query's stream client", () => {
+  it("reports EOF without done as an interrupted query and retains received rows", async () => {
+    const ui = open(objectsResponse, {
+      grants: MAY_EXECUTE, plan: pushQueryPlan,
+      openStream: (cluster, sql, subscriber) => openPushQuery(cluster, sql, subscriber,
+        textTransport('event: row\ndata: {"values":["kept"]}\n\n')),
+    });
+    await settle(); type(ui.container, "SELECT * FROM ORDERS EMIT CHANGES;"); await settle();
+    button(ui.container, "Run query")?.click(); await settle();
+    expect(ui.container.querySelector('[data-testid="ksql-result"]')?.getAttribute("data-kind")).toBe("interrupted");
+    expect(ui.container.textContent).toContain("kept");
+    ui.dispose();
+  });
+
+  it("resolves a push stream through the configured API URL exactly once", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL) => new Response('event: done\ndata: {"reason":"exhausted"}\n\n', {
+      headers: { "Content-Type": "text/event-stream" },
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const resolve = vi.fn((path: string) => `https://gateway.example/custom${path}`);
+    try {
+      openPushQuery(TEST_CLUSTER, "SELECT * FROM ORDERS EMIT CHANGES;", {
+        onColumns: () => undefined, onRow: () => undefined, onError: () => undefined,
+      }, undefined, resolve);
+      await settle();
+      expect(resolve).toHaveBeenCalledTimes(1);
+      expect(String(fetch.mock.calls[0]?.[0])).toContain("https://gateway.example/custom/api/v1/clusters/");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("ends the result region only after a done frame", async () => {
+    const ui = open(objectsResponse, {
+      grants: MAY_EXECUTE, plan: pushQueryPlan,
+      openStream: (cluster, sql, subscriber) => openPushQuery(cluster, sql, subscriber,
+        textTransport('event: row\ndata: {"values":["kept"]}\n\nevent: done\ndata: {"reason":"exhausted"}\n\n')),
+    });
+    await settle();
+    type(ui.container, "SELECT * FROM ORDERS EMIT CHANGES;"); await settle();
+    button(ui.container, "Run query")?.click(); await settle();
+    expect(ui.container.querySelector('[data-testid="ksql-result"]')?.getAttribute("data-kind")).toBe("ended");
+    expect(ui.container.textContent).toContain("kept");
+    ui.dispose();
+  });
   it("delivers the columns and the rows the service's own frames carry", async () => {
     /*
      * The two committed frames, written down the wire exactly as ADR-035 frames them. This is the
@@ -252,7 +297,8 @@ describe("the push query's stream client", () => {
       "event: phase\ndata: {\"columns\":[\"ID\",\"TOTAL\",\"NOTE\"]}\n\n" +
       "event: row\ndata: {\"values\":[\"17\",\"42.50\",null]}\n\n" +
       "event: row\ndata: not json\n\n" +
-      "event: row\ndata: {\"values\":[\"18\",\"11.00\",\"gift wrap\"]}\n\n";
+      "event: row\ndata: {\"values\":[\"18\",\"11.00\",\"gift wrap\"]}\n\n" +
+      'event: done\ndata: {"reason":"exhausted"}\n\n';
 
     const columns: (readonly string[])[] = [];
     const rows: unknown[] = [];
@@ -298,7 +344,43 @@ const MAY_EXECUTE_ELSEWHERE: readonly PermissionGrant[] = [
   grant("KSQL", ["VIEW", "EXECUTE"], undefined, ["some-other-cluster"]),
 ];
 
+describe("pending statement receipts", () => {
+  it.each(["QUEUED", "PARSING", "EXECUTING", undefined])("keeps %s pending rather than claiming completion or non-execution", async (message) => {
+    const { container, stub, dispose } = open(objectsResponse, {
+      grants: MAY_EXECUTE, plan: planHarmless,
+      result: { ...resultStatus, outcome: "pending", message, entity: "stream/ORDERS/create" },
+    });
+    try {
+      await settle();
+      type(container, planHarmless.statement);
+      await settle();
+      button(container, "Run query")?.click();
+      await settle();
+      const pending = container.querySelector("[data-testid='ksql-result-pending']");
+      expect(pending).not.toBeNull();
+      expect(pending?.textContent).toContain("Pending");
+      expect(pending?.textContent).toContain("completion is unknown");
+      expect(pending?.textContent).toContain("Do not resubmit");
+      expect(pending?.textContent).toContain("stream/ORDERS/create");
+      if (message !== undefined) expect(pending?.textContent).toContain(message);
+      expect(container.querySelector("[data-testid='ksql-result-status']")).toBeNull();
+      expect(container.querySelector("[data-testid='ksql-result-failed']")).toBeNull();
+      expect(container.querySelector("[data-testid='ksql-result-count']")).toBeNull();
+      expect(container.textContent).not.toContain("It acted on");
+      expect(calls(stub, KSQL_STATEMENTS_PATH)).toBe(1);
+    } finally { dispose(); }
+  });
+});
+
 describe("the statement editor's permission question", () => {
+  it("adopts the shared cluster write policy", async () => {
+    const ui = open(objectsResponse, { grants: MAY_EXECUTE, writeBlocked: () => "Read-only policy" });
+    await settle(); type(ui.container, "SHOW STREAMS;"); await settle();
+    expect(usable(button(ui.container, "Run query"))).toBe(false);
+    button(ui.container, "Run query")?.click(); await settle();
+    expect(calls(ui.stub, KSQL_PLAN_PATH)).toBe(0);
+    ui.dispose();
+  });
   it("offers a working Run to a principal who holds KSQL:EXECUTE on this cluster", async () => {
     /*
      * This is the case a subject reddens. `grantsAllowAny` ignores a grant's pattern, so the
@@ -505,6 +587,8 @@ describe("the plan phase", () => {
     expect(danger, "a statement that deletes a topic drew no danger banner").not.toBeNull();
     expect(danger?.textContent).toContain("every record in it");
     deletes.dispose();
+    await settle();
+    expect(document.querySelectorAll('[data-testid="ksql-confirm"]')).toHaveLength(0);
 
     // A confirmation that is needed and a topic deletion are not the same fact.
     const drops = open(objectsResponse, {
@@ -517,6 +601,7 @@ describe("the plan phase", () => {
     await settle();
     button(drops.container, "Run query")?.click();
     await settle();
+
 
     expect(document.querySelector('[data-testid="ksql-confirm"]')).not.toBeNull();
     expect(
@@ -737,6 +822,34 @@ describe("the plan phase", () => {
  * ---------------------------------------------------------------------------------------------- */
 
 describe("the ksqlDB screen", () => {
+  it("does not open a stream from a plan belonging to the previous cluster", async () => {
+    const [clusterId, setClusterId] = createSignal(TEST_CLUSTER);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const stream = fakeStream();
+    const ui = open(objectsResponse, { plan: pushQueryPlan, clusterId, openStream: stream.opener,
+      write: async (path) => { if (path === KSQL_PLAN_PATH) await pending; } });
+    await settle(); type(ui.container, "SELECT * FROM ORDERS EMIT CHANGES;"); await settle();
+    button(ui.container, "Run query")?.click(); await settle();
+    setClusterId("other"); await settle();
+    release(); await settle();
+    expect(stream.statements).toHaveLength(0);
+    ui.dispose();
+  });
+  it("does not execute a plan after disposal", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const ui = open(objectsResponse, {
+      grants: MAY_EXECUTE, plan: planHarmless, result: resultStatus,
+      write: async (path) => { if (path === KSQL_PLAN_PATH) await pending; },
+    });
+    await settle();
+    type(ui.container, "SHOW STREAMS;"); await settle();
+    button(ui.container, "Run query")?.click(); await settle();
+    ui.dispose(); await settle();
+    release(); await settle();
+    expect(calls(ui.stub, KSQL_STATEMENTS_PATH)).toBe(0);
+  });
   it("draws the streams and tables in the pane and the queries in their own table", async () => {
     const { container, dispose } = open(objectsResponse);
     await settle();

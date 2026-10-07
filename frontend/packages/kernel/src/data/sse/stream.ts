@@ -419,9 +419,7 @@ export function openFetchStreamWith<A>(
   const armWatchdog = (): void => {
     clearWatchdog();
     watchdog = setTimeout(() => {
-      subscriber.onError({ kind: "transport", cause: "stream went silent" });
-      end("no heartbeat received");
-      transport.abort();
+      fail("stream went silent", "no heartbeat received");
     }, HEARTBEAT_WATCHDOG_MS);
   };
 
@@ -434,6 +432,13 @@ export function openFetchStreamWith<A>(
     ended = true;
     clearWatchdog();
     setConnection({ phase: "closed", reason });
+    transport.abort();
+  };
+
+  const fail = (cause: string, reason = cause): void => {
+    if (ended) return;
+    try { subscriber.onError({ kind: "transport", cause }); }
+    finally { end(reason); }
   };
 
   const handle = (raw: RawSseEvent): void => {
@@ -482,10 +487,10 @@ export function openFetchStreamWith<A>(
         for (const event of fed.events) handle(event);
       },
       onDone: () => {
-        end("the server closed the stream");
+        fail("the server closed the stream without a done event");
       },
       onFailure: () => {
-        end("the stream ended unexpectedly");
+        fail("the stream ended unexpectedly");
       },
     });
   };
@@ -502,26 +507,29 @@ export function openFetchStreamWith<A>(
     const reason = `the server rejected the stream with ${response.status}`;
     response.text().then(
       (body) => {
+        if (ended) return;
         subscriber.onError(serverError(body));
         end(reason);
       },
       () => {
-        subscriber.onError({ kind: "transport", cause: reason });
-        end(reason);
+        fail(reason);
       },
     );
   };
 
+  // Covers both missing headers and a stalled HTTP rejection body. Acceptance replaces it
+  // with the heartbeat watchdog; every terminal path clears it.
+  watchdog = setTimeout(() => fail("stream connection timed out"), HEARTBEAT_WATCHDOG_MS);
   transport.send().then(
     (response) => {
+      if (ended) return;
       if (response.status >= 200 && response.status < 300) accept(response);
       else reject(response);
     },
     (cause: unknown) => {
       // An abort is not a failure: it is what `close()` does, and the state is already closed.
-      if (transport.aborted()) return;
-      subscriber.onError({ kind: "transport", cause: String(cause) });
-      end("the connection could not be established");
+      if (ended || transport.aborted()) return;
+      fail(String(cause), "the connection could not be established");
     },
   );
 
@@ -529,7 +537,6 @@ export function openFetchStreamWith<A>(
     connection,
     close: () => {
       end("closed by the client");
-      transport.abort();
     },
     endMarker: () => marker,
   };

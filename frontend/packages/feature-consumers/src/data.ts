@@ -7,7 +7,7 @@
  * dash. A mapping can therefore be wrong in every field and look exactly like a coordinator that
  * did not answer. The clusters feature shipped that bug; these documents are what stop it recurring.
  */
-import { decodeSection, ReasonCodes, ReasonSentences, type KuiApiClient } from "@kui/api";
+import { decodeSection, isForbidden, ReasonCodes, ReasonSentences, type KuiApiClient } from "@kui/api";
 import { apiFailure, fromSection, type Fetched } from "@kui/kernel";
 import type { GroupState, GroupSummary } from "./model.js";
 import type { GroupDetail, Member, PartitionOffset } from "./detail.js";
@@ -309,7 +309,7 @@ export async function fetchGroup(
   const answer = await api.get("/api/v1/clusters/{clusterId}/consumer-groups/{groupId}", {
     params: { path: { clusterId, groupId } },
   });
-  if (!answer.ok) return apiFailure(answer.error);
+  if (!answer.ok) return isForbidden(answer.error) ? { kind: "forbidden" } : apiFailure(answer.error);
 
   const payload = answer.value as unknown as GroupDetailPayload;
   const observedAt =

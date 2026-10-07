@@ -187,7 +187,8 @@ final case class GrantDto(
     clusters: List[String],
     resource: String,
     value: Option[String],
-    actions: List[String]
+    actions: List[String],
+    defaultRole: Boolean = false
 )
 
 object GrantDto {
@@ -199,13 +200,15 @@ object GrantDto {
         resource <- cursor.get[String]("resource")
         value <- cursor.get[Option[String]]("value")
         actions <- cursor.get[List[String]]("actions")
-      } yield GrantDto(clusters, resource, value, actions),
+        defaultRole <- cursor.getOrElse[Boolean]("defaultRole")(false)
+      } yield GrantDto(clusters, resource, value, actions, defaultRole),
     (dto: GrantDto) =>
       Json.obj(
         "clusters" -> dto.clusters.asJson,
         "resource" -> dto.resource.asJson,
         "value" -> dto.value.asJson,
-        "actions" -> dto.actions.asJson
+        "actions" -> dto.actions.asJson,
+        "defaultRole" -> dto.defaultRole.asJson
       )
   )
 

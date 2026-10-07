@@ -152,6 +152,8 @@ export interface BrowseTransport {
     handlers: {
       readonly onEvent: (event: BrowseEvent) => void;
       readonly onFailure: (failure: BrowseFailure) => void;
+      /** The server sent a terminal done frame; independent of display-only close reasons. */
+      readonly onDone?: (() => void) | undefined;
       readonly onConnection: (connection: BrowseConnection) => void;
     },
   ): BrowseHandle;
@@ -173,6 +175,7 @@ export const INITIAL_RECORD_BATCH = 8;
 /** Records committed between subsequent paint opportunities. */
 export const STREAM_RECORD_BATCH = 24;
 const MAX_PENDING_RECORDS = MAX_ROWS + STREAM_RECORD_BATCH;
+const PAYLOAD_BUDGET = MAX_RETAINED_PAYLOAD_BYTES - 128 * MAX_ROWS * 3;
 
 function afterNextPaint(resume: () => void): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -268,13 +271,13 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
     const cached = retainedByteSizes.get(record);
     if (cached !== undefined) return cached;
     const value = record.value;
-    const text =
-      value.kind === "json" || value.kind === "text"
-        ? value.text
-        : value.kind === "large"
-          ? value.text
-          : undefined;
-    const bytes = text === undefined ? 0 : utf8.encode(text).length;
+    const texts = [record.key, record.schema?.subject];
+    for (const header of record.headers) texts.push(header.name, header.value);
+    if (value.kind === "undecodable") texts.push(value.reason, value.hex);
+    else if (value.kind !== "tombstone") texts.push(value.text);
+    // UTF-8 alone undercounts ASCII retained as UTF-16 strings in JS engines.
+    const bytes = texts.reduce<number>((total, text) => total +
+      (text == null ? 0 : Math.max(text.length * 2, utf8.encode(text).length)), 0);
     retainedByteSizes.set(record, bytes);
     return bytes;
   }
@@ -310,7 +313,11 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
     const sourceKind =
       value.kind === "json" ? "json" : value.kind === "large" ? (value.sourceKind ?? "text") : "text";
     const bytes = value.kind === "large" ? Math.max(value.bytes, incoming) : incoming;
-    return { ...record, value: { kind: "large", bytes, sourceKind } };
+    return {
+      offset: record.offset, partition: record.partition, timestamp: record.timestamp,
+      key: "[omitted: memory limit]", headers: [],
+      value: { kind: "large", bytes, sourceKind },
+    };
   }
 
   function withinPayloadBudget(
@@ -320,7 +327,8 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
   ): KafkaRecord {
     const incoming = retainedBytes(record);
     if (incoming === 0) return record;
-    if (committedBeforeBatch + newlyCommitted + incoming <= MAX_RETAINED_PAYLOAD_BYTES) {
+    // Reserve room for omission labels in all retained/pending rows and cached pages.
+    if (committedBeforeBatch + newlyCommitted + incoming <= PAYLOAD_BUDGET) {
       return record;
     }
     return withoutPayload(record, incoming);
@@ -499,9 +507,11 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
       if (work.kind !== "record" || bytesLeft <= 0) return work;
       const size = retainedBytes(work.record);
       if (size === 0) return work;
-      bytesLeft -= size;
-      pendingPayloadBytes = Math.max(0, pendingPayloadBytes - size);
-      return { kind: "record", record: withoutPayload(work.record, size) };
+      const stripped = withoutPayload(work.record, size);
+      const freed = size - retainedBytes(stripped);
+      bytesLeft -= freed;
+      pendingPayloadBytes = Math.max(0, pendingPayloadBytes - freed);
+      return { kind: "record", record: stripped };
     });
   }
 
@@ -514,14 +524,14 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
     if (
       liveNow &&
       incoming > 0 &&
-      committedPayloadBytes + pendingPayloadBytes + incoming > MAX_RETAINED_PAYLOAD_BYTES
+      committedPayloadBytes + pendingPayloadBytes + incoming > PAYLOAD_BUDGET
     ) {
       stripOldestPendingPayloads(
-        committedPayloadBytes + pendingPayloadBytes + incoming - MAX_RETAINED_PAYLOAD_BYTES,
+        committedPayloadBytes + pendingPayloadBytes + incoming - PAYLOAD_BUDGET,
       );
     }
     const queued =
-      committedPayloadBytes + pendingPayloadBytes + incoming <= MAX_RETAINED_PAYLOAD_BYTES
+      committedPayloadBytes + pendingPayloadBytes + incoming <= PAYLOAD_BUDGET
         ? record
         : withoutPayload(record, incoming);
     pendingWork.push({ kind: "record", record: queued });
@@ -663,14 +673,24 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
      * So the close is *recorded* if it arrives early and applied once the handle exists. */
     let opened: BrowseHandle | undefined;
     let closedBeforeOpenReturned = false;
+    let receivedDone = false;
+    let terminalFailure: BrowseFailure | undefined;
 
     const finish = (which: BrowseHandle): void => {
       if (!isCurrentRun() || handle !== which) return;
-      cursorNow = which.endMarker();
+      const complete = receivedDone && terminalFailure === undefined;
+      cursorNow = complete ? which.endMarker() : undefined;
       setCursor(cursorNow);
-      setProgress((current) => ({ ...current, endReason: which.endReason?.() }));
+      setProgress((current) => ({
+        ...current,
+        endReason: complete ? which.endReason?.() : undefined,
+        failure: complete ? current.failure : terminalFailure ?? {
+          kind: "transport", cause: "The stream ended before the server completed the browse.",
+        },
+      }));
       handle = undefined;
       setRunning(false);
+      release();
       trimPageCache();
       /* Keep the completed page visible while its successor is in flight. A cursor page may take
        * seconds when a selective filter scans deeply; replacing useful records with a blank
@@ -681,6 +701,9 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
     };
 
     opened = options.transport.open(url, {
+      onDone: () => {
+        if (isCurrentRun()) receivedDone = true;
+      },
       onEvent: (event) => {
         if (!isCurrentRun()) return;
         switch (event.kind) {
@@ -713,6 +736,7 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
        * evidence. */
       onFailure: (failure) => {
         if (!isCurrentRun()) return;
+        if (failure.kind !== "decode") terminalFailure = failure;
         enqueueOrRun(() => setProgress((current) => ({ ...current, failure })));
       },
       onConnection: (connection) => {
@@ -720,6 +744,7 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
         enqueueOrRun(() => {
           setProgress((current) => ({ ...current, connection }));
           if (connection.phase !== "closed") return;
+
           /* A closed stream releases the handle. `running` is "is there a handle", and the control
            * reads Stop while it is true — so without this a browse that ended by itself, which is
            * what every bounded browse does the moment it has read its limit, left the button saying

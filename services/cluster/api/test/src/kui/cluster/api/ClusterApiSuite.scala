@@ -2,17 +2,27 @@ package kui.cluster.api
 
 import java.nio.charset.StandardCharsets
 
+import scala.concurrent.duration.*
 import scala.io.Source
 import scala.util.Using
 
 import cats.effect.IO
+import fs2.Stream
 import io.circe.Json
 import io.circe.parser.parse
 import munit.CatsEffectSuite
+import sttp.capabilities.fs2.Fs2Streams
 import sttp.client4.*
+import sttp.client4.httpclient.fs2.HttpClientFs2Backend
 
+import kui.cluster.application.{RegistrySnapshot, RegistryVersion}
 import kui.cluster.contract.ClusterEndpoints
+import kui.cluster.domain.StoreHealth
+import kui.config.ServerConfig
 import kui.contracts.{HttpHeaders, KuiEndpoint}
+import kui.http.KuiServer
+import kui.http.sse.SseWire
+import kui.kernel.{Host, Port}
 import kui.observability.KuiInterceptors
 import kui.security.RequestDigests
 
@@ -22,6 +32,65 @@ import kui.security.RequestDigests
   * real interceptor chain, the real principal check and the real mapping — everything except the socket.
   */
 final class ClusterApiSuite extends CatsEffectSuite {
+
+  test("theAssembledRoutesServeClusterEventsOverHttpRatherThanResolvingStreamAsAClusterId") {
+    val original = ClusterFixtures.profile(version = 1L)
+    val edited = ClusterFixtures.profile(version = 2L)
+    val initial = RegistrySnapshot(
+      Map(original.id -> original),
+      RegistryVersion.Initial,
+      StoreHealth.Online,
+      ClusterFixtures.At
+    )
+    val snapshots = Stream
+      .emits(
+        List(
+          initial,
+          initial.copy(profiles = Map(edited.id -> edited), version = initial.version.next)
+        )
+      )
+      .covary[IO] ++ Stream.never[IO]
+
+    ClusterTestServer.resource(profiles = List(original), published = Some(snapshots)).use { server =>
+      (for {
+        binding <- KuiServer.resource[IO](
+          ServerConfig(Host.unsafe("127.0.0.1"), Port.unsafe(0), "/"),
+          server.routes,
+          server.interceptors,
+          server.logger,
+          10.millis
+        )
+        backend <- HttpClientFs2Backend.resource[IO]()
+      } yield (binding, backend)).use { (binding, backend) =>
+        for {
+          token <- ClusterTestServer.token(digest =
+            kui.security.RequestDigest.ofRequestLine(
+              "GET",
+              ClusterStreamEndpoint.StreamPath
+            )
+          )
+          response <- basicRequest
+            .get(uri"http://127.0.0.1:${binding.port}/internal/v1/clusters/stream")
+            .header(KuiEndpoint.PrincipalHeader, token.value)
+            .response(asStreamAlwaysUnsafe(Fs2Streams[IO]))
+            .send(backend)
+          _ = assertEquals(response.code.code, 200)
+          _ = assert(response.contentType.exists(_.startsWith("text/event-stream")))
+          events <- response.body
+            .through(SseWire.parse)
+            .filter(_.name == "clusters")
+            .take(1)
+            .compile
+            .toList
+            .timeout(5.seconds)
+        } yield {
+          assertEquals(events.map(_.data.hcursor.get[String]("id")), List(Right(original.id.value)))
+          assertEquals(events.map(_.data.hcursor.get[Long]("version")), List(Right(2L)))
+          assertEquals(events.map(_.data.hcursor.get[String]("change")), List(Right("updated")))
+        }
+      }
+    }
+  }
 
   test("theAudienceTheContractPublishesIsTheOneThisServiceVerifies") {
     // The two spellings of "cluster". `ClusterService.Id` is what this service checks a token's `aud`

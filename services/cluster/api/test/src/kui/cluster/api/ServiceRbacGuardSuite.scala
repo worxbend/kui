@@ -97,6 +97,26 @@ final class ServiceRbacGuardSuite extends CatsEffectSuite {
     }
   }
 
+  test("clusterRowsAreFilteredForRestrictedAndRolelessPrincipals") {
+    val allowed = ClusterFixtures.profile(id = Cluster, name = "Allowed")
+    val hidden = ClusterFixtures.profile(id = kui.kernel.ClusterId.unsafe("secret-cluster"), name = "Hidden")
+    resource(
+      profiles = List(allowed, hidden),
+      rbac = policy(Resource.ClusterConfig, Action.ClusterConfigView)
+    ).use { server =>
+      for {
+        restricted <- get(server, ClusterTestServer.ClustersPath, Set(reader))
+        roleless <- get(server, ClusterTestServer.ClustersPath, Set.empty)
+      } yield {
+        assert(restricted.body.contains("Allowed"), restricted.body)
+        assert(!restricted.body.contains("Hidden"), restricted.body)
+        assert(!restricted.body.contains("secret-cluster"), restricted.body)
+        assert(!roleless.body.contains("Allowed"), roleless.body)
+        assert(!roleless.body.contains("Hidden"), roleless.body)
+      }
+    }
+  }
+
   test("a deployment with no roles configured is unaffected") {
     resource().use { server =>
       get(server, configsPath, Set.empty).map { response =>

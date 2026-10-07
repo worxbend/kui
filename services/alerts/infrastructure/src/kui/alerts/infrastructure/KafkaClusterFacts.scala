@@ -170,9 +170,9 @@ final class KafkaClusterFacts[F[_]: Async](
   /** Every broker's log directories, as percentages where a percentage exists.
     *
     * Two calls, because `describeLogDirs` is per broker and the broker list comes from `describeCluster`. A
-    * broker that refuses is left out of the list rather than failing the reading: the disk rule then judges
-    * the directories it can see, and the ones it cannot are simply not there — which is honest, because a
-    * directory KUI never heard of is not a directory it declined to measure.
+    * broker that refuses is left out of the list rather than failing the entire reading. The disk rule judges
+    * only directories with measured percentages and preserves open alerts for absent subjects, including
+    * every directory on a skipped broker. Missing is never evidence of recovery.
     */
   private def describeDirectories: F[FactReading[List[LogDirectoryFact]]] =
     clusters.describeCluster(connection).flatMap {

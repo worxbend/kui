@@ -372,17 +372,9 @@ final class SessionMiddlewareSuite extends KuiIOSuite {
         val presented = cookie.stripPrefix(s"${SessionMiddleware.CookieName}=")
         assert(presented.nonEmpty, cookie)
 
-        // The anchor, and it is the half that makes the rule below mean anything. The stamp interceptor
-        // re-stamps the cookie on every response that has a session behind it, so a live request answers
-        // with the SAME id; a gateway that recognised no cookie at all would answer with a different one
-        // here too, and the rule below would pass while measuring nothing.
-        assertEquals(
-          cookieOf(stillAlive).stripPrefix(s"${SessionMiddleware.CookieName}="),
-          presented,
-          "a request presenting a live session cookie came back carrying a different session id, so the " +
-            "gateway did not recognise the session it was given and the expiry rule below is being " +
-            "asserted over a gateway that mints a new session on every request"
-        )
+        // Existing sessions retain their CSRF token and never restamp a potentially stale cookie.
+        assertEquals(stillAlive.header("Set-Cookie"), None)
+        assertEquals(tokenOf(stillAlive), tokenOf(first))
 
         val replaced = cookieOf(afterIdle).stripPrefix(s"${SessionMiddleware.CookieName}=")
         assertNotEquals(

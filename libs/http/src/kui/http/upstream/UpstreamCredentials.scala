@@ -12,10 +12,9 @@ import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import io.circe.parser
 import sttp.client4.*
-import sttp.client4.httpclient.fs2.HttpClientFs2Backend
 import sttp.model.{HeaderNames, Uri}
 
-import kui.config.UpstreamAuthConfig
+import kui.config.{HttpTlsConfig, UpstreamAuthConfig, UrlPolicy}
 import kui.kernel.Secret
 import kui.kernel.error.{ErrorCode, InfrastructureError, KuiError}
 
@@ -140,14 +139,15 @@ object UpstreamCredentials {
   /** Credentials using a source-owned token transport with the JVM's default trust configuration. */
   def resource[F[_]: Async](
       config: UpstreamAuthConfig,
-      settings: Settings = Settings()
+      settings: Settings = Settings(),
+      policy: UrlPolicy = UrlPolicy.Strict
   ): Resource[F, UpstreamCredentials[F]] =
     static[F](config) match {
       case Some(credentials) => Resource.pure(credentials)
       case None =>
         config match {
           case oauth: UpstreamAuthConfig.OAuth =>
-            HttpClientFs2Backend.resource[F]().flatMap(withBackend(oauth, _, settings))
+            HttpTls.resource[F](HttpTlsConfig.Default, policy).flatMap(withBackend(oauth, _, settings))
           case _ => Resource.eval(Async[F].raiseError(new IllegalStateException("unreachable auth case")))
         }
     }

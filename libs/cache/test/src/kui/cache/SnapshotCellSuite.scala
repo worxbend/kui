@@ -173,6 +173,31 @@ final class SnapshotCellSuite extends KuiIOSuite {
     }
   }
 
+  test("invalidation starts a new generation before an older refresh finishes") {
+    TestControl.executeEmbed {
+      for {
+        started <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
+        loads <- Ref.of[IO, Int](0)
+        result <- cellOf(loads.getAndUpdate(_ + 1).flatMap {
+          case 0 => started.complete(()).void >> release.get.as("old")
+          case _ => IO.pure("new")
+        }).use { cell =>
+          for {
+            _ <- started.get
+            waiting <- cell.refresh.start
+            _ <- IO.sleep(1.millisecond)
+            invalidated <- cell.invalidate.timeout(1.second)
+            _ <- release.complete(())
+            joined <- waiting.joinWithNever
+            _ <- IO.sleep(1.millisecond)
+            stored <- cell.get
+          } yield (invalidated.value, joined.value, stored.value)
+        }
+      } yield assertEquals(result, (Some("new"), Some("new"), Some("new")))
+    }
+  }
+
   test("replacementIsAtomicUnderConcurrentReaders") {
     val program = for {
       generation <- Ref.of[IO, Int](0)

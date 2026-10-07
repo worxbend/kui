@@ -102,27 +102,70 @@ final class ConnectHttp[F[_]: Async](
   def operate(connector: ConnectorName, operation: ConnectorOperation): F[Either[KuiError, Unit]] = {
     val base = root.addPath(ConnectorsPath, connector.value)
 
-    val request = operation match {
+    operation match {
       // PUT, and empty-bodied, which is what the API documents for both. `basicRequest` sends no body
       // unless one is set, and a Connect worker rejects a `Content-Type` with no content.
-      case ConnectorOperation.Pause => basicRequest.put(base.addPath("pause"))
-      case ConnectorOperation.Resume => basicRequest.put(base.addPath("resume"))
+      case ConnectorOperation.Pause =>
+        send(basicRequest.put(base.addPath("pause")), Some(connector)).map(_.void)
+      case ConnectorOperation.Resume =>
+        send(basicRequest.put(base.addPath("resume")), Some(connector)).map(_.void)
       case ConnectorOperation.Restart =>
-        basicRequest.post(
-          base
-            .addPath("restart")
-            // Both parameters are named rather than defaulted, because their defaults are the opposite of
-            // what the button on the card means. `includeTasks=false` — the API's default — restarts the
-            // connector and leaves its dead tasks dead, which is precisely the state an operator is
-            // pressing Restart to get out of (§7.7). `onlyFailed=false` restarts them all, so the outcome
-            // does not depend on which tasks happened to be failed when the request was sent.
-            .addParam("includeTasks", "true")
-            .addParam("onlyFailed", "false")
-        )
+        get(root).flatMap {
+          case Left(error) => error.asLeft[Unit].pure[F]
+          case Right(body) =>
+            // KIP-745 (Kafka 3.0), not KIP-465's 2.3 expanded listing. Older workers silently ignore
+            // includeTasks, so HTTP success alone cannot negotiate this capability.
+            val major = parser
+              .parse(body)
+              .toOption
+              .flatMap(_.hcursor.get[String]("version").toOption)
+              .flatMap(_.takeWhile(_.isDigit).toIntOption)
+            if major.exists(_ >= 3) then
+              send(
+                basicRequest.post(
+                  base
+                    .addPath("restart")
+                    .addParam("includeTasks", "true")
+                    .addParam("onlyFailed", "false")
+                ),
+                Some(connector)
+              ).map(_.void)
+            else restartLegacy(connector, base)
+        }
     }
-
-    send(request, Some(connector)).map(_.void)
   }
+
+  private def restartLegacy(connector: ConnectorName, base: Uri): F[Either[KuiError, Unit]] =
+    get(base.addPath("status")).flatMap {
+      case Left(error) => error.asLeft[Unit].pure[F]
+      case Right(body) =>
+        val ids = for {
+          json <- parser.parse(body).toOption
+          tasks <- json.hcursor.get[List[Json]]("tasks").toOption
+          ids <- tasks.traverse(_.hcursor.get[Int]("id").toOption.filter(_ >= 0))
+        } yield ids.distinct.sorted
+        ids match {
+          case None =>
+            malformed("the task identities needed for a legacy restart could not be read")
+              .asLeft[Unit]
+              .pure[F]
+          case Some(tasks) =>
+            send(basicRequest.post(base.addPath("restart")), Some(connector)).flatMap {
+              case Left(error) => error.asLeft[Unit].pure[F]
+              case Right(_) =>
+                tasks.foldLeft(().asRight[KuiError].pure[F]) { (previous, task) =>
+                  previous.flatMap {
+                    case Left(error) => error.asLeft[Unit].pure[F]
+                    case Right(_) =>
+                      send(
+                        basicRequest.post(base.addPath("tasks", task.toString, "restart")),
+                        Some(connector)
+                      ).map(_.void)
+                  }
+                }
+            }
+        }
+    }
 
   /** `{"orders-sink": {"status": {...}, "info": {...}}}`, which is one connector per key. */
   private def expanded(json: Json): Either[KuiError, ConnectorFacts] =

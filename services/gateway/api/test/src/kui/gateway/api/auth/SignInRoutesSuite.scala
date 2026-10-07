@@ -2,8 +2,10 @@ package kui.gateway.api.auth
 
 import cats.effect.IO
 import cats.effect.kernel.Resource
+import cats.syntax.all.*
 import io.circe.parser.decode
 import io.circe.syntax.*
+import sttp.tapir.*
 
 import kui.config.{AuthConfig, AuthType, OidcConfig}
 import kui.contracts.ErrorEnvelope
@@ -34,7 +36,65 @@ import kui.testkit.KuiIOSuite
   */
 final class SignInRoutesSuite extends KuiIOSuite {
 
+  private def withOidcFlow[A](answer: ServiceBehaviour, basePath: String = "")(
+      run: (GatewayTestServer.Running, Map[String, String]) => IO[A]
+  ): IO[A] = {
+    val started = kui.identity.contract.dto.OidcStartResponse("https://issuer.example/authorize", "the-state")
+    ServiceClientFixture.stub(ServiceBehaviour.Ok(started.asJson)).flatMap { stub =>
+      ServiceClientFixture.client(ServiceId.unsafe("identity"), stub).use { identity =>
+        GatewayTestServer.resource(identity = Some(identity), basePath = basePath).use { server =>
+          for {
+            me <- server.get(s"$basePath/api/v1/auth/me")
+            headers = Map(
+              "Cookie" -> me.header("Set-Cookie").get.takeWhile(_ != ';'),
+              SessionMiddleware.CsrfHeaderName -> decode[AuthMeResponse](me.body).toOption.get.csrfToken
+            )
+            start <- server.post(s"$basePath/api/v1/auth/oidc/start", headers)
+            _ = assertEquals(start.code.code, 200, start.body)
+            _ <- stub.set(answer)
+            result <- run(server, headers)
+          } yield result
+        }
+      }
+    }
+  }
+
+  test("OIDC state belongs to its initiating browser and is single use") {
+    withOidcFlow(signedIn) { (server, owner) =>
+      for {
+        victim <- server.getWithoutFollowing(s"$api/auth/oidc/callback?code=c&state=the-state")
+        legitimate <- server.getWithoutFollowing(s"$api/auth/oidc/callback?code=c&state=the-state", owner)
+        replay <- server.getWithoutFollowing(s"$api/auth/oidc/callback?code=c&state=the-state", owner)
+      } yield {
+        assertEquals(victim.code.code, 401, victim.body)
+        assertEquals(legitimate.code.code, 302, legitimate.body)
+        assertEquals(replay.code.code, 401, replay.body)
+      }
+    }
+  }
+
   private val api = GatewayEndpoints.ApiPrefix
+
+  test("login budgets canonicalize padded and mixed-case account names") {
+    identityAnswering(changeRequired).use { identity =>
+      GatewayTestServer.resource(identity = Some(identity)).use { server =>
+        for {
+          me <- server.get(s"$api/auth/me")
+          headers = Map(
+            "Cookie" -> me.header("Set-Cookie").get.takeWhile(_ != ';'),
+            SessionMiddleware.CsrfHeaderName -> decode[AuthMeResponse](me.body).toOption.get.csrfToken
+          )
+          responses <- List("ada", "ADA", " ada", "ada ", " Ada ", "  ada  ").traverse { name =>
+            server.postJson(
+              s"$api/auth/login",
+              io.circe.Json.obj("username" -> name.asJson, "password" -> "wrong".asJson).noSpaces,
+              headers
+            )
+          }
+        } yield assertEquals(responses.map(_.code.code), List(200, 200, 200, 200, 200, 429))
+      }
+    }
+  }
 
   private val ada: IdentityPrincipalDto =
     IdentityPrincipalDto("ada", List("operators"), "session")
@@ -49,6 +109,64 @@ final class SignInRoutesSuite extends KuiIOSuite {
 
   private def changeRequired: ServiceBehaviour =
     ServiceBehaviour.Ok((LoginResponse.PasswordChangeRequired("the-challenge"): LoginResponse).asJson)
+
+  test("a slow pre-login response cannot overwrite the rotated session cookie") {
+    for {
+      entered <- cats.effect.Deferred[IO, Unit]
+      release <- cats.effect.Deferred[IO, Unit]
+      slow = endpoint.get
+        .in("api" / "v1" / "slow")
+        .out(stringBody)
+        .serverLogicSuccess[IO](_ => entered.complete(()).void *> release.get.as("done"))
+      _ <- identityAnswering(signedIn).use { identity =>
+        GatewayTestServer.resource(identity = Some(identity), extraRoutes = List(slow)).use { server =>
+          for {
+            me <- server.get(s"$api/auth/me")
+            headers = Map(
+              "Cookie" -> me.header("Set-Cookie").get.takeWhile(_ != ';'),
+              SessionMiddleware.CsrfHeaderName -> decode[AuthMeResponse](me.body).toOption.get.csrfToken
+            )
+            pending <- server.get(s"$api/slow", headers).start
+            _ <- entered.get
+            login <- server.postJson(s"$api/auth/login", """{"username":"ada","password":"x"}""", headers)
+            _ <- release.complete(())
+            response <- pending.joinWithNever
+          } yield {
+            assertEquals(login.code.code, 200)
+            assert(login.header("Set-Cookie").isDefined)
+            assertEquals(response.header("Set-Cookie"), None)
+          }
+        }
+      }
+    } yield ()
+  }
+
+  test("a pre-login cookie arriving after sign-in cannot replace the authenticated browser cookie") {
+    identityAnswering(signedIn).use { identity =>
+      GatewayTestServer.resource(identity = Some(identity), auth = AuthConfig(AuthType.Form, Nil, None)).use {
+        server =>
+          for {
+            me <- server.get(s"$api/auth/me")
+            oldCookie = me.header("Set-Cookie").get.takeWhile(_ != ';')
+            headers = Map(
+              "Cookie" -> oldCookie,
+              SessionMiddleware.CsrfHeaderName -> decode[AuthMeResponse](me.body).toOption.get.csrfToken
+            )
+            login <- server.postJson(s"$api/auth/login", """{"username":"ada","password":"x"}""", headers)
+            authenticatedCookie = login.header("Set-Cookie").get.takeWhile(_ != ';')
+            late <- server.get(s"$api/auth/me", headers)
+            // Apply responses in browser arrival order: a late Set-Cookie would overwrite the login.
+            browserCookie = late.header("Set-Cookie").fold(authenticatedCookie)(_.takeWhile(_ != ';'))
+            current <- server.get(s"$api/auth/me", Map("Cookie" -> browserCookie))
+          } yield {
+            assertEquals(login.code.code, 200, login.body)
+            assertEquals(late.header("Set-Cookie"), None)
+            assertEquals(late.code.code, 401, late.body)
+            assertEquals(decode[AuthMeResponse](current.body).toOption.get.principal.name, "ada")
+          }
+      }
+    }
+  }
 
   /** The cookie value a `Set-Cookie` header carries, whichever attributes follow it. */
   private def sessionIdIn(header: String): String =
@@ -182,7 +300,7 @@ final class SignInRoutesSuite extends KuiIOSuite {
     }
   }
 
-  test("a required password change grants no session at all, so the cookie is the one that arrived") {
+  test("a required password change grants no session and must not restamp a stale cookie") {
     // `AuthRoutes` states it in the branch itself: "handing out a cookie here would be handing out a
     // session to somebody the server has just decided may not have one". Replacing `currentCookie` with
     // `signIn` in that branch is a one-word edit that no case saw.
@@ -206,12 +324,7 @@ final class SignInRoutesSuite extends KuiIOSuite {
           )
 
           val cookies = login.headers.filter(_.is("Set-Cookie"))
-          assertEquals(cookies.size, 1, cookies.toString)
-          assertEquals(
-            sessionIdIn(cookies.head.value),
-            before,
-            "a login that granted no session still rotated the browser's session id"
-          )
+          assertEquals(cookies.size, 0, cookies.toString)
 
           // And the session it left behind is still anonymous: nobody was signed in.
           val principal =
@@ -243,8 +356,7 @@ final class SignInRoutesSuite extends KuiIOSuite {
         } yield {
           assertEquals(changed.code.code, 200, changed.body)
           val cookies = changed.headers.filter(_.is("Set-Cookie"))
-          assertEquals(cookies.size, 1, cookies.toString)
-          assertEquals(sessionIdIn(cookies.head.value), before, "the password change rotated the session")
+          assertEquals(cookies.size, 0, cookies.toString)
         }
       }
     }
@@ -255,15 +367,14 @@ final class SignInRoutesSuite extends KuiIOSuite {
   // -----------------------------------------------------------------------------------------------
 
   test("a provider callback that comes back signed in is redirected to the interface with a new session") {
-    identityAnswering(signedIn).use { identity =>
-      GatewayTestServer.resource(identity = Some(identity)).use { server =>
-        server.getWithoutFollowing(s"$api/auth/oidc/callback?code=the-code&state=the-state").map { response =>
+    withOidcFlow(signedIn) { (server, headers) =>
+      server.getWithoutFollowing(s"$api/auth/oidc/callback?code=the-code&state=the-state", headers).map {
+        response =>
           assertEquals(response.code.code, 302, response.body)
           assertEquals(response.header("Location"), Some("/ui/"))
           val cookies = response.headers.filter(_.is("Set-Cookie"))
           assertEquals(cookies.size, 1, cookies.toString)
           assert(cookies.head.value.startsWith(s"${SessionMiddleware.CookieName}="), cookies.toString)
-        }
       }
     }
   }
@@ -273,9 +384,9 @@ final class SignInRoutesSuite extends KuiIOSuite {
     // there is no KUI password behind it to change, and redirecting a browser into a flow with no next step
     // is worse than a refusal. Turning that branch into the `SignedIn` one is a two-line edit that left the
     // gateway module green.
-    identityAnswering(changeRequired).use { identity =>
-      GatewayTestServer.resource(identity = Some(identity)).use { server =>
-        server.getWithoutFollowing(s"$api/auth/oidc/callback?code=the-code&state=the-state").map { response =>
+    withOidcFlow(changeRequired) { (server, headers) =>
+      server.getWithoutFollowing(s"$api/auth/oidc/callback?code=the-code&state=the-state", headers).map {
+        response =>
           assertEquals(envelope(response.body).code, ErrorCode.InvalidState.wire, response.body)
           assertEquals(response.header("Location"), None, "a refused callback still redirected the browser")
           assertEquals(
@@ -284,10 +395,9 @@ final class SignInRoutesSuite extends KuiIOSuite {
               .map(header => sessionIdIn(header.value))
               .distinct
               .size,
-            1,
+            0,
             "more than one session cookie on a refused callback"
           )
-        }
       }
     }
   }
@@ -295,11 +405,10 @@ final class SignInRoutesSuite extends KuiIOSuite {
   test("a deployment under a base path sends a completed provider sign-in to its own interface") {
     // `landingPage` is two branches and a string. Collapsing it to "/ui/" strands every reverse-proxied
     // deployment at a path its gateway does not serve, and nothing saw it.
-    identityAnswering(signedIn).use { identity =>
-      GatewayTestServer.resource(basePath = "/kui", identity = Some(identity)).use { server =>
-        server.getWithoutFollowing(s"/kui$api/auth/oidc/callback?code=c&state=s").map { response =>
+    withOidcFlow(signedIn, "/kui") { (server, headers) =>
+      server.getWithoutFollowing(s"/kui$api/auth/oidc/callback?code=c&state=the-state", headers).map {
+        response =>
           assertEquals(response.header("Location"), Some("/kui/ui/"), response.headers.toString)
-        }
       }
     }
   }

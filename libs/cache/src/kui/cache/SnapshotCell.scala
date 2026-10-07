@@ -5,7 +5,7 @@ import java.time.Instant
 import scala.concurrent.duration.FiniteDuration
 
 import cats.effect.kernel.Outcome
-import cats.effect.std.Supervisor
+import cats.effect.std.{Mutex, Supervisor}
 import cats.effect.syntax.all.*
 import cats.effect.{Deferred, Ref, Resource, Temporal}
 import cats.syntax.all.*
@@ -97,10 +97,11 @@ object SnapshotCell {
   )(load: F[A]): Resource[F, SnapshotCell[F, A]] =
     for {
       state <- Resource.eval(Ref.of[F, Snapshot[A]](Snapshot.initializing[A]))
-      inFlight <- Resource.eval(Ref.of[F, Option[Deferred[F, Snapshot[A]]]](None))
+      inFlight <- Resource.eval(Ref.of[F, Option[Deferred[F, Option[Snapshot[A]]]]](None))
+      lock <- Resource.eval(Mutex[F])
       topic <- Resource.eval(Topic[F, Snapshot[A]])
       supervisor <- Supervisor[F]
-      cell = new Impl[F, A](name, cluster, state, inFlight, topic, metrics, log, load)
+      cell = new Impl[F, A](name, cluster, state, inFlight, topic, metrics, log, load, lock)
       // Sleep *after* the refresh, so a cell has data as soon as it can rather than one interval
       // later. Supervised, so the fiber dies with the resource.
       _ <- Resource.eval(
@@ -125,11 +126,12 @@ object SnapshotCell {
       name: String,
       cluster: ClusterId,
       state: Ref[F, Snapshot[A]],
-      inFlight: Ref[F, Option[Deferred[F, Snapshot[A]]]],
+      inFlight: Ref[F, Option[Deferred[F, Option[Snapshot[A]]]]],
       topic: Topic[F, Snapshot[A]],
       metrics: CacheMetrics[F],
       log: Option[Logger[F]],
-      load: F[A]
+      load: F[A],
+      lock: Mutex[F]
   ) extends SnapshotCell[F, A] {
 
     def get: F[Snapshot[A]] =
@@ -151,43 +153,66 @@ object SnapshotCell {
       */
     def refresh: F[Snapshot[A]] =
       Temporal[F].uncancelable { poll =>
-        Deferred[F, Snapshot[A]].flatMap { gate =>
-          inFlight
-            .modify {
-              case Some(running) => (Some(running), Left(running))
-              case None => (Some(gate), Right(gate))
-            }
+        Deferred[F, Option[Snapshot[A]]].flatMap { gate =>
+          lock.lock
+            .surround(
+              inFlight
+                .modify {
+                  case Some(running) => (Some(running), Left(running))
+                  case None => (Some(gate), Right(gate))
+                }
+            )
             .flatMap {
               // Somebody else is already loading: wait for *their* result. `poll` makes the wait
               // itself cancellable, so a caller that gives up does not pin its fiber.
-              case Left(running) => poll(running.get)
+              case Left(running) => poll(running.get).flatMap(_.fold(poll(refresh))(_.pure[F]))
               case Right(mine) =>
-                poll(runLoad).guaranteeCase { outcome =>
-                  // The slot is released and the waiters are woken on every path, cancellation
-                  // included. Without this, a cancelled refresh leaves every later caller blocked
-                  // on a `Deferred` nobody will ever complete — a screen that never loads again,
-                  // which is the exact failure this type exists to prevent.
-                  inFlight.set(None) >> {
-                    outcome match {
-                      case Outcome.Succeeded(loaded) => loaded.flatMap(mine.complete).void
-                      case Outcome.Errored(_) | Outcome.Canceled() =>
-                        state.get.flatMap(mine.complete).void
+                poll(runLoad(mine))
+                  .guaranteeCase { outcome =>
+                    // The slot is released and the waiters are woken on every path, cancellation
+                    // included. Without this, a cancelled refresh leaves every later caller blocked
+                    // on a `Deferred` nobody will ever complete — a screen that never loads again,
+                    // which is the exact failure this type exists to prevent.
+                    lock.lock.surround {
+                      inFlight.get.flatMap { current =>
+                        if current.contains(mine) then
+                          inFlight.set(None) >> (outcome match {
+                            case Outcome.Succeeded(loaded) => loaded.flatMap(mine.complete).void
+                            case Outcome.Errored(_) | Outcome.Canceled() =>
+                              state.get.flatMap(snapshot => mine.complete(Some(snapshot))).void
+                          })
+                        else mine.complete(None).void
+                      }
                     }
                   }
-                }
+                  .flatMap(_ => mine.get.flatMap(_.fold(poll(refresh))(_.pure[F])))
             }
         }
       }
 
     def invalidate: F[Snapshot[A]] =
-      state.set(Snapshot.initializing[A]) >> refresh
+      Temporal[F].uncancelable { poll =>
+        lock.lock.surround {
+          inFlight.getAndSet(None).flatMap { old =>
+            state.set(Snapshot.initializing[A]) >> old.traverse_(_.complete(None).void)
+          }
+        } >> poll(refresh)
+      }
 
     def updates: Stream[F, Snapshot[A]] = topic.subscribeUnbounded
 
-    private def runLoad: F[Snapshot[A]] =
-      load.attempt.flatMap {
-        case Right(value) => recordSuccess(value)
-        case Left(failure) => recordFailure(failure)
+    private def runLoad(generation: Deferred[F, Option[Snapshot[A]]]): F[Option[Snapshot[A]]] =
+      load.attempt.flatMap { result =>
+        lock.lock.surround {
+          inFlight.get.flatMap { current =>
+            if !current.contains(generation) then none[Snapshot[A]].pure[F]
+            else
+              (result match {
+                case Right(value) => recordSuccess(value)
+                case Left(failure) => recordFailure(failure)
+              }).map(_.some)
+          }
+        }
       }
 
     private def recordSuccess(value: A): F[Snapshot[A]] =

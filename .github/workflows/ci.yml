@@ -377,6 +377,8 @@ jobs:
         run: npm install --global --no-fund --no-audit pnpm@11.25.0
       - name: Install
         run: pnpm install --frozen-lockfile
+      - name: Deployment proxy and local-only demo ports
+        run: python3 ../scripts/test-deployment.py
       # Before the tests, because a type error is cheaper to read than the runtime failure it turns
       # into. `vite build` transpiles without checking types, so nothing else in this job would
       # catch one.
@@ -423,7 +425,7 @@ jobs:
       # rather than as a timeout twenty minutes later.
       - name: Accessibility sweep over every story, in both themes
         run: |
-          npx --yes http-server storybook-static -p 6017 -s &
+          pnpm exec http-server storybook-static -p 6017 -s &
           server=$!
           trap 'kill $server 2>/dev/null || true' EXIT
           for _ in $(seq 1 60); do

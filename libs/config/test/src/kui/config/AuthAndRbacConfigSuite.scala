@@ -18,6 +18,23 @@ import kui.testkit.KuiSuite
   */
 final class AuthAndRbacConfigSuite extends KuiSuite {
 
+  test("explicit trusted proxy literals are accepted as auth configuration") {
+    assertEquals(
+      loaded("kui:\n  auth:\n    trustedProxies: [127.0.0.1, '::1']\n").auth.trustedProxies,
+      Set("127.0.0.1", "0:0:0:0:0:0:0:1")
+    )
+    assertEquals(loaded("kui: {}\n").auth.trustedProxies, Set.empty[String])
+  }
+
+  test("proxy trust never accepts hostnames, wildcard networks or malformed IPs") {
+    List("localhost", "0.0.0.0/0", "*", "127.1", "999.1.1.1").foreach { value =>
+      assert(
+        problems(s"kui:\n  auth:\n    trustedProxies: ['$value']\n")
+          .exists(_.key == "kui.auth.trustedProxies")
+      )
+    }
+  }
+
   private def load(
       yaml: String,
       env: Map[String, String] = Map.empty

@@ -110,6 +110,16 @@ final class KsqlMappingSuite extends FunSuite {
     assertEquals(status.entity, Some("stream/ORDERS/drop"))
   }
 
+  test("pending commands retain their discriminator and command ID at the API boundary") {
+    val pending = KsqlMapping.result(
+      ExecutedStatement(statement, StatementOutcome.Pending("queued", Some("stream/ORDERS/drop")), at)
+    )
+    assertEquals(pending.outcome, "pending")
+    assertEquals(pending.entity, Some("stream/ORDERS/drop"))
+    assertEquals(pending.message, Some("queued"))
+    assertEquals(pending.rows, Nil)
+  }
+
   test("a rows answer that matched nothing is still a rows answer, which is a measured emptiness") {
     val empty = KsqlMapping.result(
       ExecutedStatement(

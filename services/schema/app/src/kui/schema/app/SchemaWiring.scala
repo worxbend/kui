@@ -6,15 +6,21 @@ import cats.effect.kernel.{Async, Resource}
 import cats.syntax.all.*
 import org.typelevel.log4cats.StructuredLogger
 import sttp.client4.Backend
-import sttp.client4.httpclient.fs2.HttpClientFs2Backend
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.interceptor.Interceptor
 
-import kui.config.{ClusterConfig, RegistryAuthConfig, SafeUrl, SchemaRegistrySettings, UrlPolicy}
+import kui.config.{
+  ClusterConfig,
+  HttpTlsConfig,
+  RegistryAuthConfig,
+  SafeUrl,
+  SchemaRegistrySettings,
+  UrlPolicy
+}
 import kui.contracts.capability.ServiceCapabilities
 import kui.http.health.ReadinessCheck
 import kui.http.principal.PrincipalVerification
-import kui.http.upstream.{UpstreamClient, UpstreamConfig}
+import kui.http.upstream.{HttpTls, UpstreamClient, UpstreamConfig}
 import kui.kernel.{ClusterId, PositiveInt}
 import kui.observability.Telemetry
 import kui.observability.audit.LoggingAuditSink
@@ -105,7 +111,7 @@ object SchemaWiring {
       interceptors <- Resource.eval(SchemaApi.interceptors[F](telemetry, rejections, logger))
 
       // One connection pool for the process, and none at all when no cluster configures a registry.
-      backend <- httpBackend[F](clusters)
+      backend <- httpBackend[F](clusters, policy)
       ports <- portsFor[F](clusters, backend, policy, telemetry, logger)
       _ <- Resource.eval(startupLog[F](clusters, logger))
 
@@ -121,10 +127,7 @@ object SchemaWiring {
       schema = SchemaVersionUseCase.make[F](registries)
       compatibility = CompatibilityReadUseCase.make[F](registries, logger)
       set = SetCompatibilityUseCase.make[F](registries, audit, logger)
-      // No audit sink here, and it is not an oversight: `MutationKind` has no case for a registration, so
-      // there is no honest record to write. `RegisterSchemaUseCase` logs the same four facts and its header
-      // names the one-line change that closes the gap.
-      register = RegisterSchemaUseCase.make[F](registries, logger)
+      register = RegisterSchemaUseCase.make[F](registries, audit, logger)
       check = CompatibilityCheckUseCase.make[F](registries)
       capabilities = SchemaCapabilities.make[F](registries, logger)
 
@@ -154,9 +157,12 @@ object SchemaWiring {
     )
 
   /** The process's one HTTP connection pool, or none at all. */
-  private def httpBackend[F[_]: Async](clusters: List[ClusterConfig]): Resource[F, Option[Backend[F]]] =
+  private def httpBackend[F[_]: Async](
+      clusters: List[ClusterConfig],
+      policy: UrlPolicy
+  ): Resource[F, Option[Backend[F]]] =
     if clusters.exists(_.schemaRegistry.isDefined) then
-      HttpClientFs2Backend.resource[F]().map(backend => Some(backend: Backend[F]))
+      HttpTls.resource[F](HttpTlsConfig.Default, policy).map(backend => Some(backend: Backend[F]))
     else Resource.pure[F, Option[Backend[F]]](None)
 
   /** One registry client per configured cluster, each with its own breaker, bulkhead and failover list. */

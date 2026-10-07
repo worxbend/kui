@@ -738,7 +738,8 @@ final class PrometheusQueryClientSuite extends CatsEffectSuite {
         ServiceId.unsafe("metrics"),
         logger
       )
-      credentials <- UpstreamCredentials.resource[IO](settings.auth)
+      // Both loopback fixture endpoints require the same explicit development policy.
+      credentials <- UpstreamCredentials.resource[IO](settings.auth, policy = UrlPolicy.Dev)
       query <- PrometheusQueryClient.resource[IO](
         resilient,
         settings,

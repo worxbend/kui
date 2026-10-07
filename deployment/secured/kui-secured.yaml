@@ -62,11 +62,10 @@ kui:
     # private-network *address literal* -- `http://127.0.0.1`, `http://10.0.0.4`, and above all
     # `http://169.254.169.254`, the address a cloud instance uses to hand out its own credentials.
     # KUI fetches the addresses in this file from its own network position, so an unchecked URL
-    # here is a way to read a private network through KUI. A host *name* like the ones below is
-    # always accepted; names are never resolved during validation, so this file validates the same
-    # way on every machine. If you must point KUI at a literal private address, set
-    # KUI_ALLOW_PRIVATE_UPSTREAMS=true -- and set it deliberately, in the process environment where
-    # an auditor can see it, which is why it is not a key in this file.
+    # here is a way to read a private network through KUI. DNS names are not resolved during config
+    # validation, but their resolved IPs are checked when connecting. This local demo's backend
+    # explicitly sets KUI_ALLOW_PRIVATE_UPSTREAMS=true in Compose; production keeps strict defaults.
+    # The switch relaxes the address policy, not TLS verification. See docs/operations/deployment.md.
     services:
       cluster:
         url: "http://kui-cluster.kui.svc.cluster.local:8080"

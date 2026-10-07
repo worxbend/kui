@@ -101,6 +101,21 @@ export function KsqlResult(props: KsqlResultProps): JSX.Element {
         </p>
       </Show>
 
+      <Show when={props.region.kind === "pending" ? props.region : undefined}>
+        {(state) => (
+          <section role="status" data-testid="ksql-result-pending">
+            <Banner
+              tone="warning"
+              message="Pending — the server accepted the statement, but completion is unknown. Do not resubmit it: check the command status on the ksqlDB server first."
+            />
+            <Show when={state().message}>{(message) => <p>{message()}</p>}</Show>
+            <Show when={state().commandId}>
+              {(id) => <p>Command ID: <code>{id()}</code></p>}
+            </Show>
+          </section>
+        )}
+      </Show>
+
       <Show when={props.region.kind === "status" ? props.region : undefined}>
         {(state) => (
           <>

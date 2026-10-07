@@ -144,7 +144,8 @@ object ClusterBootstrap {
       // cluster whose address is wrong must not delay - or prevent - the start of the other nine.
       metrics <- Resource.eval(AdminMetrics.otel[F](telemetry))
       pool <- AdminClientPool.resource[F](metrics)
-      clients <- ClusterAdminClients.resource[F](pool, logger)
+      clients <- ClusterAdminClients
+        .resource[F](pool, logger, resolve = Some(id => registry.resolve(id).map(_.toOption)))
       // The sweeper takes the pool directly rather than going through `libs/kafka`'s `ClusterAdmin`:
       // `describeTopics` is a topic call and that port is the cluster context's, so the call shape is
       // local while the client, the timeouts and the metrics stay shared. See `KafkaPartitionSweeper`.
@@ -185,7 +186,10 @@ object ClusterBootstrap {
       // read: it is a bounded yes/no with its own five-second timeout, and inheriting the read path's
       // minute would make the button useless on exactly the address it exists to diagnose.
       probe = ClusterProbeUseCase.make[F](
-        new ConnectivityProbeAdapter[F](KafkaClusterAdmin[F](pool), clients, logger),
+        new ConnectivityProbeAdapter[F](
+          AdminClientPool.resource[F](metrics).map(KafkaClusterAdmin[F](_)),
+          logger
+        ),
         logger
       )
     } yield Bootstrapped(

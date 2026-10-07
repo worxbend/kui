@@ -3,17 +3,18 @@ package kui.identity.app
 import cats.Parallel
 import cats.effect.kernel.{Async, Resource}
 import cats.syntax.all.*
+import fs2.io.file.Files
 import org.typelevel.log4cats.{LoggerFactory, StructuredLogger}
-import sttp.client4.httpclient.fs2.HttpClientFs2Backend
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.interceptor.Interceptor
 
-import kui.config.store.{ConfigStore, FileConfigStore}
-import kui.config.{AuthConfig, AuthType, StoreConfig}
+import kui.config.store.{ConfigStore, ConfigStoreResource}
+import kui.config.{AuthConfig, AuthType, HttpTlsConfig, StoreConfig, UrlPolicy}
 import kui.contracts.capability.ServiceCapabilities
 import kui.http.ProcessLoggerFactory
 import kui.http.health.ReadinessCheck
 import kui.http.principal.PrincipalVerification
+import kui.http.upstream.HttpTls
 import kui.identity.api.IdentityApi
 import kui.identity.application.*
 import kui.identity.domain.{AuthMode, UserDirectory}
@@ -58,8 +59,8 @@ final case class IdentityServer[F[_]](
   *     accounts whose password has since been changed. Passwords are PBKDF2 (ADR-015 Amendment 1);
   *   - **oidc**: an HTTP relying party over the configured provider, or — when the mode is on and the
   *     provider block is absent, which the configuration loader already refuses — a port that says so;
-  *   - **disabled**: both of the above are built and neither is reachable, because both use cases refuse a
-  *     mode they are not in. Building them anyway keeps one code path rather than two.
+  *   - **disabled**: use cases still refuse modes they are not in, but no password store is acquired. Only
+  *     form authentication owns password overrides; OIDC also has no dependency on their store.
   */
 object IdentityWiring {
 
@@ -88,8 +89,13 @@ object IdentityWiring {
       audit = LoggingAuthAuditSink.make[F](logger)
       hasher <- Resource.eval(Pbkdf2PasswordHasher.make[F])
       configured <- Resource.eval(ConfiguredUserDirectory.make[F](auth.users, logger))
-      metadata <- configStoreOf[F](store, logger)
-      users: UserDirectory[F] = StoredUserDirectory.make[F](configured, metadata, logger)
+      users <- auth.authType match {
+        case AuthType.Form =>
+          configStoreOf[F](store, logger).map(metadata =>
+            StoredUserDirectory.make[F](configured, metadata, logger)
+          )
+        case AuthType.Disabled | AuthType.Oidc => Resource.pure[F, UserDirectory[F]](configured)
+      }
       challenges <- Resource.eval(SingleUseTokens.make[F, UserName]())
       pending <- Resource.eval(SingleUseTokens.make[F, PendingLogin]())
       oidc <- oidcOf[F](auth, logger)
@@ -152,31 +158,14 @@ object IdentityWiring {
       }
     )
 
-  /** Where a changed password is kept.
-    *
-    * It mirrors the cluster service's choice — Kafka, a directory, or nowhere — with one deliberate
-    * simplification: this service does not create or validate the store's topics. The cluster service does
-    * that at start-up in every deployment that has a store, and two processes racing to create the same
-    * topics is a failure mode with no upside. A deployment whose Kafka store has not been bootstrapped yet
-    * therefore behaves here as one with no store: the change is refused, with a message naming what to
-    * configure.
-    */
-  private def configStoreOf[F[_]: {Async, LoggerFactory}](
+  /** Password overrides use the same bootstrapped, encrypted store lifecycle as other metadata owners. */
+  private[app] def configStoreOf[F[_]: {Async, Parallel, LoggerFactory}](
       store: StoreConfig,
       logger: StructuredLogger[F]
-  ): Resource[F, ConfigStore[F]] =
-    store.dir match {
-      case Some(dir) => FileConfigStore.resource[F](dir)
-      case None =>
-        Resource.eval(
-          logger
-            .info(
-              "identity: no local metadata store is configured, so a changed password has nowhere to " +
-                "live; set kui.store.dir to allow password changes"
-            )
-            .as(ConfigStore.empty[F])
-        )
-    }
+  ): Resource[F, ConfigStore[F]] = {
+    given Files[F] = Files.forAsync[F]
+    ConfigStoreResource.resource[F](store, "kui-identity", logger)
+  }
 
   private def oidcOf[F[_]: Async](
       auth: AuthConfig,
@@ -186,8 +175,12 @@ object IdentityWiring {
       case Some(provider) =>
         // The HTTP client exists only in a deployment that configured a provider. A KUI with
         // authentication disabled — the default — opens no connection pool it will never use.
-        HttpClientFs2Backend
-          .resource[F]()
+        Resource
+          .eval(Async[F].delay(UrlPolicy.fromEnv(sys.env)))
+          .flatMap(policy =>
+            HttpTls
+              .resource[F](HttpTlsConfig.Default, policy)
+          )
           .flatMap(backend => OidcRelyingParty.resource[F](provider, backend, logger))
       case None => Resource.pure[F, OidcProviderPort[F]](UnconfiguredOidcProvider[F])
     }

@@ -17,6 +17,7 @@ import kui.config.{
   AuthConfig,
   ClusterConfig,
   ConsumersConfig,
+  KuiConfig,
   MetricsConfig,
   StoreConfig,
   StreamingConfig,
@@ -216,6 +217,8 @@ object AllInOneWiring {
   ): Resource[F, ServiceClients[F]] =
     for {
       clusterService <- ClusterWiring.make[F](cluster, telemetry, principals, logger)
+      collectorProfiles <- InProcessClusterProfiles.resource(clusterService, telemetry, principals, logger)
+      collectorConfig = KuiConfig.Default.copy(metrics = metrics, alerts = alerts, store = store, rbac = rbac)
       // The topic service reads the same `kui.clusters[]` this process already loaded rather than
       // asking the cluster service for it over HTTP (ADR-046's profile client). One process calling
       // itself over a socket to read a list it is holding in memory would add a listener, a timeout
@@ -283,16 +286,11 @@ object AllInOneWiring {
         principals,
         logger
       )
-      // The metrics service, which in every deployment there is today measures nothing: this build has
-      // no collector, so every cluster reports `not_configured` and the dashboard's metrics cards keep
-      // their written "not measured" sentence. It is wired anyway, for the reason the schema service is
-      // — "this deployment has no metrics source" is an answer the browser needs from a running service,
-      // and a service missing from the process reads instead as a service that is down.
-      metricsService <- MetricsWiring.make[F](clusters, metrics, telemetry, principals, logger)
-      // The alerts service, and the ninth. It reads the same `kui.clusters[]` the topic, consumer and
-      // message services read, for the same reason: this process is holding the list, and calling itself
-      // over a socket to read it would add a listener, a timeout and a failure mode to a lookup that
-      // cannot fail.
+      // Both collectors consume the cluster service's resolved profiles (including stored overlays),
+      // not the configuration bootstrap list. The shared client owns its change subscription and is
+      // released after both services, so replacement/removal reaches every running collector.
+      metricsService <- MetricsWiring
+        .fromProfiles[F](collectorProfiles, collectorConfig, telemetry, principals, logger)
       //
       // It takes `rbac` because an acknowledgement is a mutation -- `AlertsAcknowledge` on
       // `Resource.Alerts` -- and is refused on a read-only cluster. It takes no cursor key: an
@@ -302,11 +300,9 @@ object AllInOneWiring {
       // And the line before it, which is the only thing in this process that can tell a tuned deployment
       // from an untuned one. See `logAlertThresholds`.
       _ <- Resource.eval(logAlertThresholds[F](logger, alerts))
-      alertsService <- AlertsWiring.make[F](
-        clusters,
-        alerts,
-        store,
-        rbac,
+      alertsService <- AlertsWiring.fromProfiles[F](
+        collectorProfiles,
+        collectorConfig,
         telemetry,
         principals,
         logger

@@ -120,16 +120,26 @@ final class InMemoryAlertStore[F[_]: Async] private (
 
   def record(cluster: ClusterId, evaluation: Evaluation, at: Instant): F[Unit] = {
     val resolved = evaluation.resolved.toSet
-    val refreshed = evaluation.refreshed.toSet
+    val refreshed = evaluation.refreshed.map(event => event.id -> event).toMap
 
     state
       .update { clusters =>
         val held = clusters.getOrElse(cluster, ClusterAlerts.empty)
 
         val updated = held.events.map { event =>
-          if resolved.contains(event.id) then event.resolvedBy(at, AlertResolutionKind.Cleared, None)
-          else if refreshed.contains(event.id) then event.seenAt(at)
-          else event
+          if !event.isOpen then event
+          else if resolved.contains(event.id) then event.resolvedBy(at, AlertResolutionKind.Cleared, None)
+          else
+            refreshed
+              .get(event.id)
+              .fold(event)(latest =>
+                event.copy(
+                  severity = latest.severity,
+                  title = latest.title,
+                  detail = latest.detail,
+                  lastSeenAt = at
+                )
+              )
         }
 
         clusters.updated(
@@ -146,7 +156,7 @@ final class InMemoryAlertStore[F[_]: Async] private (
         updates
           .publish1(cluster)
           .void
-          .whenA(evaluation.opened.nonEmpty || evaluation.resolved.nonEmpty)
+          .whenA(evaluation.opened.nonEmpty || evaluation.resolved.nonEmpty || evaluation.refreshed.nonEmpty)
       )
   }
 

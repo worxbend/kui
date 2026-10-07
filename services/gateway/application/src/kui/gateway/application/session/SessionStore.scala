@@ -32,6 +32,14 @@ trait SessionStore[F[_]] {
   /** Removes a session outright. What `POST /api/v1/auth/logout` calls. */
   def delete(id: SessionId): F[Unit]
 
+  /** Invalidates a pre-login id and remembers its retirement for a bounded grace period. Late requests must
+    * not mint a cookie that overwrites the replacement authenticated session.
+    */
+  def retire(id: SessionId, now: Instant): F[Unit]
+
+  /** Retirement is not expiry: expired sessions can recover immediately, retired ids must wait. */
+  def isRetired(id: SessionId, now: Instant): F[Boolean]
+
   /** Removes every session that has expired as of `now`, and answers how many were removed.
     *
     * A caller-invoked sweep rather than a lazy one only on `get`, because a store nobody reads from for an

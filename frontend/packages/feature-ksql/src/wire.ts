@@ -177,7 +177,7 @@ export type KsqlRow = readonly KsqlCell[];
 export interface StatementResult {
   readonly statement: string;
   readonly shape: StatementShape;
-  readonly outcome: "rows" | "status";
+  readonly outcome: "rows" | "status" | "pending";
   readonly columns: readonly string[];
   readonly rows: readonly KsqlRow[];
   /** The server's own sentence for a status answer. Absent on a rows answer. */
@@ -289,7 +289,7 @@ export function decodePlan(payload: unknown): StatementPlan | Unreadable {
 }
 
 /**
- * A finished statement's answer, or {@link Unreadable}.
+ * A statement receipt, including accepted-but-pending execution, or {@link Unreadable}.
  *
  * An `outcome` this build has never seen is refused rather than folded into `status`: a screen that
  * drew an unknown answer as "the server said something" would be putting KUI's words over the
@@ -306,7 +306,7 @@ export function decodeResult(payload: unknown): StatementResult | Unreadable {
 
   const outcome = asString(root["outcome"]);
   const message = nonBlank(asString(root["message"]));
-  if (outcome !== "rows" && outcome !== "status") return Unreadable;
+  if (outcome !== "rows" && outcome !== "status" && outcome !== "pending") return Unreadable;
   if (outcome === "status" && message === undefined) return Unreadable;
 
   const rows = asArray(root["rows"]);

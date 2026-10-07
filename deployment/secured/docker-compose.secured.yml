@@ -114,6 +114,8 @@ services:
     ports:
       - "18081:8080"
     environment:
+      # Local demo only: allow private-network integrations; TLS verification is unchanged.
+      KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
       KUI_TELEMETRY_LOGFORMAT: text
       KUI_PRINCIPAL_KEY: "e2e-only-not-a-real-key-0123456789abcdef0123456789abcdef"
       KUI_ANALYTICS_PASSWORD: kui-scram-secret

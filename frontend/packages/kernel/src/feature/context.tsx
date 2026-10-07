@@ -121,11 +121,16 @@ export interface KuiContextValue {
    * `name` narrows it to one object, where the server grants per-object permissions — a single
    * topic, a single connector. Omitted, it asks about the resource as a whole.
    *
-   * Answers `true` while the session is still settling, deliberately: refusing everything during
-   * start-up would flash a screen full of disabled controls on every load, and the server is the
-   * authority in any case — this only decides whether a control explains itself instead of failing.
+   * Unknown or expired sessions fail closed. The server remains authoritative on every request.
    */
   readonly permits: (action: KnownAction, name?: string) => boolean;
+  /**
+   * Reactive cluster-write policy: read-only, permission or unknown-state reason; undefined allows.
+   * Always checks the supplied cluster (including a copy destination), not the selected cluster.
+   * Optional for isolated tests/stories: consumers use their existing local checks ONLY when this
+   * function is absent. Do not use `writeBlocked?.(...) ?? fallback`: undefined means allowed.
+   */
+  readonly writeBlocked?: (clusterId: string, action: KnownAction, name?: string) => string | undefined;
   readonly paths: KuiPaths;
   /** Report a call's outcome. `undefined` means it succeeded. */
   readonly report: (scope: CallScope, failed: boolean) => void;

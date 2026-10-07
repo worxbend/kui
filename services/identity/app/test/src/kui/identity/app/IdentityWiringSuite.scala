@@ -1,11 +1,17 @@
 package kui.identity.app
 
+import java.time.Instant
+
+import cats.data.NonEmptyList
 import cats.effect.IO
 
-import kui.config.{AuthConfig, AuthType, OidcConfig}
+import kui.config.{AuthConfig, AuthType, OidcConfig, StoreConfig, StoreKafkaConfig}
 import kui.identity.domain.AuthMode
 import kui.kernel.Secret
+import kui.kernel.cluster.{BootstrapServers, ClusterSecurity}
+import kui.observability.Telemetry
 import kui.security.rbac.RbacPolicy
+import kui.security.{JwsPrincipalCodec, SigningKey}
 import kui.testkit.KuiIOSuite
 import kui.testkit.fakes.FakeStructuredLogger
 
@@ -18,6 +24,76 @@ import kui.testkit.fakes.FakeStructuredLogger
   * so.
   */
 final class IdentityWiringSuite extends KuiIOSuite {
+
+  private val kafkaWithoutEncryption = StoreConfig.Default.copy(kafka =
+    Some(
+      StoreKafkaConfig(BootstrapServers.unsafe("localhost:1"), ClusterSecurity.Plaintext, Map.empty)
+    )
+  )
+
+  private val signingKey = SigningKey("test", Secret(Array.fill[Byte](32)(7)), Instant.EPOCH)
+  private val codec = JwsPrincipalCodec.make[IO](NonEmptyList.one(signingKey), "kui-gateway").toOption.get
+
+  List(AuthType.Disabled, AuthType.Oidc).foreach { mode =>
+    test(s"complete $mode wiring does not acquire the Kafka password store") {
+      val auth = authConfig(mode, Option.when(mode == AuthType.Oidc)(provider("Corporate SSO")))
+      FakeStructuredLogger[IO].flatMap { logger =>
+        IdentityWiring
+          .make[IO](
+            auth,
+            RbacPolicy.Disabled,
+            kafkaWithoutEncryption,
+            Telemetry.noop[IO],
+            codec,
+            logger
+          )
+          .use { server =>
+            server.capabilities.map { _ =>
+              assert(server.routes.nonEmpty)
+              assert(server.interceptors.nonEmpty)
+              assert(server.readiness.nonEmpty)
+            }
+          }
+      }
+    }
+  }
+
+  test("complete form wiring still acquires the Kafka password store and requires encryption") {
+    FakeStructuredLogger[IO].flatMap { logger =>
+      IdentityWiring
+        .make[IO](
+          authConfig(AuthType.Form),
+          RbacPolicy.Disabled,
+          kafkaWithoutEncryption,
+          Telemetry.noop[IO],
+          codec,
+          logger
+        )
+        .use(_ => IO.unit)
+        .attempt
+        .map { result =>
+          assert(result.left.exists(_.getMessage.contains("encryption")), result.toString)
+        }
+    }
+  }
+
+  test("configured Kafka credentials store is selected and refuses missing encryption") {
+    val kafka = kui.config.StoreKafkaConfig(
+      kui.kernel.cluster.BootstrapServers.unsafe("localhost:1"),
+      kui.kernel.cluster.ClusterSecurity.Plaintext,
+      Map.empty
+    )
+    FakeStructuredLogger[IO].flatMap { logger =>
+      given org.typelevel.log4cats.LoggerFactory[IO] = kui.http.ProcessLoggerFactory.of(logger)
+      IdentityWiring
+        .configStoreOf[IO](kui.config.StoreConfig.Default.copy(kafka = Some(kafka)), logger)
+        .use(_ => IO.unit)
+        .attempt
+        .map { result =>
+          assert(result.left.exists(_.getMessage.contains("encryption")), result.toString)
+        }
+    }
+  }
 
   private def authConfig(authType: AuthType, oidc: Option[OidcConfig] = None): AuthConfig =
     AuthConfig(authType = authType, users = Nil, oidc = oidc)
