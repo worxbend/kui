@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@kui/api": "workspace:*",
-    "solid-js": "2.0.0-rc.6",
+    "solid-js": "2.0.0-rc.13",
     "@solidjs/web": "2.0.0-rc.6"
   },
   "devDependencies": {
