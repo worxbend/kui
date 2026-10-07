@@ -17,7 +17,7 @@ name: kui-allinone
 
 services:
   kui:
-    image: kui-allinone:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-allinone:${KUI_VERSION:-0.1.0}
     # Built from source: KUI's images are not published to a registry, so without a `build:` stanza
     # `docker compose up` fails immediately — the image name resolves to nothing and the registry
     # has never heard of it. The context is the repository root because the build stage runs
@@ -60,7 +60,7 @@ services:
   # nginx serves /ui/ and proxies /api/ to the container above, so the two share an origin — see
   # ../frontend/README.md for why that one `proxy_pass` is worth a second container.
   kui-frontend:
-    image: kui-frontend:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-frontend:${KUI_VERSION:-0.1.0}
     # As above: Mill never builds the browser bundle, so this image is not one of the ones
     # `./mill deployment.docker.__.build` produces and Compose has to build it.
     build:
@@ -72,7 +72,7 @@ services:
     environment:
       KUI_GATEWAY_URL: http://kui:8080
       KUI_BASE_PATH: ${KUI_BASE_PATH:-}
-      KUI_BUILD_VERSION: ${KUI_VERSION:-0.1.0-SNAPSHOT}
+      KUI_BUILD_VERSION: ${KUI_VERSION:-0.1.0}
     depends_on:
       kui:
         # nginx resolves `kui` once at start, so a backend that is not there yet is a 502 for ever

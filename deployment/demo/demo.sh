@@ -34,7 +34,7 @@ REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
 COMPOSE_FILE="${HERE}/docker-compose.demo.yml"
 CERTS_DIR="${REPO_ROOT}/deployment/secured/certs"
 
-KUI_VERSION="${KUI_VERSION:-0.1.0-SNAPSHOT}"
+KUI_VERSION="${KUI_VERSION:-0.1.0}"
 KUI_IMAGE="kui-allinone:${KUI_VERSION}"
 
 # The defaults are deliberately NOT 8080 and 9092. The quickstart owns those, and somebody who wants

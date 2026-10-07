@@ -47,7 +47,7 @@ services:
   # process serves both (ADR-019). See ../frontend/README.md.
   # ===============================================================================================
   kui-frontend:
-    image: kui-frontend:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-frontend:${KUI_VERSION:-0.1.0}
     # Built from source, because the frontend image is not one of the images
     # `./mill deployment.docker.__.build` produces — Mill never builds the browser bundle, which is
     # the whole point of the two halves being separable. Without this stanza the first
@@ -64,7 +64,7 @@ services:
       # curl against the API is possible.
       KUI_GATEWAY_URL: http://kui-gateway:8080
       KUI_BASE_PATH: ${KUI_BASE_PATH:-}
-      KUI_BUILD_VERSION: ${KUI_VERSION:-0.1.0-SNAPSHOT}
+      KUI_BUILD_VERSION: ${KUI_VERSION:-0.1.0}
     depends_on:
       kui-gateway:
         # A hard gate, unlike every `depends_on` below. nginx resolves `kui-gateway` once at start,
@@ -98,7 +98,7 @@ services:
   # could reach. Its port is published so that a `curl` against the API is possible from the host;
   # the browser reaches it through `kui-frontend` above.
   kui-gateway:
-    image: kui-gateway:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-gateway:${KUI_VERSION:-0.1.0}
     container_name: kui-gateway
     command: ["--config", "/etc/kui/kui.yaml"]
     ports:
@@ -173,7 +173,7 @@ services:
   # from inside this network, and only by the gateway, which is the same rule ARCHITECTURE.md §14
   # states for a real deployment.
   kui-cluster:
-    image: kui-cluster:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-cluster:${KUI_VERSION:-0.1.0}
     container_name: kui-cluster
     command: ["--config", "/etc/kui/kui-cluster.yaml"]
     environment:
@@ -209,7 +209,7 @@ services:
   # `kui-service.yaml`, because they read the same settings, while the cluster service has its own
   # for the metadata-store section nobody else reads.
   kui-topic:
-    image: kui-topic:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-topic:${KUI_VERSION:-0.1.0}
     container_name: kui-topic
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
@@ -238,7 +238,7 @@ services:
 
   # The message service: browsing records, producing, resending and purging.
   kui-message:
-    image: kui-message:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-message:${KUI_VERSION:-0.1.0}
     container_name: kui-message
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
@@ -267,7 +267,7 @@ services:
 
   # The consumer service: consumer groups, their lag and the offset reset.
   kui-consumer:
-    image: kui-consumer:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-consumer:${KUI_VERSION:-0.1.0}
     container_name: kui-consumer
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
@@ -309,7 +309,7 @@ services:
   # for a deployment with no clusters at all, and that answer -- correct as it was -- is a different
   # thing again from the 404 a missing container gave.
   kui-schema:
-    image: kui-schema:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-schema:${KUI_VERSION:-0.1.0}
     container_name: kui-schema
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
@@ -354,7 +354,7 @@ services:
   # service that answers honestly and measures nothing is a different thing from a service that is
   # not there, and only one of them is true of this build.
   kui-metrics:
-    image: kui-metrics:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-metrics:${KUI_VERSION:-0.1.0}
     container_name: kui-metrics
     command: ["--config", "/etc/kui/kui-service.yaml"]
     # ORDERED AFTER THE EXPORTER, AND THIS IS HEADROOM RATHER THAN A REPAIR. Say which it is,
@@ -429,7 +429,7 @@ services:
   # not constants, and this stack sets them explicitly rather than by default so that the file
   # shows an operator what there is to set.
   kui-alerts:
-    image: kui-alerts:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-alerts:${KUI_VERSION:-0.1.0}
     container_name: kui-alerts
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
@@ -490,7 +490,7 @@ services:
   # position beside `kafka-connect` and also has none. If a ksqlDB screen is opened while the
   # server is still starting, the section says the upstream did not answer, which is true.
   kui-ksql:
-    image: kui-ksql:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-ksql:${KUI_VERSION:-0.1.0}
     container_name: kui-ksql
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:
@@ -520,7 +520,7 @@ services:
       start_period: 20s
 
   kui-connect:
-    image: kui-connect:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-connect:${KUI_VERSION:-0.1.0}
     container_name: kui-connect
     command: ["--config", "/etc/kui/kui-service.yaml"]
     environment:

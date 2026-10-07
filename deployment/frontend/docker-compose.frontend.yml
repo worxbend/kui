@@ -31,7 +31,7 @@ services:
     build:
       context: ../..
       dockerfile: deployment/frontend/Dockerfile
-    image: kui-frontend:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-frontend:${KUI_VERSION:-0.1.0}
     # Named for the stack it joins rather than for the image it runs. `deployment/compose/` now has
     # a `kui-frontend` container of its own, and two stacks that collide over a container name --
     # rather than over a port -- is a confusing way to find that out.
@@ -48,7 +48,7 @@ services:
       KUI_BASE_PATH: ${KUI_BASE_PATH:-}
       # Shown on the settings page and quoted in bug reports. "unknown" is what an unset one says,
       # which is at least honest — a report naming no build is a report nobody can place.
-      KUI_BUILD_VERSION: ${KUI_VERSION:-0.1.0-SNAPSHOT}
+      KUI_BUILD_VERSION: ${KUI_VERSION:-0.1.0}
     depends_on:
       kui:
         # nginx resolves `kui` at start-up, so a gateway that is not there yet is a 502 on the first

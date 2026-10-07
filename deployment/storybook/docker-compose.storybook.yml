@@ -27,7 +27,7 @@ services:
       # resolve the pnpm workspace links between the packages.
       context: ../..
       dockerfile: deployment/storybook/Dockerfile
-    image: kui-storybook:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-storybook:${KUI_VERSION:-0.1.0}
     container_name: kui-storybook
     ports:
       # 6006 is Storybook's own convention, so the URL is the one everybody already expects. The

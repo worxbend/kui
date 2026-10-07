@@ -43,7 +43,7 @@ if [[ "${1:-}" == "--with-auth" ]]; then
   shift
 fi
 
-KUI_VERSION="${KUI_VERSION:-0.1.0-SNAPSHOT}"
+KUI_VERSION="${KUI_VERSION:-0.1.0}"
 KUI_IMAGE="kui-allinone:${KUI_VERSION}"
 KUI_PORT="${KUI_PORT:-8080}"
 

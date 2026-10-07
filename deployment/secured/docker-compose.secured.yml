@@ -100,7 +100,7 @@ services:
     restart: unless-stopped
 
   kui:
-    image: kui-allinone:0.1.0-SNAPSHOT
+    image: kui-allinone:0.1.0
     # Built from source: KUI's images are not published to a registry, so without a `build:` stanza
     # `docker compose up` fails immediately — the image name resolves to nothing and the registry
     # has never heard of it. The context is the repository root because the build stage runs
@@ -152,7 +152,7 @@ services:
   # and the CSRF header behave as they do when one process serves both (ADR-019). Nothing here
   # touches the broker: the SASL_SSL connection under test is KUI's, not the browser's.
   frontend:
-    image: kui-frontend:0.1.0-SNAPSHOT
+    image: kui-frontend:0.1.0
     build:
       context: ../..
       dockerfile: deployment/frontend/Dockerfile
@@ -163,7 +163,7 @@ services:
       - "18091:8082"
     environment:
       KUI_GATEWAY_URL: http://kui:8080
-      KUI_BUILD_VERSION: 0.1.0-SNAPSHOT
+      KUI_BUILD_VERSION: 0.1.0
     depends_on:
       kui:
         # nginx resolves `kui` once at start, so a KUI that is not there yet is a 502 for ever

@@ -69,7 +69,7 @@ python3 scripts/test-deployment.py DemoTopologyPolicy QuickstartBindings ToolPin
 
 ## Build one release
 
-Backend images are deterministic Mill builds tagged `0.1.0-SNAPSHOT` in the current source tree.
+Backend images are deterministic Mill builds tagged `0.1.0` in the current source tree.
 Build only the all-in-one backend with:
 
 ```bash
@@ -87,7 +87,7 @@ Build the frontend from the same clean commit:
 ```bash
 docker build \
   --file deployment/frontend/Dockerfile \
-  --tag kui-frontend:0.1.0-SNAPSHOT \
+  --tag kui-frontend:0.1.0 \
   .
 ```
 

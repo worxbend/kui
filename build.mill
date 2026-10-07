@@ -838,7 +838,7 @@ object libs extends Module {
   * filesystem: the only way a Scala.js program can know which build it is, is for the build to
   * compile the answer in (see `uiKernel`'s `BuildInfo`).
   */
-def kuiVersion: T[String] = Task { "0.1.0-SNAPSHOT" }
+def kuiVersion: T[String] = Task { "0.1.0" }
 
 /** When this build ran, as an RFC 3339 instant in UTC.
   *

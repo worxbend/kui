@@ -450,7 +450,7 @@ services:
   # isolation between processes; a newcomer does not need three containers to see the product.
   # ---------------------------------------------------------------------------------------------
   kui:
-    image: kui-allinone:${KUI_VERSION:-0.1.0-SNAPSHOT}
+    image: kui-allinone:${KUI_VERSION:-0.1.0}
     # Built from source, because KUI's images are not published to a registry yet. Without this
     # stanza `docker compose up` fails on the very first thing it does: the image name resolves to
     # nothing, Docker asks the registry, and the registry has never heard of it. The quickstart's
