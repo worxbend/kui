@@ -15,7 +15,7 @@ KUI is a modern web console for operating Apache Kafka. Explore records, watch b
 consumer lag, manage topics and schemas, run Kafka Connect and ksqlDB, and follow live cluster
 health without bouncing between five different tools.
 
-[Quick start](#quick-start) · [Features](#everything-in-one-control-room) · [Showcase](#showcase) · [Gallery](#the-captured-product-tour) · [Deployment](#built-to-run-your-way)
+[Website & documentation](https://worxbend.github.io/kui/) · [Quick start](#quick-start) · [Features](#everything-in-one-control-room) · [Showcase](#showcase) · [Gallery](#the-captured-product-tour) · [Deployment](#built-to-run-your-way)
 
 </div>
 
@@ -141,7 +141,7 @@ GIF automatically.
 Docker with the Compose plugin is the only prerequisite.
 
 ```bash
-git clone https://github.com/w0rxbend/kui.git
+git clone https://github.com/worxbend/kui.git
 cd kui
 deployment/quickstart/quickstart.sh
 ```

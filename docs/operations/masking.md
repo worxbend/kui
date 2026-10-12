@@ -7,7 +7,7 @@ sees `***********************.com` where the record says `marta.zielinska@exampl
 
 This page is about `kui.clusters.<n>.masking[]` — what it does, what it does not do, and the
 mistakes it cannot catch for you. The key-by-key reference is in
-[the configuration guide](configuration.md#kuiclustersnmasking--which-fields-never-leave-the-service-in-full).
+[the worked configuration below](#what-it-is-in-one-file).
 
 ## What it is, in one file
 
