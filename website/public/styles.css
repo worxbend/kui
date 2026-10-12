@@ -1868,10 +1868,10 @@ dialog::backdrop {
 }
 @media (max-width: 600px) {
   .capability-strip p {
-    font-size: 18px;
-    gap: 12px;
+    font-size: clamp(14px, 4.5vw, 18px);
+    gap: clamp(6px, 2vw, 10px);
   }
   .capability-strip p span {
-    font-size: 18px;
+    font-size: inherit;
   }
 }

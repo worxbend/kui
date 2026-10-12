@@ -181,6 +181,24 @@ await fs.writeFile(
     2,
   ),
 );
+for (const width of [320, 360, 600, 1024]) {
+  await page.setViewportSize({ width, height: 900 });
+  for (const route of [
+    "",
+    "features/",
+    "screenshots/",
+    "docs/quickstart/",
+    "docs/run-images/",
+  ]) {
+    await page.goto(origin + route);
+    if (
+      await page.evaluate(
+        () => document.documentElement.scrollWidth > innerWidth,
+      )
+    )
+      throw Error(`Overflow at ${width}px: ${route}`);
+  }
+}
 await page.emulateMedia({ reducedMotion: "reduce" });
 if (
   (await page.evaluate(

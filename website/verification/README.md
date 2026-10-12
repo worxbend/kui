@@ -15,7 +15,9 @@ The KUI application code and integrations were not changed.
   gallery filtering, screenshot enlargement and Escape dismissal, clipboard copying,
   mobile navigation, the mobile guide selector, and reduced motion.
 - Viewports: 1440×1000 desktop, 768×1024 tablet, and 390×844 mobile. No horizontal
-  page overflow in the checked routes. Horizontally scrolling code blocks remain intentional.
+  page overflow in the checked routes. Additional checks at 320, 360, 600, and 1024px
+  passed for the homepage, features, gallery, quickstart, and custom-image guide.
+  Horizontally scrolling code blocks remain intentional.
 - axe-core WCAG 2 A/AA and 2.1 AA checks: zero violations on the homepage, features,
   gallery, quickstart, consumers, production deployment, and metrics guide in both
   light and dark themes. The mobile quickstart also had zero violations.
