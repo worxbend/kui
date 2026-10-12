@@ -49,7 +49,7 @@
   "dependencies": {
     "@solidjs/router": "2.0.0-next.21",
     "@solidjs/web": "2.0.0-rc.6",
-    "solid-js": "2.0.0-rc.6"
+    "solid-js": "2.0.0-rc.13"
   },
   "kui": {
     "pinnedPrereleaseDependencies": {
