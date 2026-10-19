@@ -305,11 +305,28 @@ final class MetricsWiringSuite extends KuiIOSuite {
       log <- FakeStructuredLogger[IO]
       rates <- exporter(_ => exposition(124800.5)).use { serving =>
         wiring(metricsConfig(serving.url), UrlPolicy.Dev, log).use { server =>
-          IO.sleep(600.millis) *> throughputOf(server, quickstart).map(measuredRates)
+          // Polled rather than read once after a fixed sleep: on a loaded CI runner the first bucket can
+          // land after any fixed wait, and an early read then reports an empty list for a working wiring.
+          untilNonEmpty(throughputOf(server, quickstart).map(measuredRates), within = 10.seconds)
         }
       }
     } yield assertEquals(rates.distinct, List(124800.5), s"expected the served rate on the wire, got $rates")
   }
+
+  /** Reads until the list is non-empty or `within` has passed, and returns the last read either way, so a
+    * miss still fails on the assertion that names what was expected rather than on a bare timeout.
+    */
+  private def untilNonEmpty[A](read: IO[List[A]], within: FiniteDuration): IO[List[A]] =
+    IO.monotonic.flatMap { start =>
+      def loop: IO[List[A]] =
+        read.flatMap(values =>
+          IO.monotonic.flatMap(now =>
+            if values.nonEmpty || now - start >= within then IO.pure(values)
+            else IO.sleep(50.millis) *> loop
+          )
+        )
+      loop
+    }
 
   test("the collector applies the configured response byte ceiling") {
     val limit = MetricsSourceSettings.MinResponseBytes
