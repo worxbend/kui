@@ -7,6 +7,8 @@
 #   deployment/quickstart/quickstart.sh --with-auth   the same, but with a login and two roles
 #   deployment/quickstart/quickstart.sh down     stop everything and remove it, volumes included
 #   deployment/quickstart/quickstart.sh logs     follow the logs
+#   deployment/quickstart/quickstart.sh logs --no-follow
+#                                                print what has been logged so far and exit
 #   deployment/quickstart/quickstart.sh status   what is running
 #
 # The only thing this needs installed is Docker (with the Compose plugin, which Docker Desktop and
@@ -274,9 +276,20 @@ down() {
 case "${1:-up}" in
   up|"")   up ;;
   down)    down ;;
-  logs)    require_docker; compose logs -f ;;
+  logs)
+    require_docker
+    # `--no-follow` is for whoever is not a person at a terminal — CI collecting the logs after a
+    # failure. Following never ends on a stack that is still up (ksqlDB alone logs every ten
+    # seconds), so a step that followed ran until the job's own timeout cancelled it and reported a
+    # failed run as a cancelled one. The tail is per container and bounds what a chatty one prints.
+    if [[ "${2:-}" == "--no-follow" ]]; then
+      compose logs --no-color --timestamps --tail="${KUI_QUICKSTART_LOG_TAIL:-2000}"
+    else
+      compose logs -f
+    fi
+    ;;
   status)  require_docker; compose ps ;;
   *)
-    die "Usage: ${0} [--with-auth] [up|down|logs|status]"
+    die "Usage: ${0} [--with-auth] [up|down|logs [--no-follow]|status]"
     ;;
 esac

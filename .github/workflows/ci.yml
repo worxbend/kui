@@ -515,9 +515,13 @@ jobs:
             frontend/playwright-report/**
             frontend/test-results/**
           if-no-files-found: ignore
+      # `--no-follow`, and a step timeout behind it. Plain `logs` follows, and on a stack that is
+      # still up following never ends: this step used to run until the job's 25 minutes were spent,
+      # and GitHub then reported a failed browser run as a cancelled job.
       - name: The container logs, when it was the stack rather than the screen
         if: failure()
-        run: deployment/quickstart/quickstart.sh logs || true
+        timeout-minutes: 3
+        run: deployment/quickstart/quickstart.sh logs --no-follow || true
 
   # The distributed stack, and what happens to it when one service stops. Not a browser test — it
   # asserts that stopping one service degrades the others in the documented way — so it stays on the
