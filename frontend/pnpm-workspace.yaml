@@ -15,8 +15,15 @@ dedupePeerDependents: true
 
 # openapi-typescript's Redocly parser accepts this patch release without an API change. Keep the
 # generator off GHSA-2883-xcg3-v3hh until its parent raises its own lower bound.
+#
+# Solid 2.0.0-rc.6 pins seroval ~1.5.4, and every 1.5.x is open to GHSA-p6vx-979v-rg4c (critical)
+# and GHSA-jp82-f5mq-hwhp. Solid rc.8 itself moved to seroval ~1.6.7, but bumping Solid pulls
+# @solidjs/signals rc.15 and breaks the runtime (setConsoleFooter), so lift seroval alone until the
+# pinned prerelease Solid moves past rc.6 (see package.json kui.pinnedPrereleaseDependencies).
 overrides:
   js-yaml: 4.3.2
+  seroval: 1.6.10
+  seroval-plugins: 1.6.10
 
 minimumReleaseAgeExclude:
   - playwright-core@1.63.0

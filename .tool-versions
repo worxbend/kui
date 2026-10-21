@@ -13,6 +13,10 @@
 # below 22.13 ("This version of pnpm requires at least Node.js v22.13"). Nobody hit it because every
 # developer's machine happened to be on a newer Node than the file asks for — it only surfaced when
 # a container was built to exactly these versions, which is the whole reason to pin them. The
-# floor is now pnpm's, which is above Vite's, so one number satisfies both.
-nodejs 22.13.0
+# floor was then pnpm's, which is above Vite's, so one number satisfied both.
+#
+# It is now 22.19: jsdom's undici 8 declares `node >=22.19.0`, and from 8.10.2 it calls
+# `zlib.createZstdDecompress` at load time, which 22.13 lacks — every vitest worker crashed on start
+# and the test run reported 0% coverage instead of a failing test. 22.22.0 is the pinned patch.
+nodejs 22.22.0
 pnpm 11.25.0

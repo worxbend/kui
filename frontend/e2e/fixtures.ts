@@ -9,6 +9,7 @@
  */
 import { test as base, expect, type APIRequestContext } from "@playwright/test";
 import { API } from "../playwright.config";
+import { API_SESSION_STATE } from "./session";
 
 export const CLUSTER = "quickstart";
 
@@ -64,8 +65,9 @@ export const test = base.extend<{ api: KuiApi; browserHealth: void }>({
   api: async ({ playwright }, use) => {
     // Its own context, with its own cookie jar: the browser's session and this one are different
     // principals as far as the gateway is concerned, and sharing them would make a permissions test
-    // depend on whichever ran first.
-    const request = await playwright.request.newContext({ baseURL: API });
+    // depend on whichever ran first. Its jar is still seeded with a session minted once for the
+    // whole run (`session.ts` says why), and that session is not the browser's.
+    const request = await playwright.request.newContext({ baseURL: API, storageState: API_SESSION_STATE });
     const token = await signedIn(request);
 
     const json = async (response: Awaited<ReturnType<APIRequestContext["get"]>>) => {

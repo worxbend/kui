@@ -27,6 +27,7 @@
  * deployment nobody else can reproduce.
  */
 import { defineConfig, devices } from "@playwright/test";
+import { SESSION_STATE } from "./e2e/session";
 
 /** Where the interface is. The frontend image publishes 8090; `KUI_FRONTEND_PORT` overrides it. */
 const UI = process.env.KUI_E2E_UI ?? "http://localhost:8090";
@@ -60,6 +61,8 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
+    // The one gateway session `globalSetup` minted; `e2e/session.ts` says why every case shares it.
+    storageState: SESSION_STATE,
   },
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
