@@ -23,6 +23,7 @@ import { For, Show, createSignal, createUniqueId, type Component } from "solid-j
 import { ChartDataTable } from "./ChartDataTable.jsx";
 import { useElementSize } from "./elementSize.js";
 import { ABSENT } from "./format.js";
+import { createChartKeyDown } from "./keyboard.js";
 import { defaultTicks, isPlotEmpty, seriesMax, topRoundedRect, type PlotProps } from "./plot.js";
 import { toneColor } from "./tone.js";
 
@@ -83,30 +84,7 @@ export const BarChart: Component<BarChartProps> = props => {
     return Math.max(0, Math.min(1, value / m)) * plotHeight();
   };
 
-  const move = (delta: number): void => {
-    if (count() === 0) return;
-    const current = cursor();
-    const next = current === undefined ? (delta > 0 ? 0 : count() - 1) : current + delta;
-    setCursor(Math.max(0, Math.min(count() - 1, next)));
-  };
-
-  const onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === "ArrowRight") {
-      event.preventDefault();
-      move(1);
-    } else if (event.key === "ArrowLeft") {
-      event.preventDefault();
-      move(-1);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      setCursor(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      setCursor(count() - 1);
-    } else if (event.key === "Escape") {
-      setCursor(undefined);
-    }
-  };
+  const onKeyDown = createChartKeyDown(count, cursor, setCursor);
 
   const announcement = (): string => {
     const index = cursor();

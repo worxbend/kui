@@ -23,6 +23,7 @@ import { For, Show, createMemo, createSignal, createUniqueId, type Component } f
 import { ChartDataTable } from "./ChartDataTable.jsx";
 import { useElementSize } from "./elementSize.js";
 import { ABSENT } from "./format.js";
+import { createChartKeyDown } from "./keyboard.js";
 import { defaultTicks, isPlotEmpty, seriesMax, type PlotProps, type Series } from "./plot.js";
 import { toneAreaFill, toneColor } from "./tone.js";
 
@@ -94,30 +95,7 @@ export const LineChart: Component<LineChartProps> = props => {
     return lastRun?.[lastRun.length - 1];
   };
 
-  const move = (delta: number): void => {
-    if (count() === 0) return;
-    const current = cursor();
-    const next = current === undefined ? (delta > 0 ? 0 : count() - 1) : current + delta;
-    setCursor(Math.max(0, Math.min(count() - 1, next)));
-  };
-
-  const onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === "ArrowRight") {
-      event.preventDefault();
-      move(1);
-    } else if (event.key === "ArrowLeft") {
-      event.preventDefault();
-      move(-1);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      setCursor(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      setCursor(count() - 1);
-    } else if (event.key === "Escape") {
-      setCursor(undefined);
-    }
-  };
+  const onKeyDown = createChartKeyDown(count, cursor, setCursor);
 
   const announcement = (): string => {
     const index = cursor();
