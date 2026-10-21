@@ -170,3 +170,34 @@ Q01's critical advisory identifiers are [GHSA-p6vx-979v-rg4c](https://github.com
 - Should the historical architecture document be revised to the release scope, or clearly separated into current versus planned architecture?
 
 The build and required local tools/services are available. Baseline test failures invoke the module exclusions above, rather than the build/toolchain stop condition. Before the review commit, `./mill __.compile` and frontend `pnpm typecheck`, `pnpm build`, `pnpm test` passed again (104 files, 2,134 tests, 20 existing jsdom notices).
+
+## Phase 2 — Refactoring plan
+
+Priority is severity, then hotspot evidence, then effort, subject to eligibility. Q01–Q03 require behavior/dependency changes; Q04/Q10 identify failing safety nets. The higher-churn medium findings Q05/Q06 are excluded by those failures. Q07 is consequently the only safely addressable medium finding in this run. Q08/Q09 remain untouched because their files are outside the eligible batch.
+
+### B1 — Share chart keyboard navigation (Q07)
+
+- Goal: maintain one implementation of the three byte-identical, 25-line keyboard blocks without changing visible or accessible behavior.
+- Scope: five files maximum under `frontend/packages/kernel/src/components/charts/`: `keyboard.test.tsx`, `keyboard.ts`, `BarChart.tsx`, `Histogram.tsx`, `LineChart.tsx`. No public barrel/manifest changes.
+- Safety net first: add component-level characterization for both arrows and their bounds, Home/End, Escape, ignored keys, browser default prevention, changing data length, and empty data. Keep existing announcements, even where empty-data behavior differs between charts. Existing chart render/accessibility tests remain intact.
+- Named refactoring: **Extract Function**. Move the existing navigation closure to a kernel-internal factory receiving the current count/cursor/setter; replace each duplicate with a call. Preserve branch order, lazy reads, default prevention, and the empty-data index values.
+- Planned commits: `test(charts): characterize keyboard navigation`; then `refactor(charts): extract keyboard handler to remove duplication`. Each is independently verified and below 200 changed lines. Documentation stays in separate commits.
+- Before every commit: root `./mill __.compile`; frontend `pnpm typecheck`, `pnpm build`, `pnpm test`. These follow CI's independent backend/frontend build boundary; the entire frontend suite runs for each step. Backend sources remain unchanged and the full backend suite runs at baseline and final verification.
+- At batch end: frontend `pnpm lint:boundaries`, `pnpm bundle-shape`; root `./mill __.checkFormat`, `./mill __.fix --check`, `./mill checkArchitecture`. Final verification repeats the baseline checks, including coverage, Storybook accessibility, current-source images, browser integration and distributed smoke. No new failures are accepted relative to the recorded baseline; differences are investigated, not silently relabeled.
+- On a failing refactoring step: at most two fix-forward attempts, otherwise restore only that uncommitted step and document the failure. Never weaken existing tests or lint rules.
+
+### Deferred refactoring batches
+
+Q05 would extract a shell-internal search controller after tests for pending debounce and in-flight cancellation on disposal. Q06 would compute live/bounded row arrays separately and consolidate the six shared release/retain/state assignments, backed by the existing pause/budget/ordering tests. Neither batch runs while its module has baseline browser failures. No API or wire-format change is needed for either eventual refactoring.
+
+### Proposals requiring approval
+
+| Finding | Separate proposed change | Failing check or regression test that would prove the need |
+| --- | --- | --- |
+| Q01 | Assess reachability, upgrade affected dependencies to reviewed compatible releases, and regenerate excluded lockfiles. No upgrades here. | Existing `pnpm audit --audit-level high` fails; website `npm audit --prefix website --json` reports the markdown-it advisories. Require clean applicable audit gates plus compatibility/build/browser tests after upgrades. |
+| Q02 | Bind discovery issuer exactly to configured issuer before accepting provider metadata. | Add an OIDC fixture with discovery issuer B for configured issuer A and an otherwise valid token from B; expect typed refusal. Current discovery accepts B. Cover trailing-slash mismatch explicitly. |
+| Q03 | Decode supported groups shapes explicitly; convert malformed claims into typed refusal instead of an effect exception. | Add cases for scalar groups, comma-separated groups, empty arrays, and malformed values. Current Nimbus getter sequence throws on the first three; assert their intended group sets and typed refusal for malformed input. |
+| Q04 | Diagnose metrics/cancellation failures; change synchronization or product behavior only with established cause. | The four exact backend failures above are the reproductions. Require repeatability under controlled load before choosing a repair; do not increase timeouts merely to conceal failure. |
+| Q10 | Establish fixture session lifecycle/rate-limit policy and intended UI contracts; repair the harness or product in separate changes. | The 17 browser failures above reproduce current gaps. Add an explicit failed-sign-in fixture test that refuses non-2xx before protected reads; retain the real-session limiter test. The tooltip assertion must follow an explicitly chosen wording contract. |
+
+No new runtime/test dependency, schema change, API change, migration, CI edit, or excluded-path edit is planned. Questions and proposals are recorded for later decisions; none blocks the eligible behavior-preserving batch.
