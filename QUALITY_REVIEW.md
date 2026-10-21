@@ -5,10 +5,10 @@ Review date: 2026-10-22 (Europe/Kyiv). Baseline: `main`, `c2f245d1d142e31bdb051b
 ## Executive summary
 
 - The frontend dependency audit reports 28 vulnerability entries: 2 critical, 8 high, 14 moderate, and 4 low; the website audit flags markdown-it (two advisories, highest severity high). This is dependency evidence, not proof that every vulnerable operation is reachable in the shipped application.
-- OIDC discovery trusts the returned issuer without comparing it with the configured issuer; group-claim decoding throws for documented input shapes. Both require behavior changes and are proposals only.
-- The backend compiles; 4,909 of 4,913 tests pass. Browser integration has 17 failures, 86 passes, two skips and 23 tests not run after serial-group failures. Failing modules are excluded from refactoring.
-- Frontend typechecking, production build, all 2,134 unit tests, package boundaries, and the site's build/browser/accessibility checks pass.
-- Shared chart keyboard behavior is eligible for a tested extraction. Shell search ownership and browse-release bookkeeping are deferred because their modules have baseline browser failures. Contract, dependency and deployment changes remain proposals.
+- OIDC discovery trusts the returned issuer without comparing it with the configured issuer; group-claim decoding throws for documented input shapes. Characterization also found a histogram crash when its selected bucket disappears. These behavior changes remain proposals.
+- Final backend verification passes all 4,913 tests; four failed at baseline. Browser integration remains unstable: four final full-run failures differ from the 17 baseline failures, all show session-limit interference, and all pass unchanged in focused reruns. No repository-wide green verdict is claimed.
+- Final frontend typechecking, production build, all 2,144 unit tests, coverage, package boundaries, full Storybook/site accessibility checks and distributed recovery pass.
+- Three charts now share one tested keyboard handler, backed by ten new characterization cases. Shell search ownership and browse-release bookkeeping remain deferred because their modules failed baseline browser tests. Behavior and dependency changes remain proposals.
 
 ## Scope, toolchain, and baseline
 
@@ -146,6 +146,7 @@ Severity uses the requested categories: Critical includes confirmed bugs/securit
 | Q08 | Low | Duplicated tooling | `services/alerts/api/src/kui/alerts/api/OpenApiDocument.scala:29`, `services/topic/api/src/kui/topic/api/OpenApiDocument.scala:29` | The same file-write/check/exit driver is repeated across service generators. Diagnostic changes require multiple edits. It is short, deliberate, and guarded by generated-document checks. | Fowler Extract Function | Consider a shared build-tool driver in a separately reviewed change; retain exact exit codes and messages. | Medium: generator command compatibility | M | partial | manual |
 | Q09 | Low | Documentation reliability | `ARCHITECTURE.md:3`, `:72`, `:108` | Claims ADRs live in missing `docs/adr/`/`DECISIONS.md`, names a removed Scala E2E suite and a security service absent from the shipped catalog. Readers can mistake historical design for delivered functionality. | Accurate documentation | Update scope/status and obsolete links against current modules and CI. | Low | S | no | manual |
 | Q10 | High | Integration-test reliability | `frontend/e2e/fixtures.ts:26`, `frontend/e2e/messages.spec.ts:206`, `frontend/e2e/topics.spec.ts:284`; full set above | 17 baseline browser failures; authentication fixture reads a body without checking sign-in status, and 12 requests later fail with the session limiter. Serial groups leave 23 cases unexecuted. Other failures include missing screens and a text-contract mismatch. | Feathers: trustworthy safety net | Investigate fixture lifecycle/rate limits and individual UI contracts separately; do not weaken assertions or change product behavior in a refactoring. | High | M | yes | tool:Playwright; manual |
+| Q11 | Critical | Reliability / invalid cursor | `frontend/packages/kernel/src/components/charts/Histogram.tsx:240`, `:245` (after extraction; baseline `:262`, `:267`) | Discovered during characterization, before production edits: select the last bucket and shrink to fewer nonempty buckets. Tooltip effects cast a missing bucket and read `to`/`count`, throwing and halting unguarded reactive updates. | Validate collection-index lifetimes | Approval required: choose clear/clamp behavior when data removes the selected bucket, and guard tooltip reads. Current failure is preserved in a characterization test. | Medium: changes selection behavior | S | partial | tool:Vitest; manual |
 
 Q02's required issuer binding is specified by [OpenID Connect Discovery 1.0, section 4.3](https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderConfigurationValidation). Q03 was reproduced with the repository's cached Nimbus JAR using a temporary Java program that calls the same two getters; this proves the getter behavior, not an end-to-end login test. Existing `OidcRelyingPartySuite` has 16 cases, with a nonempty list as the normal groups fixture.
 
@@ -167,6 +168,7 @@ Q01's critical advisory identifiers are [GHSA-p6vx-979v-rg4c](https://github.com
 - Should discovery reject every issuer mismatch, including trailing-slash aliases, as the protocol requires (Q02)? Which real providers and group-claim shapes must Q03 support?
 - Are the four backend failures repeatable with isolated resources? Any root-cause fix needs its own behavior-focused change and regression evidence.
 - How should browser fixtures respect the new-session limit while retaining independent principals? Which tooltip wording is the intended contract, and what causes the missing browser screens (Q10)?
+- Should a histogram clear or clamp selection when updated data removes its selected bucket (Q11)?
 - Should the historical architecture document be revised to the release scope, or clearly separated into current versus planned architecture?
 
 The build and required local tools/services are available. Baseline test failures invoke the module exclusions above, rather than the build/toolchain stop condition. Before the review commit, `./mill __.compile` and frontend `pnpm typecheck`, `pnpm build`, `pnpm test` passed again (104 files, 2,134 tests, 20 existing jsdom notices).
@@ -199,5 +201,101 @@ Q05 would extract a shell-internal search controller after tests for pending deb
 | Q03 | Decode supported groups shapes explicitly; convert malformed claims into typed refusal instead of an effect exception. | Add cases for scalar groups, comma-separated groups, empty arrays, and malformed values. Current Nimbus getter sequence throws on the first three; assert their intended group sets and typed refusal for malformed input. |
 | Q04 | Diagnose metrics/cancellation failures; change synchronization or product behavior only with established cause. | The four exact backend failures above are the reproductions. Require repeatability under controlled load before choosing a repair; do not increase timeouts merely to conceal failure. |
 | Q10 | Establish fixture session lifecycle/rate-limit policy and intended UI contracts; repair the harness or product in separate changes. | The 17 browser failures above reproduce current gaps. Add an explicit failed-sign-in fixture test that refuses non-2xx before protected reads; retain the real-session limiter test. The tooltip assertion must follow an explicitly chosen wording contract. |
+| Q11 | Choose whether shrinking data clears or clamps selection, then make histogram rendering total for a removed bucket. | Select the last of two buckets, replace data with one bucket, and assert the chart remains rendered with no error-boundary fallback. That desired-behavior assertion currently fails; `keyboard.test.tsx` instead pins the current failure until a separate fix is approved. |
 
 No new runtime/test dependency, schema change, API change, migration, CI edit, or excluded-path edit is planned. Questions and proposals are recorded for later decisions; none blocks the eligible behavior-preserving batch.
+
+## Phase 4 — Refactoring results
+
+### Delivered batch
+
+B1 completed in `8ed9f626` (characterization) and `f63e4e0f` (Extract Function). Ten new component-level cases pin all keyboard branches, bounds, default prevention, dynamic data, empty announcements, and the pre-existing histogram failure. Three identical blocks now call one internal 30-line helper; package exports and behavior are unchanged. No production fix-forward was needed.
+
+During test authoring, the first dynamic-shrink expectation exposed Q11, before any production edit. The final test uses a test-only error boundary and accepts either tooltip field as the first failed read; both effects dereference the removed bucket. The initial boundary message expected `to`, but the boundary reported `count`; typechecking also required converting its `unknown` error safely. These were corrections to new characterization tests, not changes to existing tests or production behavior. An initial focused command from the repository root could not locate Vitest; the command ran successfully from `frontend`.
+
+| Commit | Purpose | Verification before commit |
+| --- | --- | --- |
+| `2257ab75` | Review only | `./mill __.compile`; frontend `pnpm typecheck`, `pnpm build`, `pnpm test`: passed, 104 files / 2,134 tests. Full baseline failures retained above. |
+| `f2b51afc` | Plan only | Same four commands passed; 104 files / 2,134 tests. |
+| `8ed9f626` | Chart characterization only | Same four commands passed; 105 files / 2,144 tests. Focused `pnpm exec vitest run packages/kernel/src/components/charts/keyboard.test.tsx` passed 10 cases. |
+| `f63e4e0f` | Shared keyboard handler only | Same four commands passed; 105 files / 2,144 tests. `pnpm lint:boundaries` passed (459 files / 11 packages); `pnpm bundle-shape` passed (eight lazy features); `./mill __.checkFormat`, `./mill __.fix --check`, `./mill checkArchitecture` passed (289 modules / 10 rules). |
+| `docs: add refactoring results` | Results documentation only | `./mill __.compile`; frontend `pnpm typecheck`, `pnpm build`, `pnpm test`: passed again before commit; 105 files / 2,144 tests. |
+
+Each implementation commit changes at most four files; the complete batch touches five. The test commit adds 150 lines; the refactoring changes 108 lines (36 additions / 72 deletions). Documentation is separate. No existing test was removed, skipped or weakened; no lint suppression or dependency was added.
+
+### Before / after maintenance measurements
+
+The same lexical screen described above is used here; these are not Sonar scores. Navigation duplication is measured by direct comparison of the exact source blocks.
+
+| Production file | Physical lines before → after | Decision tokens before → after |
+| --- | --- | --- |
+| `BarChart.tsx` | 236 → 214 | 14 → 8 |
+| `Histogram.tsx` | 301 → 279 | 25 → 19 |
+| `LineChart.tsx` | 262 → 240 | 22 → 16 |
+| New `keyboard.ts` | 0 → 30 | 0 → 6 |
+| Total | 799 → 763 | 61 → 49 |
+
+The three byte-identical 25-line navigation blocks became one implementation. This removes two copies and 36 net production lines; it does not reduce the number of supported navigation cases.
+
+### Full final verification
+
+Final commands use the same directories and configuration as the baseline. The successful final backend build used `./mill --no-server __.compile` after the cache recovery described below. Commands grouped in a row were each run; a passing build is not being substituted for tests.
+
+| Check / exact command | Before | After |
+| --- | --- | --- |
+| `./mill __.compile` (final: add `--no-server`) | Pass | Pass: 12,235 tasks; no compiler warnings |
+| `./scripts/run-tests.sh` | 4,909 passed / 4 failed / 0 skipped | 4,913 passed / 0 failed / 0 skipped; 81 current JUnit reports independently counted |
+| `./scripts/check-coverage.sh` | Lines 80%, branches 76% | Lines 80%, branches 76%; same two floor-raise notices |
+| `./mill __.checkFormat`; `./mill __.fix --check`; `./mill checkArchitecture` | Pass; zero reported violations | Pass; zero reported violations, 289 modules / 10 architecture rules |
+| `./mill __.openApiCheck`; `./mill docs.errorCodes --check`; `./mill frontend.apiConstants --check` | Pass | Pass; 31 error codes |
+| `pnpm typecheck`; `pnpm build` | Pass | Pass |
+| `pnpm test:coverage` | 104 files / 2,134 passed | 105 files / 2,144 passed; no failures |
+| Frontend statements / branches / functions / lines | 88.73 / 81.00 / 87.76 / 90.38% | 88.89 / 81.37 / 87.78 / 90.55% |
+| `pnpm lint:boundaries`; `pnpm bundle-shape` | 457 files / 11 packages; eight lazy features | 459 files / 11 packages; eight lazy features; zero violations |
+| `pnpm test:storybook-docgen`; `pnpm build-storybook`; `pnpm a11y` | Four docgen tests; 782 stories × two themes passed | Same counts, all passed; zero accessibility violations |
+| `python3 scripts/test-deployment.py`; `./scripts/check-action-pins.sh` | 11 tests; 30 action references / 10 credential-discarding checkouts passed | Same counts, all passed |
+| `npm run build --prefix website`; `npm run check --prefix website` | 28 pages / 29 checked HTML files | Same counts, passed |
+| `npm run test:browser --prefix website`; `npm run test:a11y --prefix website` | 24 guide routes / seven routes × two themes passed | Same counts, no reported browser errors or accessibility violations |
+| `bash -n <file>`; `node --check <file>` over tracked scripts | 18 shell / 15 JavaScript files passed | Same counts, passed |
+| `pnpm audit --audit-level high`; `npm audit --prefix website --json` | Fail: 28 frontend entries; one affected website dependency | Same findings/severity counts; no remediation applied |
+| `./mill --no-server deployment.docker.__.docker.build`; frontend Compose build command from baseline | Eleven backend images and frontend built | All rebuilt successfully; backend image build 238 seconds |
+| Quickstart startup and `KUI_E2E_UI=http://localhost:18090 KUI_E2E_API=http://localhost:18082 pnpm e2e` | 86 passed / 17 failed / 2 skipped / 23 not run | Startup passed; 97 passed / 4 failed / 2 skipped / 25 not run. Full-run failure set changed; see comparison below. |
+| `KUI_PORT=18082 KUI_FRONTEND_PORT=18090 ./deployment/compose/smoke.sh` | Pass | Pass: measured traffic, signed reads for all routed services, isolated cluster failure, recovery without intervention, and interface availability throughout |
+
+The four backend failures did not recur, but their causes remain unresolved: no backend source was changed. Baseline exclusions were retained throughout. Warning counts: jsdom notices 20 → 20; Storybook chunk-size groups 1 → 1; backend structured WARN lines 409 → 339 and ERROR lines 10 → 10. These runtime fixture counts vary with timing and are not compiler/analyzer violations.
+
+### Browser failure comparison
+
+Direct and proxied `/api/v1/info` both identified code commit `f63e4e0f3d150c42670748cb51104101a257418f`; `gitDirty=true` reflected only the pending review-document update. All four final full-run failures were new test names relative to the baseline. Their saved traces each show `429` from `/api/v1/auth/me` followed by rate-limited screen requests, the same Q10 failure mode seen at baseline. Bounded service logs were inspected. This is evidence of session-limit interference, not proof that the complete integration gate is reliable.
+
+| Final full-run failure | Trace evidence | Unchanged focused rerun |
+| --- | --- | --- |
+| `frontend/e2e/dashboard.spec.ts:89` — nests the topic tree under Topics, and its rows lead to the list | 17 HTTP 429 responses, including session creation | Passed |
+| `frontend/e2e/dashboard.spec.ts:135` — a drawer prefix row lands on a filtered topics list | 17 HTTP 429 responses, including session creation | Passed |
+| `frontend/e2e/messages.spec.ts:187` — a browse with no predicate registers nothing | 15 HTTP 429 responses, including session creation | Passed |
+| `frontend/e2e/topics.spec.ts:174` — a ?q= in the address filters the list | 15 HTTP 429 responses, including session creation | Passed |
+
+Exact focused command, from `frontend`: `KUI_E2E_UI=http://localhost:18090 KUI_E2E_API=http://localhost:18082 pnpm e2e e2e/dashboard.spec.ts:89 e2e/dashboard.spec.ts:135 e2e/messages.spec.ts:187 e2e/topics.spec.ts:174`. All four passed in 3.2 seconds, without source, configuration or assertion changes. This focused run does not replace the full-run result. Color-environment warnings: 18 at baseline, five in the final full run, one in the focused run.
+
+Fifteen baseline failing browser cases passed in the final full run. The other two (`messages.spec.ts:206`, `topics.spec.ts:193`) were blocked by earlier serial-group failures, so they were not verified again. Twenty-five serial-dependent cases remain unverified in that full run. No persistent new failure was reproduced in the focused checks, but the full browser gate remains red and timing-sensitive; an unqualified repository-wide green verdict is not claimed.
+
+| Touched production file | Line coverage before → after | Branch coverage before → after |
+| --- | --- | --- |
+| `BarChart.tsx` | 96.46 → 100% | 78.82 → 86.95% |
+| `Histogram.tsx` | 86.25 → 93.75% | 76.57 → 89.47% |
+| `LineChart.tsx` | 88.05 → 95.65% | 72.35 → 83.17% |
+| New `keyboard.ts` | Not present → 100% | Not present → 100% |
+
+The helper also has 100% statement/function coverage. Percentages reflect both added tests and removal of duplicated executable statements; they are not a claim that unrelated code improved.
+
+Additional generated-contract verification: from `frontend/packages/api`, `pnpm exec openapi-typescript ../../../docs/api/openapi.browser.json --output /tmp/kui-quality-schema.d.ts --immutable --alphabetize`, then `cmp src/schema.d.ts /tmp/kui-quality-schema.d.ts`, both passed. Generation targeted a temporary file, leaving the excluded committed artifact untouched.
+
+Verification recovery: the initial final compile was interrupted while its gateway coverage serializer wrote an unexpectedly large generated metadata file (11,696,111,616 bytes observed). A thread dump located the active write in `dotty.tools.dotc.coverage.Serializer`; this does not establish the cause of the growth. `./mill --no-server clean services.gateway.api.scoverage.compile services.gateway.api.scoverage.data` passed; the fresh compile passed and produced 628,798 bytes of metadata. The full backend tests and coverage gate then passed. A subsequent `clean --help` probe was rejected as an invalid selector and changed no source. No build configuration, compiler version or coverage exclusion changed. Incremental metadata growth remains an unresolved tool/cache concern, rather than a claimed source fix.
+
+### Deferred findings and residual risks
+
+Q07 is resolved. Q01–Q03 and Q11 require behavior/dependency changes and remain proposals. Q04/Q10 remain baseline safety-net failures. Q05/Q06 are deferred because their modules failed baseline browser tests; passing unit/search cases do not override that exclusion. Q08/Q09 remain low-priority findings in untouched files. The histogram crash remains deliberately reproducible; the helper extraction does not claim to fix it. Dependency exploitability, real-provider OIDC compatibility and production deployment were not verified by this review.
+
+Cleanup: the temporary quickstart and distributed stacks were removed, including their test volumes; the website and Storybook verification servers were stopped. Unrelated pre-existing containers were left running. Build caches/images remain normal local build artifacts; no tracked generated file or lockfile changed.
+
+Commit hygiene: work stayed on `main`, using the existing Git identity, without pushing, creating branches, rebasing or rewriting pre-session history. Messages were inspected after each commit with `git log -1 --format=%B` and across the session with `git log --format=%B 2257ab75^..HEAD`; no prohibited attribution was found. The final report is a separate `docs: add refactoring results` commit.
