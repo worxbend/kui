@@ -9,6 +9,15 @@
  * different failure with the same shape. See `awaitFirstScrape` below.
  */
 import { API, UI } from "../playwright.config";
+import { API_SESSION_STATE, mintSharedSession, SESSION_STATE } from "./session";
+
+/**
+ * The shared session's `Cookie` header once `mintSharedSession` has run, so that this file's own
+ * polling does not mint a session per request and spend the budget the suite is about to need.
+ */
+let sessionCookie = "";
+const withSession = (): Record<string, string> =>
+  sessionCookie === "" ? {} : { cookie: sessionCookie };
 
 async function reachable(url: string): Promise<boolean> {
   try {
@@ -23,7 +32,10 @@ async function reachable(url: string): Promise<boolean> {
 async function sameGateway(): Promise<boolean> {
   const commit = async (base: string): Promise<string | undefined> => {
     try {
-      const response = await fetch(`${base}/api/v1/info`, { signal: AbortSignal.timeout(3_000) });
+      const response = await fetch(`${base}/api/v1/info`, {
+        headers: withSession(),
+        signal: AbortSignal.timeout(3_000),
+      });
       const body = (await response.json()) as { build?: { gitCommit?: string } };
       return body.build?.gitCommit;
     } catch {
@@ -46,7 +58,7 @@ const SCRAPE_POLL_MS = 2_000;
 
 async function sectionRows(url: string, key: string): Promise<number | undefined> {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    const response = await fetch(url, { headers: withSession(), signal: AbortSignal.timeout(5_000) });
     if (!response.ok) return undefined;
     const body = (await response.json()) as Record<string, Section<readonly unknown[]> | undefined>;
     const section = body[key];
@@ -177,7 +189,10 @@ async function awaitFirstScrape(): Promise<void> {
 /** The cluster ids this deployment registers, read off the gateway rather than written down. */
 async function registeredClusters(): Promise<readonly string[]> {
   try {
-    const response = await fetch(`${API}/api/v1/clusters`, { signal: AbortSignal.timeout(5_000) });
+    const response = await fetch(`${API}/api/v1/clusters`, {
+      headers: withSession(),
+      signal: AbortSignal.timeout(5_000),
+    });
     if (!response.ok) return [];
     const body = (await response.json()) as {
       clusters?: Section<readonly { cluster?: { id?: string } }[]>;
@@ -208,6 +223,16 @@ export default async function globalSetup(): Promise<void> {
     reachable(`${API}/api/v1/health/ready`),
     reachable(`${UI}/api/v1/clusters`),
   ]);
+
+  /*
+   * One session for the browser and one for the `api` fixture, minted here once for the whole run
+   * rather than once per case; `session.ts` says why — the gateway budgets new sessions per
+   * address. This file's own polling below carries the API one.
+   */
+  if (ui && api && proxied) {
+    await mintSharedSession(UI, SESSION_STATE);
+    sessionCookie = await mintSharedSession(API, API_SESSION_STATE);
+  }
 
   /*
    * And that the two are the *same* gateway.

@@ -17,7 +17,7 @@
  *
  * Everything here reads except the last case, which publishes one record into a topic it created.
  */
-import type { Page } from "@playwright/test";
+import type { Page, Request } from "@playwright/test";
 import { test, expect, CLUSTER, removeTopic, scratchTopic } from "./fixtures";
 
 // It shares the cluster with the other specs, and the last case writes to it.
@@ -60,6 +60,33 @@ async function applyFieldFilter(
   await expect(page.locator(".kui-browse__phase")).toContainText("Finished", {
     timeout: 30_000,
   });
+}
+
+/**
+ * Every request the page stopped reading, and how: `null` when the body ran to its end, the
+ * browser's error text when it did not.
+ *
+ * This replaces `response.finished()`, which hung these cases until the test timeout. The message
+ * stream's client aborts its own request the moment it parses the terminal `done` frame (every
+ * terminal path in `kernel/src/data/sse/stream.ts` releases the request), so whether the browser
+ * records a page as finished or as `net::ERR_ABORTED` is a race between the gateway closing the body
+ * and the client reading `done` — and Playwright's `finished()` settles on the first outcome only,
+ * never on the second. Both mean the page was a bounded request that ended; anything else (a reset,
+ * a refusal) is a real failure and is still one here.
+ */
+function trackEndedRequests(page: Page): Map<Request, string | null> {
+  const ended = new Map<Request, string | null>();
+  page.on("requestfinished", (request) => ended.set(request, null));
+  page.on("requestfailed", (request) => ended.set(request, request.failure()?.errorText ?? "failed"));
+  return ended;
+}
+
+async function expectStreamEnded(
+  ended: Map<Request, string | null>,
+  request: Request,
+): Promise<void> {
+  await expect.poll(() => ended.has(request), { timeout: 30_000 }).toBe(true);
+  expect([null, "net::ERR_ABORTED"]).toContain(ended.get(request));
 }
 
 /** The topic's own partition count, straight from the gateway. The screen has to agree with this. */
@@ -207,6 +234,12 @@ test.describe("offset cursor pagination", () => {
     await page.goto(
       `/ui/clusters/${CLUSTER}/topics/connect.file.lines/messages?seekTo=latest&limit=100`,
     );
+    /* `goto` resolves on `load`, which is before the shell has bootstrapped and the lazily loaded
+     * messages feature has mounted; reaching straight for `.kui-browse` raced that and, on a slow
+     * runner, found the shell still empty. The Read button is inside the browser section, so once it
+     * is on screen the section the observer attaches to is the one the burst will render into. */
+    const read = page.getByRole("button", { name: /^read$/i }).first();
+    await expect(read).toBeVisible();
     await page.evaluate(() => {
       const browse = document.querySelector(".kui-browse");
       if (browse === null) throw new Error("the message browser did not render");
@@ -226,7 +259,7 @@ test.describe("offset cursor pagination", () => {
       }).observe(browse, { childList: true, subtree: true });
     });
 
-    await page.getByRole("button", { name: /^read$/i }).first().click();
+    await read.click();
     await expect(page.locator(".kui-record")).toHaveCount(100, { timeout: 30_000 });
     await expect
       .poll(() =>
@@ -298,6 +331,7 @@ test.describe("offset cursor pagination", () => {
      * two observer callbacks can spend the same cursor concurrently, both requests reach this
      * route and the assertion below sees four calls before either one has a response. The response
      * still comes from the real message service once the gate opens. */
+    const ended = trackEndedRequests(page);
     await page.route(/\/messages\/stream(?:\?|$)/, async (route) => {
       streamUrls.push(route.request().url());
       if (streamUrls.length === 3) await preloadGate;
@@ -317,7 +351,7 @@ test.describe("offset cursor pagination", () => {
     await page.getByRole("button", { name: /^read$/i }).first().click();
     const first = await firstResponse;
     expect(first.ok()).toBe(true);
-    expect(await first.finished()).toBeNull();
+    await expectStreamEnded(ended, first.request());
 
     const records = page.locator(".kui-record");
     const pager = page.getByRole("navigation", { name: "Message offset pages" });
@@ -352,7 +386,7 @@ test.describe("offset cursor pagination", () => {
     await pager.getByRole("button", { name: "Next offset page" }).click();
     const second = await secondResponse;
     expect(second.ok()).toBe(true);
-    expect(await second.finished()).toBeNull();
+    await expectStreamEnded(ended, second.request());
     await expect(records).toHaveCount(2);
     await expect(pageSummary).toContainText("Page 2");
 
@@ -411,7 +445,7 @@ test.describe("offset cursor pagination", () => {
     releasePreload();
     const preload = await preloadResponse;
     expect(preload.ok()).toBe(true);
-    expect(await preload.finished()).toBeNull();
+    await expectStreamEnded(ended, preload.request());
     await expect.poll(() => records.count(), { timeout: 30_000 }).toBeGreaterThan(4);
   });
 });

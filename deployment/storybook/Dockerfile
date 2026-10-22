@@ -16,7 +16,7 @@
 # The build stage needs the whole pnpm toolchain. The result is a directory of static files, so the
 # thing that serves them needs no JavaScript runtime at all — a Node process serving static assets
 # would be about 150 MB of attack surface for something nginx does in 20.
-FROM node:22.13.0-bookworm-slim AS build
+FROM node:22.22.0-bookworm-slim AS build
 
 # pnpm, pinned, installed directly.
 #

@@ -28,7 +28,7 @@
 # ------------------------------------------------------------------------------------------------
 # Stage 1: build the interface.
 # ------------------------------------------------------------------------------------------------
-FROM node:22.13.0-bookworm-slim AS build
+FROM node:22.22.0-bookworm-slim AS build
 
 # Not corepack: the corepack bundled with this Node carries signing keys npm no longer matches, and
 # it fails with "Cannot find matching keyid" — a message that sends people looking at their registry.

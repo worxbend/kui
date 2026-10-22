@@ -40,3 +40,6 @@ frontend/.tsbuild/
 # check, so without this every run leaves 11 MB of untracked output in `git status` — and the agents
 # and people who read that status to see what a change touched lose the signal in the noise.
 frontend/storybook-static/
+
+# The gateway session the end-to-end suite shares across cases (frontend/e2e/session.ts).
+frontend/playwright/.auth/

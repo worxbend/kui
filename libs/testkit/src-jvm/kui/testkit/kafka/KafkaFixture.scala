@@ -71,6 +71,9 @@ object KafkaFixture {
   /** Where the generated PKCS12 stores are mounted inside the container. */
   private val SecretsDirectory: String = "/etc/kafka/secrets"
 
+  /** `rw-r--r--`: the mode each store is copied in with, so the image's non-root broker can read it. */
+  private val ReadableByAll: Integer = Integer.valueOf(0x1a4)
+
   /** Fixed, so a fixture that is restarted keeps the same cluster identity and a failure message can be
     * grepped for it.
     */
@@ -94,7 +97,7 @@ object KafkaFixture {
         s"kui-kafka-${topology.securityProtocol.toLowerCase(Locale.ROOT)}"
       )
       materials <- Resource.eval(tlsMaterials[F](topology, directory))
-      container <- container[F](topology, materials.map(_._2), directory, startTimeout)
+      container <- container[F](topology, materials.map(_._2), startTimeout)
       broker <- Resource.eval(describe[F](topology, container, materials.map(_._1)))
       _ <- Resource.eval(provision[F](broker))
     } yield broker
@@ -106,10 +109,9 @@ object KafkaFixture {
   private def container[F[_]: Async](
       topology: KafkaTopology,
       broker: Option[BrokerTlsMaterials],
-      directory: Path,
       startTimeout: FiniteDuration
   ): Resource[F, GenericContainer[?]] =
-    Resource.make(Async[F].blocking(started(topology, broker, directory, startTimeout)))(container =>
+    Resource.make(Async[F].blocking(started(topology, broker, startTimeout)))(container =>
       // Stopping is `blocking` and uncancellable by construction: `Resource.make`'s release runs even when
       // the acquiring fiber was cancelled, and a container that outlives its test run is a leak the next
       // developer discovers as a port already in use.
@@ -119,7 +121,6 @@ object KafkaFixture {
   private def started(
       topology: KafkaTopology,
       broker: Option[BrokerTlsMaterials],
-      directory: Path,
       startTimeout: FiniteDuration
   ): GenericContainer[?] = {
     val container = HeldKafkaContainer(DockerImageName.parse(Image))
@@ -137,11 +138,18 @@ object KafkaFixture {
         .withStartupTimeout(java.time.Duration.ofMillis(startTimeout.toMillis))
     )
 
-    broker.foreach { _ =>
-      val _ = container.withCopyFileToContainer(
-        MountableFile.forHostPath(directory.toAbsolutePath.toString),
-        SecretsDirectory
-      )
+    // Each store is copied on its own with an explicit, world-readable mode. Copying the directory instead
+    // carries over the host's ownership and the 0700 of `createTempDirectory`, and the image's broker runs
+    // as a non-root `appuser` that then cannot open its own keystore (`AccessDeniedException`). The stores
+    // hold throwaway test keys, so readable-by-all inside a single-use container costs nothing.
+    broker.foreach { tls =>
+      List(tls.keystore -> "broker.keystore.p12", tls.truststore -> "truststore.p12").foreach {
+        case (store, name) =>
+          val _ = container.withCopyFileToContainer(
+            MountableFile.forHostPath(store.toAbsolutePath, ReadableByAll),
+            s"$SecretsDirectory/$name"
+          )
+      }
     }
 
     container.start()

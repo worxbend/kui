@@ -278,10 +278,15 @@ test.describe("the topic list", () => {
      * tooltip reached by focus, which is also how a keyboard user reaches it; the two sentences
      * send an operator to different places, and the wrong one costs them an afternoon asking an
      * administrator for a permission they already hold.
+     *
+     * The sentence is the shell's write policy (`shell/src/data/writePolicy.ts`), which every
+     * feature asks first since bf1393c; `writeBlockedReason`'s longer "configured read-only in
+     * KUI" wording is only the fallback when no shell policy is mounted, which is never the case in
+     * this browser.
      */
     await frozen.focus();
     const reason = page.locator(`#${(await frozen.getAttribute("aria-describedby")) ?? "none"}`);
-    await expect(reason).toContainText("This cluster is configured read-only in KUI");
+    await expect(reason).toContainText("This cluster is read-only.");
     await expect(reason).not.toContainText("You do not have permission");
   });
 

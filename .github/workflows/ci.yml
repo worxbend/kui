@@ -121,7 +121,7 @@ jobs:
         run: ./scripts/check-action-pins.sh
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22.13.0"
+          node-version: "22.22.0"
       - name: Install pnpm
         run: npm install --global --no-fund --no-audit pnpm@11.25.0
       # Audit development dependencies too: Vite, Storybook and Playwright execute in the trusted
@@ -369,7 +369,7 @@ jobs:
         with:
           # The versions in `.tool-versions`, and pnpm is exact: `frontend/package.json` names the
           # same number in `packageManager`, and pnpm 11.25 refuses to start on a Node below 22.13.
-          node-version: "22.13.0"
+          node-version: "22.22.0"
       - name: Install pnpm
         # `npm install -g` and not corepack: the corepack bundled with this Node carries signing
         # keys npm no longer matches, and it fails with "Cannot find matching keyid" — a message
@@ -487,7 +487,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22.13.0"
+          node-version: "22.22.0"
       - name: Install pnpm
         run: npm install --global --no-fund --no-audit pnpm@11.25.0
       - name: Install
@@ -515,9 +515,13 @@ jobs:
             frontend/playwright-report/**
             frontend/test-results/**
           if-no-files-found: ignore
+      # `--no-follow`, and a step timeout behind it. Plain `logs` follows, and on a stack that is
+      # still up following never ends: this step used to run until the job's 25 minutes were spent,
+      # and GitHub then reported a failed browser run as a cancelled job.
       - name: The container logs, when it was the stack rather than the screen
         if: failure()
-        run: deployment/quickstart/quickstart.sh logs || true
+        timeout-minutes: 3
+        run: deployment/quickstart/quickstart.sh logs --no-follow || true
 
   # The distributed stack, and what happens to it when one service stops. Not a browser test — it
   # asserts that stopping one service degrades the others in the documented way — so it stays on the
