@@ -33,6 +33,9 @@
     // `as {...}` claim about the wire in this directory is a string to it, and only a run
     // against a stack can tell whether one of them is true.
     "composite": false,
+    // `session.node-test.ts` runs under plain `node --test`, which resolves `./session.ts` only by
+    // its real name.
+    "allowImportingTsExtensions": true,
     "lib": ["ES2023", "DOM"]
   },
   "include": ["**/*.ts", "../playwright.config.ts"]

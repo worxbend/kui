@@ -17,7 +17,14 @@
  * case: the browser carries one session for the whole run and the `api` fixture another. Each
  * context still starts from the stored state, so nothing a case writes to `localStorage` reaches the
  * next one.
+ *
+ * Sharing a session is not enough on its own: once the gateway forgets it, every context built from
+ * the stale file mints again, one or more per case, and the run is back over budget. So each case
+ * checks its principal's session first (`signedIn`), refuses a non-2xx answer by status and code,
+ * and writes a replacement the gateway handed out back to the file. `session.node-test.ts` holds
+ * both behaviours; run it with `pnpm test:e2e-harness`, which needs no stack.
  */
+import type { APIRequestContext } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +39,91 @@ export const SESSION_STATE = resolve(AUTH_DIRECTORY, "browser.json");
  * with it, because `fixtures.ts` keeps the two principals apart on purpose.
  */
 export const API_SESSION_STATE = resolve(AUTH_DIRECTORY, "api.json");
+
+/**
+ * The gateway's new-session budget, as `SessionMiddleware.attachInterceptor` spends it: per client
+ * address, then for every address together. Written here only so that a refusal can say it; the
+ * gateway's numbers are the real ones.
+ */
+export const NEW_SESSION_BUDGET = { perAddress: 30, overall: 600, windowSeconds: 60 } as const;
+
+/** What a sign-in answer has to offer for the checks below: Playwright's and `fetch`'s both do. */
+export interface SignInAnswer {
+  readonly status: number;
+  readonly url: string;
+  readonly text: () => Promise<string>;
+}
+
+/**
+ * The error for a sign-in the gateway refused, or `undefined` when it did not.
+ *
+ * The fixture used to read the body of `/auth/me` whatever the status was, so a `429` became an
+ * empty CSRF token, the case went on to its protected reads, and what failed was a screen fifteen
+ * seconds later with the sign-in dialog drawn over it. The status and the gateway's own error code
+ * are the whole diagnosis, so they go in the message, before anything else is asked.
+ */
+export async function signInRefusal(who: string, answer: SignInAnswer): Promise<Error | undefined> {
+  if (answer.status >= 200 && answer.status < 300) return undefined;
+
+  const text = await answer.text().catch(() => "");
+  let code = "no error code";
+  let message = text.slice(0, 200);
+  try {
+    const envelope = JSON.parse(text) as { code?: unknown; message?: unknown };
+    if (typeof envelope.code === "string") code = envelope.code;
+    if (typeof envelope.message === "string") message = envelope.message;
+  } catch {
+    /* Not an error envelope (a proxy's HTML page, say). The raw text is the best there is. */
+  }
+
+  const lines = [
+    `${who}: sign-in refused, ${answer.url} answered ${answer.status} ${code}` +
+      (message === "" ? "." : `: ${message}`),
+  ];
+  if (code === "KUI-AUTH-RATE-LIMITED") {
+    lines.push(
+      "",
+      "The gateway's new-session budget is spent: " +
+        `${NEW_SESSION_BUDGET.perAddress} per client address and ${NEW_SESSION_BUDGET.overall} overall ` +
+        `per ${NEW_SESSION_BUDGET.windowSeconds}s. The suite mints one session per principal and reuses ` +
+        "it, so something else is minting them: the gateway restarted and forgot the shared sessions, " +
+        "a context was opened without a stored session, or another client shares this address.",
+    );
+  }
+  return new Error(lines.join("\n"));
+}
+
+/** Throws {@link signInRefusal}'s error, when there is one. */
+export async function requireSignedIn(who: string, answer: SignInAnswer): Promise<void> {
+  const refusal = await signInRefusal(who, answer);
+  if (refusal !== undefined) throw refusal;
+}
+
+/**
+ * Asks `/auth/me` for the session `request` carries, and answers its CSRF token.
+ *
+ * A refusal stops here, naming its status and code, before the case makes a single protected read
+ * ({@link signInRefusal} says why). And when the gateway answered with a cookie, the stored session
+ * is gone — it only stamps one on a session it has just minted, which for a stored cookie means it
+ * no longer knows it, most often because it restarted. The jar goes back to `state` then, so the replacement is
+ * what every later case and every restarted worker starts from: losing the shared session costs one
+ * new session for the rest of the run rather than one or more per case, which is what spent the
+ * limiter's budget and turned a single loss into a run of `429`s.
+ */
+export async function signedIn(
+  who: string,
+  request: APIRequestContext,
+  origin: string,
+  state: string,
+): Promise<string> {
+  const me = await request.get(`${origin}/api/v1/auth/me`);
+  await requireSignedIn(who, { status: me.status(), url: me.url(), text: () => me.text() });
+  if (me.headersArray().some((header) => header.name.toLowerCase() === "set-cookie")) {
+    await request.storageState({ path: state });
+  }
+  const body = (await me.json()) as { csrfToken?: string };
+  return body.csrfToken ?? "";
+}
 
 /** How long to keep asking when the gateway's session budget is spent: one budget window, and some. */
 const MINT_DEADLINE_MS = 75_000;
@@ -56,9 +148,11 @@ export async function mintSharedSession(origin: string, state: string): Promise<
       return parsed.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
     }
     if (response.status !== 429 || Date.now() > deadline) {
+      const refusal = await signInRefusal("globalSetup", response);
       throw new Error(
-        `${origin}/api/v1/auth/me answered ${response.status} without a session cookie; ` +
-          "the suite has no session to share.",
+        refusal?.message ??
+          `${origin}/api/v1/auth/me answered ${response.status} without a session cookie; ` +
+            "the suite has no session to share.",
       );
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, MINT_RETRY_MS));
