@@ -124,27 +124,73 @@ describe.each(charts)("$name keyboard navigation", ({ render, announcements, emp
   });
 });
 
-it("currently fails when the selected histogram bucket is removed", () => {
-  const [buckets, setBuckets] = createSignal([
+describe.each(charts)("$name with data shrinking below the cursor", ({ render }) => {
+  it("stays rendered without reaching an error boundary", () => {
+    const [size, setSize] = createSignal(2);
+    const { container, dispose } = mount(() => (
+      <Errored fallback={error => <p role="alert">{String(error())}</p>}>{render(size)}</Errored>
+    ));
+    try {
+      press(container, "End");
+      setSize(1);
+      flush();
+      expect(container.querySelector("[role='alert']")).toBeNull();
+      expect(container.querySelector(".kui-plot__surface")).not.toBeNull();
+    } finally {
+      dispose();
+    }
+  });
+});
+
+describe("Histogram selection when its bucket is removed", () => {
+  const two = [
     { from: 0, to: 1, count: 1 },
     { from: 1, to: 2, count: 2 },
-  ]);
-  const { container, dispose } = mount(() => (
-    <Errored fallback={error => <p role="alert">{String(error())}</p>}>
-      <Histogram label="Counts" buckets={buckets()} />
-    </Errored>
-  ));
-  try {
-    press(container, "End");
-    expect(announcement(container)).toBe("1 – 2: 2");
-    setBuckets([{ from: 0, to: 1, count: 1 }]);
-    flush();
-    // Both tooltip effects dereference the removed bucket; either can surface first.
-    expect(container.querySelector("[role='alert']")?.textContent).toMatch(
-      /Cannot read properties of undefined \(reading '(to|count)'\)/u,
-    );
-    expect(container.querySelector(".kui-plot__surface")).toBeNull();
-  } finally {
-    dispose();
-  }
+  ];
+  const one = [{ from: 0, to: 1, count: 1 }];
+
+  it("clears the selection and hides the tooltip", () => {
+    const [buckets, setBuckets] = createSignal(two);
+    const { container, dispose } = mount(() => (
+      <Errored fallback={error => <p role="alert">{String(error())}</p>}>
+        <Histogram label="Counts" buckets={buckets()} />
+      </Errored>
+    ));
+    try {
+      press(container, "End");
+      expect(announcement(container)).toBe("1 – 2: 2");
+      expect(container.querySelector(".kui-plot__tooltip")).not.toBeNull();
+      setBuckets(one);
+      flush();
+      expect(container.querySelector("[role='alert']")).toBeNull();
+      expect(container.querySelector(".kui-plot__surface")).not.toBeNull();
+      expect(container.querySelector(".kui-plot__tooltip")).toBeNull();
+      expect(container.querySelector(".kui-plot__group--active")).toBeNull();
+      expect(announcement(container)).toBe("");
+      // Cleared, not hidden: the bucket coming back does not bring the old selection with it.
+      setBuckets(two);
+      flush();
+      expect(container.querySelector(".kui-plot__tooltip")).toBeNull();
+      expect(announcement(container)).toBe("");
+      // And the keyboard starts afresh rather than from the vanished index.
+      press(container, "ArrowRight");
+      expect(announcement(container)).toBe("0 – 1: 1");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps a selection that is still in range", () => {
+    const [buckets, setBuckets] = createSignal(two);
+    const { container, dispose } = mount(() => <Histogram label="Counts" buckets={buckets()} />);
+    try {
+      press(container, "Home");
+      setBuckets(one);
+      flush();
+      expect(announcement(container)).toBe("0 – 1: 1");
+      expect(container.querySelector(".kui-plot__tooltip-title")?.textContent).toBe("0 – 1");
+    } finally {
+      dispose();
+    }
+  });
 });

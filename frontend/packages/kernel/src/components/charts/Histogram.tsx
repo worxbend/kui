@@ -21,7 +21,7 @@
  * differently in each member is not a family: an observed container, real-pixel geometry, a
  * keyboard cursor with a live region, a hidden `ChartDataTable`, and top-rounded bars.
  */
-import { For, Show, createSignal, createUniqueId, type Component } from "solid-js";
+import { For, Show, createEffect, createSignal, createUniqueId, untrack, type Component } from "solid-js";
 import { ChartDataTable } from "./ChartDataTable.jsx";
 import { useElementSize } from "./elementSize.js";
 import { ABSENT, formatCount } from "./format.js";
@@ -69,13 +69,35 @@ const AXIS_HEIGHT = 18;
 
 export const Histogram: Component<HistogramProps> = props => {
   const box = useElementSize({ width: 640, height: 160 });
-  const [cursor, setCursor] = createSignal<number | undefined>(undefined);
   const tableId = createUniqueId();
 
   const height = (): number => props.height ?? 160;
   const plotHeight = (): number => Math.max(20, height() - AXIS_HEIGHT);
   const width = (): number => box.size().width;
   const count = (): number => props.buckets.length;
+
+  const [cursor, setCursor] = createSignal<number | undefined>(undefined);
+
+  /**
+   * New data can remove the bucket under the cursor. The selection is then cleared rather than
+   * clamped onto a neighbour: a tooltip that silently moves to another bucket would describe
+   * something nobody pointed at. Cleared means forgotten, so the bucket coming back on the next
+   * refresh does not bring the old selection with it either.
+   */
+  createEffect(
+    () => count(),
+    n => {
+      const index = untrack(cursor);
+      if (index !== undefined && index >= n) setCursor(undefined);
+    },
+  );
+
+  /** The bucket under the cursor, or nothing — every tooltip read goes through this. */
+  const selected = (): HistogramBucket | undefined => {
+    // Read rather than trusted: until the effect above has run, the cursor can still be stale.
+    const index = cursor();
+    return index === undefined ? undefined : props.buckets[index];
+  };
 
   const boundary = (value: number): string => props.formatBoundary?.(value) ?? String(value);
   const amount = (value: number): string => props.formatCount?.(value) ?? formatCount(value);
@@ -154,9 +176,7 @@ export const Histogram: Component<HistogramProps> = props => {
   const onKeyDown = createChartKeyDown(count, cursor, setCursor);
 
   const announcement = (): string => {
-    const index = cursor();
-    if (index === undefined) return "";
-    const bucket = props.buckets[index];
+    const bucket = selected();
     if (bucket === undefined) return "";
     return `${bucketLabel(bucket)}: ${Number.isFinite(bucket.count) ? amount(bucket.count) : ABSENT}`;
   };
@@ -231,20 +251,20 @@ export const Histogram: Component<HistogramProps> = props => {
             </For>
           </div>
 
-          <Show when={cursor() !== undefined && !empty()}>
-            <div
-              class="kui-plot__tooltip"
-              aria-hidden="true"
-              style={{ left: `${((slotWidth() * ((cursor() ?? 0) + 0.5)) / Math.max(1, width())) * 100}%` }}
-            >
-              <p class="kui-plot__tooltip-title">{bucketLabel(props.buckets[cursor() ?? 0] as HistogramBucket)}</p>
-              <p class="kui-plot__tooltip-row">
-                <span class="kui-plot__tooltip-label">messages</span>
-                <span class="kui-plot__tooltip-value">
-                  {amount((props.buckets[cursor() ?? 0] as HistogramBucket).count)}
-                </span>
-              </p>
-            </div>
+          <Show when={!empty() && selected()}>
+            {bucket => (
+              <div
+                class="kui-plot__tooltip"
+                aria-hidden="true"
+                style={{ left: `${((slotWidth() * ((cursor() ?? 0) + 0.5)) / Math.max(1, width())) * 100}%` }}
+              >
+                <p class="kui-plot__tooltip-title">{bucketLabel(bucket())}</p>
+                <p class="kui-plot__tooltip-row">
+                  <span class="kui-plot__tooltip-label">messages</span>
+                  <span class="kui-plot__tooltip-value">{amount(bucket().count)}</span>
+                </p>
+              </div>
+            )}
           </Show>
         </div>
 
