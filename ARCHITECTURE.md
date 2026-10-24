@@ -1,8 +1,14 @@
 # KUI architecture
 
-Status: authoritative as of 2026-09-03 (early architecture phase). Every decision referenced as
-`ADR-NNN` lives in `docs/adr/` and is indexed in `DECISIONS.md`. Research findings are cited
-by report file and section rather than restated; read the report when you need the evidence.
+Status: written 2026-09-03 as the early-architecture design and revised since; corrected against
+the 0.1.0 tree on 2026-10-24. Where this document and the tree disagree, the tree wins. Statements
+marked *implemented*, *what exists today* or *delivered* describe shipped code; anything marked
+**planned** or **not built** describes intent. The `ADR-NNN` identifiers cited below are historical
+decision records that are **not in this repository**: there is no `docs/adr/` directory and no
+`DECISIONS.md`. The current decision record is [`DESIGN.md`](DESIGN.md) §10. The research reports
+(`research/…`), `TECH_DEBT.md`, and the `docs/domain/…`, `docs/testing.md`, `docs/frontend/README.md`
+and `docs/operations/metadata-store.md` pages cited below are likewise not tracked; their citations record provenance, not readable
+evidence.
 
 This document answers one question: *how are the pieces of KUI shaped, and how do they fit
 together so that KUI's product properties hold?* Anything about "why this library"
@@ -46,7 +52,7 @@ Sections:
    ├── kui-message-service     Degradable  browse/stream/page, produce, resend, purge, filters,
    │                                       serdes, masking, event tracking
    ├── kui-consumer-service    Degradable  groups, lag, offset reset/delete, group delete
-   ├── kui-security-service    Degradable  ACLs, quotas, CSV import/export, ACL presets
+   ├── kui-security-service    PLANNED — not built (no services/security, no image)
    ├── kui-schema-service      Optional    subjects, versions, compatibility (Confluent-compatible)
    ├── kui-connect-service     Optional    Connect clusters, connectors, tasks, plugins, offsets
    ├── kui-ksql-service        Optional    statements, push/pull queries, tables, streams
@@ -60,30 +66,50 @@ Sections:
  Kafka clusters · Schema Registries · Connect · ksqlDB · Prometheus / JMX
 ```
 
+**Delivered catalog (0.1.0).** `build.mill`'s `deployment.docker` declares images for the gateway,
+the nine services `deployment/compose/docker-compose.yml` runs (cluster, topic, message, consumer,
+schema, connect, ksql, metrics, alerts) and the all-in-one. `kui-security-service` is planned and
+not built; ACL and client-quota management are outside the current product scope (README).
+`kui-identity-service` has a `services/identity/app` main but **no image target and no container**
+in the distributed stack, which runs with `kui.auth.type: disabled`. Authentication is delivered
+through the all-in-one composition (the quickstart's `--with-auth` mode). An authenticated
+distributed deployment is an open question (`DESIGN.md` §2 Q-c), not a delivered shape.
+
 Two shapes are built from the same Mill modules (ADR-005):
 
 | Shape | What runs | Used for |
 | --- | --- | --- |
-| Distributed | one container per service + the gateway; discovery by static `kui.gateway.services.<name>.url` or Kubernetes DNS (Helm values) | production |
+| Distributed | one container per service + the gateway; discovery by static `kui.gateway.services.<name>.url` (any platform DNS name works; no Helm chart is shipped) | production |
 | All-in-one | `apps/allinone`: one JVM, one listening port, every service's application layer wired into the gateway's composition root; the gateway's client for each service is an in-process Tapir interpreter | local development, small installs, E2E tests |
 
 No service mesh, no registry service, no shared database. Services own their
 state; most state is a rebuildable snapshot of the target cluster (§9).
 
-The distributed shape is not only described here, it is **verified in CI by a browser**. The `e2e`
-job runs `kui.e2e.ClusterServiceDownSuite` against `deployment/compose/docker-compose.yml`: it stops
-the `kui-cluster` container, and asserts that the entry for that feature dims while staying
-clickable, that the fallback panel names the reason and when it started, that the rest of the
-application keeps working, and that starting the container again heals the interface without the
-page ever being reloaded. That suite is the check that keeps the table above a statement of fact
-rather than of intent — the all-in-one shape cannot make it, because "stopping a service" there
-would mean calling a method that pretends to be down. See `docs/testing.md`.
+The distributed shape is not only described here, it is **verified in CI over HTTP**. The
+`compose` job in `.github/workflows/ci.yml` ("distributed stack + fault isolation") builds the
+backend images and runs `deployment/compose/smoke.sh` against
+`deployment/compose/docker-compose.yml`. The script checks that every routed service answers
+through the gateway, then stops the `kui-cluster` container. It asserts that
+`/api/v1/capabilities` reports `cluster` unavailable while every other service stays available,
+and that the gateway and the interface (`/ui/`) keep answering. It then starts the container again
+and asserts that the capability recovers without intervention. That script is the check that
+keeps the table above a statement of fact rather than of intent. The all-in-one shape cannot make
+it, because "stopping a service" there would mean calling a method that pretends to be down.
+
+The former browser-level Scala suite (`kui.e2e.ClusterServiceDownSuite`) no longer exists. The
+`browser` CI job runs the Playwright suite in `frontend/e2e/` against the **all-in-one** quickstart
+(`deployment/quickstart/quickstart.sh`), not against the distributed stack. In the distributed
+shape, the rendering half of the claim is therefore **not verified by CI**: that the entry dims but
+stays clickable, that the fallback panel names the reason, and that the page heals without a
+reload. `deployment/compose/docker-compose.e2e.yml` (a 3-second readiness override) is used by the
+manual `distributed-e2e` mode of `deployment/manual-qa.sh`.
 
 ## 2. Service catalog and tiers
 
 Validated against the original service catalog with two amendments, both recorded in ADR-004:
 
-1. **`kui-security-service` stays a separate service.** It has its own capability gate
+1. **`kui-security-service` stays a separate service** — *if it is built*. It is **planned, not
+   built** (see the delivered catalog in §1); the reasoning below is the design intent. It has its own capability gate
    (authorizer present, `ALTER` on the cluster), its own failure signature
    (`SecurityDisabledException`, slow `describeAcls` on clusters with thousands of bindings)
    and functionality (CSV sync, ACL presets) that is not cluster topology. Merging it into
@@ -106,13 +132,13 @@ Tier = what the UI does when the service is down.
 | `kui-topic-service` | Topic Management | topic snapshot (descriptions, configs, offsets), list/search/sort/page, CRUD, clone, recreate, partitions, replication factor, topic analysis, active producers | Degradable |
 | `kui-message-service` | Message Exploration | browse stream (seek/polling modes, cursors), per-partition page mode, tailing, event tracking, produce, resend, purge, smart filters, serde registry and resolution, masking | Degradable |
 | `kui-consumer-service` | Consumer Group Management | group snapshot, list/page, details, lag, offset reset/delete, group delete | Degradable |
-| `kui-security-service` | Kafka Security Objects | ACL list/create/delete/presets/CSV, client quotas | Degradable |
+| `kui-security-service` (**planned, not built**) | Kafka Security Objects | ACL list/create/delete/presets/CSV, client quotas | Degradable (intended) |
 | `kui-schema-service` | Schema Registry Management | subjects, versions, compatibility, checks, registry auth | Optional plugin (NotConfigured when a cluster has no registry) |
 | `kui-connect-service` | Kafka Connect Management | connect clusters, connectors, tasks, plugins, validation, actions, offsets | Optional plugin |
 | `kui-ksql-service` | ksqlDB | statement execution, query streaming, tables/streams | Optional plugin |
 | `kui-metrics-service` | Kafka Observability | JMX/Prometheus scrapers, inferred metrics, graph descriptions, PromQL templates, `/metrics` exposition | Degradable |
 | `kui-alerts-service` | Alerting | the rules KUI runs over facts it already reads, the event store and its retention, the feed with its open count and per-principal read marker, and the acknowledgement | Degradable |
-| `kui-identity-service` | Application Identity and Access | authentication adapters, session store, role model and hot reload, permission query, audit sink | **Core when `kui.auth.type != disabled`**; the gateway runs anonymous when auth is disabled |
+| `kui-identity-service` | Application Identity and Access | authentication adapters, session store, role model and hot reload, permission query, audit sink | **Core when `kui.auth.type != disabled`**; the gateway runs anonymous when auth is disabled. Delivered in-process in the all-in-one; no distributed image (§1) |
 
 Two Degradable/Optional services with different failure domains are never merged.
 
@@ -415,6 +441,7 @@ trait GroupAdmin[F[_]]:
   def deleteOffsets(profile: ClusterProfile, id: GroupId, partitions: Set[TopicPartition]): F[Either[KuiError, Unit]]
   def deleteGroup(profile: ClusterProfile, id: GroupId): F[Either[KuiError, Unit]]
 
+// PLANNED, not built: no SecurityAdmin exists in libs/kafka (it belongs to the unbuilt security service)
 trait SecurityAdmin[F[_]]:
   def describeAcls(profile: ClusterProfile, filter: AclFilter): F[Either[KuiError, List[AclBinding]]]
   def createAcls(profile: ClusterProfile, bindings: NonEmptyList[AclBinding]): F[Either[KuiError, Unit]]
@@ -585,9 +612,9 @@ Read-only clusters are enforced inside `decide` through `ClusterFlags.readOnly` 
 are implemented in `libs/security-core/src/kui/security/`, with the HS256 JWS implementation in
 `libs/security-core/src-jvm/kui/security/JwsPrincipalCodec.scala`. The JOSE library lives in the
 JVM source set alone, so the module still cross-compiles to the browser; `./mill
-checkArchitecture` rule A6 fails the build if it ever moves. Everything above about `Rbac`,
-`Resource`, `Action`, `Permission`, `Role` and `RbacPolicy` is still a sketch: it is M6 and no
-part of it is implemented.
+checkArchitecture` rule A6 fails the build if it ever moves. The RBAC half was written here as an M6
+sketch; M6 has since delivered it (`libs/security-core/src/kui/security/rbac/Rbac.scala`,
+`Policy.scala`), so the signatures above are the design shape, not the exact code.
 
 Two details differ from the sketch above and are decided by KERN-006. `RequestDigest` travels in
 the claims as an object (`req: {m, p, b}`) rather than as one further hash, because hashing the
@@ -787,7 +814,7 @@ loops run under a `Supervisor`, are cancellable and emit `kui.cache.*` and
 | topic | per-cluster topic snapshot: descriptions, configs, begin/end offsets, name index | every 30 s (chunked admin calls) | partial update after create/update/delete of a topic; refresh endpoint | list/search ≤ 30 s old; detail pages re-describe the one topic live |
 | message | serde registry per cluster (`Resource`, rebuilt on profile change); compiled CEL filters (content-hash id, bounded, TTL 1 h); SR schema-by-id cache (size-bounded), subjects (TTL 60 s) | on demand | profile change | payloads are never cached |
 | consumer | per-cluster group snapshot: listings, descriptions, committed offsets; end offsets for committed partitions via its own `listOffsets` (no cross-service call) | every 30 s (50 groups × 4 parallel) | after reset/delete of a group | lag on the list page ≤ 30 s old; group detail page computes live |
-| security | none (ACL/quota lists are live, 5 s bounded) ; ACL capability probe | probe hourly | — | — |
+| security (**planned, not built**) | none (ACL/quota lists are live, 5 s bounded) ; ACL capability probe | probe hourly | — | — |
 | schema | subject list (TTL 60 s), latest-version cache (size-bounded, TTL 60 s) | on demand | after register/delete | — |
 | connect | per-connect state: connectors + statuses via `?expand=status&expand=info` | every 30 s | after any action | list ≤ 30 s old; detail live |
 | ksql | query pipes (TTL 1 min, single use) | — | — | — |
@@ -932,7 +959,7 @@ operator requirement, documented in `docs/operations/metadata-store.md`.
 
 **Who reads the topic.** The **cluster** and **identity** services connect to the store
 directly, because they own sections and must write them. Every other Kafka-facing service
-(topic, message, consumer, schema, connect, ksql, security, metrics, alerts) receives the resolved,
+(topic, message, consumer, schema, connect, ksql, metrics, alerts) receives the resolved,
 redacted `ClusterProfile` over the internal contract instead: they need the profile, not the raw
 sections, they must work without store-cluster credentials, and one extra hop is cheaper than one
 more store connection and one more holder of the encryption key **per service in that list** —
@@ -1172,7 +1199,7 @@ kui/
 │                (a pnpm/TypeScript/Vite workspace — its own build, its own image)
 ├── apps/        allinone/
 ├── build-tests/ the suites that read build.mill, ci.yml and the Dockerfiles themselves
-├── deployment/  docker/ compose/ quickstart/ demo/ secured/ examples/ frontend/ metrics/
+├── deployment/  compose/ quickstart/ demo/ secured/ examples/ frontend/ metrics/
 │                storybook/
 ├── .github/     workflows/ci.yml and actions/setup-build/
 ├── .agents/     repository-local Playwright skill
