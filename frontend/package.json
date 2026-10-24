@@ -15,6 +15,7 @@
     "e2e": "playwright test",
     "e2e:messages": "playwright test e2e/messages.spec.ts",
     "e2e:install": "playwright install chromium",
+    "test:e2e-harness": "node --experimental-strip-types --test e2e/session.node-test.ts",
     "capture:readme": "node --experimental-strip-types e2e/capture-readme.ts",
     "e2e:ui": "playwright test --ui",
     "storybook": "storybook dev -p 6006 --no-open",

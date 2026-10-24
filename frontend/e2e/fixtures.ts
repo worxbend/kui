@@ -8,8 +8,8 @@
  * is only used for the thing under test.
  */
 import { test as base, expect, type APIRequestContext } from "@playwright/test";
-import { API } from "../playwright.config";
-import { API_SESSION_STATE } from "./session";
+import { API, UI } from "../playwright.config";
+import { API_SESSION_STATE, SESSION_STATE, signedIn } from "./session";
 
 export const CLUSTER = "quickstart";
 
@@ -22,13 +22,19 @@ export interface KuiApi {
   readonly raw: APIRequestContext;
 }
 
-async function signedIn(request: APIRequestContext): Promise<string> {
-  const me = await request.get(`${API}/api/v1/auth/me`);
-  const body = (await me.json()) as { csrfToken?: string };
-  return body.csrfToken ?? "";
-}
-
 export const test = base.extend<{ api: KuiApi; browserHealth: void }>({
+  // The browser's stored session, checked before a case's context is built from it. One `/auth/me`
+  // per case through the interface's origin, which mints nothing while the session is alive, so a
+  // spent budget reads as the refusal it is rather than as a sign-in dialog over the screen.
+  storageState: async ({ playwright }, use) => {
+    const request = await playwright.request.newContext({ baseURL: UI, storageState: SESSION_STATE });
+    try {
+      await signedIn("browser session", request, UI, SESSION_STATE);
+    } finally {
+      await request.dispose();
+    }
+    await use(SESSION_STATE);
+  },
   browserHealth: [
     async ({ page }, use, testInfo) => {
       const failures: string[] = [];
@@ -68,7 +74,7 @@ export const test = base.extend<{ api: KuiApi; browserHealth: void }>({
     // depend on whichever ran first. Its jar is still seeded with a session minted once for the
     // whole run (`session.ts` says why), and that session is not the browser's.
     const request = await playwright.request.newContext({ baseURL: API, storageState: API_SESSION_STATE });
-    const token = await signedIn(request);
+    const token = await signedIn("api fixture", request, API, API_SESSION_STATE);
 
     const json = async (response: Awaited<ReturnType<APIRequestContext["get"]>>) => {
       const text = await response.text();
