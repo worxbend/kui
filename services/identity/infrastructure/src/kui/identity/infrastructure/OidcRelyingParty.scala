@@ -5,6 +5,8 @@ import java.nio.charset.StandardCharsets
 import java.security.{MessageDigest, SecureRandom}
 import java.util.Base64
 
+import scala.jdk.CollectionConverters.*
+
 import cats.effect.kernel.{Async, Resource, Sync}
 import cats.syntax.all.*
 import com.nimbusds.jose.JWSAlgorithm
@@ -121,7 +123,7 @@ object OidcRelyingParty {
           exchange(provider, code, pending).flatMap {
             case Left(error) => error.asLeft[Identity].pure[F]
             case Right(idToken) =>
-              keys(provider).map(_.flatMap(verify(_, provider, idToken, pending.nonce)))
+              keys(provider).map(_.flatMap(verify(_, idToken, pending.nonce)))
           }
       }
 
@@ -144,7 +146,26 @@ object OidcRelyingParty {
           }
       }
 
+    /** Reads the discovery document and refuses one that names a different issuer than the one configured.
+      *
+      * OpenID Connect Discovery 1.0 §4.3: the `issuer` in the document must be *identical* to the issuer it
+      * was fetched for, compared as strings — so a trailing slash on one side and not the other is a
+      * mismatch, not an alias. Without this, a misdirected or substituted document would replace the
+      * configured trust identity, and every token its keys sign would then pass the issuer check. A mismatch
+      * is a failure, so it is not cached either.
+      */
     private def fetchDiscovery: F[Either[KuiError, Discovered]] =
+      parseDiscovery.flatMap {
+        case Right(document) if document.issuer != config.issuer =>
+          logger
+            .warn(Map("configured" -> config.issuer, "discovered" -> document.issuer))(
+              "identity: the OIDC discovery document names a different issuer than the one configured"
+            )
+            .as(malformed("the discovery document names a different issuer than the one configured").asLeft)
+        case other => other.pure[F]
+      }
+
+    private def parseDiscovery: F[Either[KuiError, Discovered]] =
       get(s"${config.issuer.stripSuffix("/")}$DiscoveryPath").map(_.flatMap { body =>
         parser
           .parse(body)
@@ -266,7 +287,6 @@ object OidcRelyingParty {
     /** Signature, issuer, audience, expiry and nonce — all five, or no identity. */
     private def verify(
         keySet: JWKSet,
-        provider: Discovered,
         idToken: String,
         nonce: String
     ): Either[KuiError, Identity] =
@@ -290,18 +310,18 @@ object OidcRelyingParty {
           // scalafix:on DisableSyntax.null
         }
         .leftMap(_ => OidcRelyingParty.Invalid)
-        .flatMap(claims => checkClaims(claims, provider, nonce))
+        .flatMap(claims => checkClaims(claims, nonce))
 
     private def checkClaims(
         claims: JWTClaimsSet,
-        provider: Discovered,
         nonce: String
     ): Either[KuiError, Identity] = {
       val audiences = Option(claims.getAudience).map(_.toArray.toList.map(String.valueOf)).getOrElse(Nil)
       val expiry = Option(claims.getExpirationTime).map(_.toInstant)
       val presentedNonce = Option(claims.getStringClaim("nonce"))
 
-      if Option(claims.getIssuer).forall(_ != provider.issuer) then OidcRelyingParty.Invalid.asLeft
+      // The configured issuer, not the discovered one: discovery is trusted only once it has agreed with it.
+      if Option(claims.getIssuer).forall(_ != config.issuer) then OidcRelyingParty.Invalid.asLeft
       else if !audiences.contains(config.clientId) then OidcRelyingParty.Invalid.asLeft
       else if expiry.forall(_.isBefore(java.time.Instant.now())) then OidcRelyingParty.Invalid.asLeft
       else if !presentedNonce.contains(nonce) then OidcRelyingParty.Invalid.asLeft
@@ -313,26 +333,36 @@ object OidcRelyingParty {
               s"the provider's token carries no '${config.usernameClaim}' claim to use as a username"
             )
           )
-          .map(name => Identity(UserName.unsafe(name), groupsOf(claims)))
+          .flatMap(name => groupsOf(claims).map(groups => Identity(UserName.unsafe(name), groups)))
     }
 
-    /** The groups claim, tolerating the three shapes providers actually emit: a list, a single string, and a
-      * comma-separated string. A provider that emits none of them yields no groups, which is a deployment
-      * whose roles name users rather than groups — not an error.
+    /** The groups claim, decoded from the raw claim value rather than through nimbus's typed getters, which
+      * throw on every shape but the one each of them expects.
+      *
+      * Three shapes are accepted, the ones providers actually emit: a JSON array of strings, a single string,
+      * and a comma-separated string. An absent claim and an empty array both yield no groups, which is a
+      * deployment whose roles name users rather than groups — not an error. Anything else — a number, an
+      * object, an array holding something other than strings — refuses the sign-in with a message naming the
+      * claim, because guessing at the groups of a token we cannot read is guessing at somebody's permissions.
       */
-    private def groupsOf(claims: JWTClaimsSet): Set[String] =
-      config.groupsClaim.fold(Set.empty[String]) { claim =>
-        val listed = Option(claims.getStringListClaim(claim))
-          .map(_.toArray.toList.map(String.valueOf))
-          .getOrElse(Nil)
+    private def groupsOf(claims: JWTClaimsSet): Either[KuiError, Set[String]] =
+      config.groupsClaim.fold(Set.empty[String].asRight[KuiError]) { claim =>
+        val refused: KuiError = ApplicationError.Unauthenticated(
+          s"the provider's '$claim' claim is neither a list of group names nor a comma-separated string"
+        )
 
-        val single =
-          if listed.nonEmpty then Nil
-          else
-            Option(claims.getStringClaim(claim)).toList
-              .flatMap(_.split(',').toList)
+        val names: Either[KuiError, List[String]] = Option(claims.getClaim(claim)) match {
+          case None => Nil.asRight
+          case Some(single: String) => single.split(',').toList.asRight
+          case Some(listed: java.util.List[?]) =>
+            listed.asScala.toList.traverse {
+              case name: String => name.asRight[KuiError]
+              case _ => refused.asLeft[String]
+            }
+          case Some(_) => refused.asLeft
+        }
 
-        (listed ++ single).map(_.trim).filter(_.nonEmpty).toSet
+        names.map(_.map(_.trim).filter(_.nonEmpty).toSet)
       }
 
     // ---------------------------------------------------------------------------------------------

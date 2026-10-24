@@ -4,6 +4,7 @@ import java.time.Instant
 import java.util.Date
 
 import cats.effect.IO
+import cats.syntax.all.*
 import com.nimbusds.jose.crypto.RSASSASigner
 import com.nimbusds.jose.jwk.gen.RSAKeyGenerator
 import com.nimbusds.jose.jwk.{JWKSet, RSAKey}
@@ -55,9 +56,12 @@ final class OidcRelyingPartySuite extends KuiIOSuite {
   /** Another provider's key, for the case where the signature is valid but not by anybody we trust. */
   private val otherKey: RSAKey = new RSAKeyGenerator(2048).keyID("test-key").generate()
 
-  private val discovery: String =
+  private val discovery: String = discoveryNaming(issuer)
+
+  /** A discovery document whose `issuer` is `named`, with endpoints on the configured provider's hosts. */
+  private def discoveryNaming(named: String): String =
     s"""{
-       |  "issuer": "$issuer",
+       |  "issuer": "$named",
        |  "authorization_endpoint": "$issuer/authorize",
        |  "token_endpoint": "$issuer/token",
        |  "jwks_uri": "https://keys.example.com/jwks"
@@ -72,17 +76,16 @@ final class OidcRelyingPartySuite extends KuiIOSuite {
       nonce: String = "the-nonce",
       expiresAt: Instant = Instant.now().plusSeconds(300),
       subject: String = "ada@example.com",
-      groups: List[String] = List("platform", "oncall")
+      groups: Option[AnyRef] = Some(java.util.List.of("platform", "oncall"))
   ): String = {
-    val claims = new JWTClaimsSet.Builder()
+    val builder = new JWTClaimsSet.Builder()
       .issuer(tokenIssuer)
       .audience(audience)
       .subject(subject)
       .claim("email", subject)
-      .claim("groups", scala.jdk.CollectionConverters.SeqHasAsJava(groups).asJava)
       .claim("nonce", nonce)
       .expirationTime(Date.from(expiresAt))
-      .build()
+    val claims = groups.fold(builder)(builder.claim("groups", _)).build()
 
     val jwt =
       new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(signingKey.getKeyID).build(), claims)
@@ -91,18 +94,18 @@ final class OidcRelyingPartySuite extends KuiIOSuite {
   }
 
   /** A provider that answers discovery, the token exchange and the key set. */
-  private def provider(token: String): Backend[IO] =
+  private def provider(token: String, document: String = discovery): Backend[IO] =
     BackendStub[IO](summon)
       .whenRequestMatches(_.uri.toString.contains("openid-configuration"))
-      .thenRespondAdjust(discovery)
+      .thenRespondAdjust(document)
       .whenRequestMatches(_.uri.toString.endsWith("/token"))
       .thenRespondAdjust(s"""{"access_token":"opaque","id_token":"$token","token_type":"Bearer"}""")
       .whenRequestMatches(_.uri.toString.contains("jwks"))
       .thenRespondAdjust(jwks)
 
-  private def party(backend: Backend[IO]) =
+  private def party(backend: Backend[IO], configured: OidcConfig = config) =
     FakeStructuredLogger[IO].flatMap(logger =>
-      OidcRelyingParty.resource[IO](config, backend, logger).allocated.map(_._1)
+      OidcRelyingParty.resource[IO](configured, backend, logger).allocated.map(_._1)
     )
 
   private val pending: PendingLogin = PendingLogin("the-nonce", Secret("the-verifier"))
@@ -293,6 +296,99 @@ final class OidcRelyingPartySuite extends KuiIOSuite {
         s"discovery was still broken on the second attempt: $second"
       )
     }
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Q02: the discovery document is bound to the configured issuer
+  // -----------------------------------------------------------------------------------------------
+
+  /** Signs in against a provider whose discovery document names `discovered` and whose token says `iss`. */
+  private def signInWhereDiscoveryNames(discovered: String, iss: String, configured: OidcConfig = config) =
+    party(provider(idToken(tokenIssuer = iss), discoveryNaming(discovered)), configured)
+      .flatMap(_.complete("the-code", pending))
+
+  test("a discovery document naming another issuer is refused, even with a token that issuer signed") {
+    // Q02: the token's `iss` used to be compared with whatever discovery returned, so a substituted
+    // document for `evil` plus a token from `evil` signed by the keys that document published was a login.
+    signInWhereDiscoveryNames("https://evil.example.com", "https://evil.example.com").map { result =>
+      assert(result.isLeft, s"a foreign issuer's discovery document was trusted: $result")
+    }
+  }
+
+  test("a discovery document naming another issuer refuses the authorization request too") {
+    party(provider(idToken(), discoveryNaming("https://evil.example.com"))).flatMap(_.start("s")).map {
+      result => assert(result.isLeft, s"an authorization URL was built from a foreign document: $result")
+    }
+  }
+
+  test("a trailing-slash difference between discovery and configuration is a mismatch, not an alias") {
+    // OpenID Connect Discovery 1.0 §4.3 compares the two as strings; both directions are refused.
+    for {
+      slashDiscovered <- signInWhereDiscoveryNames(s"$issuer/", s"$issuer/")
+      slashConfigured <- signInWhereDiscoveryNames(issuer, issuer, config.copy(issuer = s"$issuer/"))
+    } yield {
+      assert(slashDiscovered.isLeft, s"'$issuer/' was accepted for configured '$issuer': $slashDiscovered")
+      assert(slashConfigured.isLeft, s"'$issuer' was accepted for configured '$issuer/': $slashConfigured")
+    }
+  }
+
+  test("an issuer that matches exactly still signs in, trailing slash and all") {
+    signInWhereDiscoveryNames(s"$issuer/", s"$issuer/", config.copy(issuer = s"$issuer/")).map { result =>
+      assertEquals(result.toOption.map(_.name.value), Some("ada@example.com"), result.toString)
+    }
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Q03: every documented shape of the groups claim, and a typed refusal for the rest
+  // -----------------------------------------------------------------------------------------------
+
+  private def groupsFrom(groups: Option[AnyRef]) =
+    party(provider(idToken(groups = groups))).flatMap(_.complete("the-code", pending))
+
+  test("a groups claim that is a single string is one group") {
+    groupsFrom(Some("platform")).map(result =>
+      assertEquals(result.map(_.groups), Right(Set("platform")), result.toString)
+    )
+  }
+
+  test("a groups claim that is a comma-separated string is split and trimmed") {
+    groupsFrom(Some("platform, oncall ,")).map(result =>
+      assertEquals(result.map(_.groups), Right(Set("platform", "oncall")), result.toString)
+    )
+  }
+
+  test("an empty groups array, and an absent groups claim, are no groups rather than an error") {
+    for {
+      empty <- groupsFrom(Some(java.util.List.of()))
+      absent <- groupsFrom(None)
+    } yield {
+      assertEquals(empty.map(_.groups), Right(Set.empty[String]), empty.toString)
+      assertEquals(absent.map(_.groups), Right(Set.empty[String]), absent.toString)
+    }
+  }
+
+  test("a groups claim of any other shape is a typed refusal naming the claim, never an exception") {
+    val malformed: List[AnyRef] = List(
+      Integer.valueOf(42),
+      java.lang.Boolean.TRUE,
+      java.util.Map.of("platform", "oncall"),
+      java.util.List.of("platform", Integer.valueOf(7))
+    )
+
+    malformed
+      .traverse(shape => groupsFrom(Some(shape)).attempt.map(shape -> _))
+      .map(_.foreach { case (shape, outcome) =>
+        outcome match {
+          case Left(thrown) => fail(s"groups $shape escaped as an exception: $thrown")
+          case Right(result) =>
+            assertEquals(
+              result.left.toOption.map(_.code),
+              Some(ErrorCode.Unauthenticated),
+              s"$shape: $result"
+            )
+            assert(result.left.toOption.exists(_.message.contains("'groups'")), s"$shape: $result")
+        }
+      })
   }
 
   /** An ID token that is correct in every way except that it never expires. */
