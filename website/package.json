@@ -13,6 +13,6 @@
     "test:a11y": "node scripts/accessibility-check.mjs"
   },
   "dependencies": {
-    "markdown-it": "15.0.2"
+    "markdown-it": "15.0.3"
   }
 }

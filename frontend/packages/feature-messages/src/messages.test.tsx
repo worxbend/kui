@@ -216,12 +216,12 @@ describe("a browse session", () => {
       void flush();
       expect(session.rows()).toHaveLength(committed.length);
 
-      const weakMapGet = vi
-        .spyOn(WeakMap.prototype, "get")
-        .mockImplementation(function (this: WeakMap<object, unknown>, key: object) {
-          if (committedSet.has(key)) committedPayloadLookups += 1;
-          return originalWeakMapGet.call(this, key);
-        });
+      // A plain patch, not `vi.spyOn`: Vitest 5.0.5's mock bookkeeping calls `WeakMap.prototype.get`
+      // from inside every spy invocation, so spying on it recurses until the stack overflows.
+      WeakMap.prototype.get = function (this: WeakMap<object, unknown>, key: object) {
+        if (committedSet.has(key)) committedPayloadLookups += 1;
+        return originalWeakMapGet.call(this, key);
+      };
       try {
         for (let index = 100; index < 124; index += 1) fake.emit(record(String(index)));
         while (continuations.length > 0) continuations.shift()?.();
@@ -230,7 +230,7 @@ describe("a browse session", () => {
         expect(session.rows()).toHaveLength(124);
         expect(committedPayloadLookups).toBe(0);
       } finally {
-        weakMapGet.mockRestore();
+        WeakMap.prototype.get = originalWeakMapGet;
       }
       return null;
     });
