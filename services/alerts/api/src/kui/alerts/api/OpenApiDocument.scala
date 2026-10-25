@@ -21,33 +21,7 @@ object OpenApiDocument {
     */
   def render: String = AlertsApi.openApi[cats.Id].asJson.deepDropNullValues.spaces2 + "\n"
 
-  /** `OpenApiDocument <path> [--check]`.
-    *
-    * Writing prints the path so a developer can see what changed; checking prints nothing on success, because
-    * a check that is quiet when it passes is a check people leave switched on.
-    */
-  def main(args: Array[String]): Unit = {
-    val path = args.headOption.getOrElse {
-      Console.err.println("usage: OpenApiDocument <path to openapi.json> [--check]")
-      sys.exit(2)
-    }
-    val check = args.contains("--check")
-    val file = java.nio.file.Path.of(path)
-    val expected = render
-
-    if !check then {
-      java.nio.file.Files.createDirectories(file.getParent)
-      java.nio.file.Files.writeString(file, expected)
-      println(s"wrote $path")
-    } else if !java.nio.file.Files.exists(file) then {
-      Console.err.println(s"$path does not exist; run ./mill services.alerts.api.openApi")
-      sys.exit(1)
-    } else if java.nio.file.Files.readString(file) != expected then {
-      Console.err.println(
-        s"$path is out of date with the endpoints it is generated from; " +
-          "run ./mill services.alerts.api.openApi and commit the result"
-      )
-      sys.exit(1)
-    }
-  }
+  /** `OpenApiDocument <path> [--check]`: see [[kui.http.OpenApiDocumentFile]]. */
+  def main(args: Array[String]): Unit =
+    kui.http.OpenApiDocumentFile.main(args, "services.alerts.api", render)
 }

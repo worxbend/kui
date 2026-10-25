@@ -1,7 +1,6 @@
 package kui.gateway.api.openapi
 
-import java.nio.file.{Files, Path}
-
+import kui.http.OpenApiDocumentFile
 import kui.kernel.ServiceId
 
 /** Writes `docs/api/openapi.json` and `docs/api/openapi.browser.json`, and fails the build when either
@@ -56,25 +55,7 @@ object OpenApiDocument {
 
     // Both documents are written or checked in one run, from one merge. Two Mill tasks calling this twice
     // would generate the endpoint set twice for no benefit, and -- worse -- could in principle disagree.
-    emit(target, render, check)
-    emit(browserTarget, renderBrowser, check)
-  }
-
-  private def emit(target: String, expected: String, check: Boolean): Unit = {
-    val file = Path.of(target)
-    if !check then {
-      Option(file.getParent).foreach(Files.createDirectories(_))
-      Files.writeString(file, expected)
-      println(s"wrote $target")
-    } else if !Files.exists(file) then {
-      Console.err.println(s"$target does not exist; run ./mill services.gateway.api.openApi")
-      sys.exit(1)
-    } else if Files.readString(file) != expected then {
-      Console.err.println(
-        s"$target is out of date with the endpoints it is generated from; " +
-          "run ./mill services.gateway.api.openApi and commit the result"
-      )
-      sys.exit(1)
-    }
+    OpenApiDocumentFile.emit(target, render, check, "services.gateway.api")
+    OpenApiDocumentFile.emit(browserTarget, renderBrowser, check, "services.gateway.api")
   }
 }
