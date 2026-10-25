@@ -6,6 +6,8 @@ import java.nio.file.{Files as JFiles, Path as JPath}
 import java.security.KeyStore
 import java.util.Base64
 
+import scala.concurrent.duration.*
+
 import cats.effect.std.CountDownLatch
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
@@ -398,5 +400,30 @@ final class AdminClientPoolSuite extends KuiIOSuite {
       _ <- fiber.cancel
       closed <- t.closed.get
     } yield assertEquals(closed, 1)
+  }
+
+  test("releasingThePoolDoesNotWaitOutTheCloseGraceForACallNobodyIsWaitingFor") {
+    // A real client, because the grace period is Kafka's: `Admin.close(timeout)` keeps its I/O thread
+    // until every pending call finishes or the timeout passes. A caller cancelled against a broker that
+    // never answers leaves its call pending, so each pool spent the whole five-second grace on a result
+    // nobody could receive, and a process with one pool per service stopped that many times slower.
+    val unreachable = plaintext.copy(bootstrapServers = BootstrapServers.unsafe("127.0.0.1:1"))
+
+    for {
+      allocated <- AdminClientPool.resource[IO](AdminMetrics.noop[IO]).allocated
+      (pool, release) = allocated
+      submitted <- Deferred[IO, Unit]
+      caller <- pool
+        .run(unreachable, "describeCluster")(admin =>
+          IO.blocking(admin.describeCluster()) >> submitted.complete(()) >> IO.never[Unit]
+        )
+        .start
+      _ <- submitted.get
+      _ <- caller.cancel
+      elapsed <- release.timed.map(_._1)
+    } yield assert(
+      elapsed < 5.seconds,
+      s"release waited ${elapsed.toMillis}ms, the full close grace, for a call whose caller was gone"
+    )
   }
 }

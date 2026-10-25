@@ -189,11 +189,27 @@ object AdminClientPool {
     /** Closes every client the pool still holds. Runs on `Resource` release, including on the cancellation
       * path, which is the only thing standing between a cancelled startup and a process that keeps a Kafka
       * network thread alive for ever.
+      *
+      * Calls still pending here are abandoned first. Everything that ran through the pool was acquired inside
+      * its scope and has been released already, so nobody can receive their answers, and `close`'s grace
+      * period would only wait for them: against a broker that never answers that is the whole
+      * [[CloseTimeout]], once per pool, on every shutdown.
       */
     def closeAll: F[Unit] =
       entries
         .getAndSet(Map.empty)
-        .flatMap(_.values.toList.traverse_(entry => entry.release.attempt.void))
+        .flatMap(
+          _.values.toList
+            .traverse_(entry => (abandonPendingCalls(entry.client).attempt >> entry.release).attempt.void)
+        )
+
+    /** Moves the client's hard-shutdown deadline to now, which aborts its pending calls.
+      *
+      * Not `Duration.ZERO`: Kafka joins its I/O thread for the same duration, and a zero join waits without a
+      * limit. The release that follows still waits up to [[CloseTimeout]] for that thread to exit.
+      */
+    private def abandonPendingCalls(client: Admin): F[Unit] =
+      Async[F].blocking(client.close(java.time.Duration.ofMillis(1L)))
 
     // -------------------------------------------------------------- creation
 
