@@ -84,21 +84,33 @@ final class TransportCancellationSuite extends KuiIOSuite {
       disconnected: Deferred[IO, Int],
       streaming: Boolean = false
   ): IO[Unit] =
-    Resource.make(IO.blocking(server.accept()))(socket => IO.blocking(socket.close())).use { socket =>
-      IO.blocking {
-        socket.setSoTimeout(3000)
-        readHeaders(socket)
-        if streaming then {
-          socket.getOutputStream.write(
-            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n"
-              .getBytes(StandardCharsets.US_ASCII)
-          )
-          socket.getOutputStream.flush()
-        }
-      } *> received
-        .complete(())
-        .void *> IO.blocking(socket.getInputStream.read()).flatMap(disconnected.complete).void
-    }
+    Resource
+      .makeFull[IO, Socket](poll => poll(closingOnCancel(server.accept())(server.close())))(socket =>
+        IO.blocking(socket.close())
+      )
+      .use { socket =>
+        closingOnCancel {
+          readHeaders(socket)
+          if streaming then {
+            socket.getOutputStream.write(
+              "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n"
+                .getBytes(StandardCharsets.US_ASCII)
+            )
+            socket.getOutputStream.flush()
+          }
+        }(socket.close()) *> received
+          .complete(())
+          .void *> closingOnCancel(socket.getInputStream.read())(socket.close())
+          .flatMap(disconnected.complete)
+          .void
+      }
+
+  /** `IO.blocking` ignores cancellation, so closing the socket is what unblocks it. Without this, a body that
+    * fails before the client connects leaves `accept()` blocked forever and `background` cleanup hangs,
+    * turning the five-second failure into an opaque suite timeout.
+    */
+  private def closingOnCancel[A](thunk: => A)(close: => Unit): IO[A] =
+    IO.blocking(thunk).cancelable(IO.blocking(close))
 
   private def readHeaders(socket: Socket): Unit = {
     val input = socket.getInputStream
