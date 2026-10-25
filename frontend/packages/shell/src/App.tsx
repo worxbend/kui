@@ -92,17 +92,14 @@ import { createMessageBrowserSync } from "./data/messageBrowser.js";
 import { createClusterWritePolicy } from "./data/writePolicy.js";
 import { brokerStorageOf, createClusterStore } from "./data/clusterStore.js";
 import {
-  SEARCH_DEBOUNCE_MS,
-  SEARCH_LIMIT,
   SEARCH_MAX_LENGTH,
-  fetchSearch,
   searchGroups,
   searchStatus,
   unavailableServices,
   type SearchAnswer,
   type SearchLinks,
-  type SearchState,
 } from "./data/search.js";
+import { createSearchController } from "./data/searchController.js";
 import { featureRegistry } from "./features/registry.js";
 import { FeatureGate } from "./features/FeatureGate.jsx";
 import { createHealth, type CallScope } from "./health.js";
@@ -313,93 +310,20 @@ export function App() {
     }),
   );
 
-  /**
-   * What is in the search box, and what the last search answered.
-   *
-   * Two signals rather than one, because the text and the answer are out of step for most of the
-   * time the box is in use: a debounce is precisely the interval during which the field shows what
-   * was typed and the overlay shows the previous answer, and collapsing them would either delay the
-   * characters appearing or throw the results away on every keystroke.
-   */
-  const [searchText, setSearchText] = createSignal("");
-  const [searchState, setSearchState] = createSignal<SearchState>({ kind: "idle" });
-
-  let searchTimer: ReturnType<typeof setTimeout> | undefined;
-  let searchRequest: AbortController | undefined;
-  /**
-   * Which search is current.
-   *
-   * `GET /api/v1/search` is a fold over three services, so two searches in flight can finish in
-   * either order — and the loser landing last would put the results for `ord` under a box that says
-   * `orders`. Every answer carries the number of the search that asked for it and is dropped when
-   * that number has moved on, which is the same rule the overview's fetch effect applies to a
-   * cluster switch and for the same reason: a wrong answer that looks right is the worst kind.
-   */
-  let searchEpisode = 0;
-
-  const invalidateSearch = (): number => {
-    const episode = (searchEpisode += 1);
-    searchRequest?.abort();
-    searchRequest = undefined;
-    return episode;
-  };
-
-  const runSearch = (query: string, episode: number): void => {
-    const request = new AbortController();
-    searchRequest = request;
-    setSearchState({ kind: "searching" });
-    void fetchSearch(api, query, SEARCH_LIMIT, request.signal).then((answer) => {
-      if (searchRequest === request) searchRequest = undefined;
-      if (episode !== searchEpisode) return;
-      /* The search endpoint is the gateway's own, so a failure here is evidence about the gateway
-         rather than about one upstream — the same reasoning the capability probe applies. A service
-         that could not be asked is *not* a failure and does not reach this branch: it arrives
-         inside a successful answer, in `partial`. */
-      report("shell", answer.ok ? undefined : answer.error);
-      setSearchState(
-        answer.ok
-          ? { kind: "ready", answer: answer.value }
-          : { kind: "failed", reason: userMessage(answer.error) },
-      );
-    });
-  };
-
-  const onSearchInput = (next: string): void => {
-    setSearchText(next);
-    if (searchTimer !== undefined) clearTimeout(searchTimer);
-    searchTimer = undefined;
-
-    /* Invalidate at the keystroke, not when its debounce expires. Otherwise an older request can
-       land during this 200 ms window and replace "Searching" with rows for text the field no
-       longer contains. Cancelling also stops a gateway fan-out whose answer cannot be used. */
-    const episode = invalidateSearch();
-
-    const query = next.trim();
-    if (query.length === 0) {
-      // Emptying the box is not a search for nothing; it is the end of searching. The episode is
-      // stepped so that an answer already in flight cannot reopen the overlay behind the caret.
-      setSearchState({ kind: "idle" });
-      return;
-    }
-
-    /* `searching` immediately, and the request after the debounce. Waiting to say anything until
-       the request goes out leaves the overlay showing the *previous* query's results for a fifth of
-       a second under new text, which reads as a search that answered wrongly. */
-    setSearchState({ kind: "searching" });
-    searchTimer = setTimeout(() => {
-      searchTimer = undefined;
-      runSearch(query, episode);
-    }, SEARCH_DEBOUNCE_MS);
-  };
-
-  onCleanup(() => {
-    if (searchTimer !== undefined) clearTimeout(searchTimer);
-    searchEpisode += 1;
-    searchRequest?.abort();
+  /* The search box's text, its answer, and the debounce, cancellation and staleness rules between
+     them, live in `data/searchController.ts`. What an answer is evidence of stays here: the search
+     endpoint is the gateway's own, so a failure is evidence about the gateway rather than about one
+     upstream — the same reasoning the capability probe applies. A service that could not be asked
+     is *not* a failure and does not reach `report`: it arrives inside a successful answer, in
+     `partial`. */
+  const search = createSearchController({
+    api,
+    answered: (answer) => report("shell", answer.ok ? undefined : answer.error),
   });
+  onCleanup(search.dispose);
 
   const searchAnswer = createMemo<SearchAnswer | undefined>(() => {
-    const state = searchState();
+    const state = search.state();
     return state.kind === "ready" ? state.answer : undefined;
   });
 
@@ -1030,19 +954,16 @@ export function App() {
                reaches the element; a hint for a key that does nothing teaches the reader that
                shortcuts do not work. */
               search={{
-                value: searchText(),
-                onInput: onSearchInput,
-                status: searchStatus(searchState()),
+                value: search.text(),
+                onInput: search.input,
+                status: searchStatus(search.state()),
                 maxLength: SEARCH_MAX_LENGTH,
                 results: searchResults(),
                 /* The services the fold could not ask, in words. Reported rather than dropped: the
                    distributed stack routes no schema service, so a search that returned two lists
                    out of three would tell an operator their subject does not exist. */
                 unavailable: searchUnavailable(),
-                onRetry: () => {
-                  const query = searchText().trim();
-                  if (query.length > 0) runSearch(query, invalidateSearch());
-                },
+                onRetry: search.retry,
                 inputRef: (el) => {
                   searchInput = el;
                 },
