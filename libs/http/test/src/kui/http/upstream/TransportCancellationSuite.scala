@@ -90,7 +90,6 @@ final class TransportCancellationSuite extends KuiIOSuite {
       )
       .use { socket =>
         closingOnCancel {
-          socket.setSoTimeout(3000)
           readHeaders(socket)
           if streaming then {
             socket.getOutputStream.write(
