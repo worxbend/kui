@@ -30,6 +30,27 @@ final class PrometheusQueryClientSuite extends CatsEffectSuite {
   private val at = Instant.parse("2026-09-20T12:34:56.123456789Z")
   private val query = compiled("consumer.total-lag.v1", "sum(rate(secret_metric{tenant=\"secret\"}[5m]))")
 
+  /** Every loopback case runs inside a wall-clock call timeout, and the first request on a code path also
+    * pays the JVM's one-time cost of loading and compiling it. On a loaded runner that cost alone exceeded
+    * two seconds, so the first plain case and the first OAuth case timed out before their requests reached
+    * the fixture, and no other case did. Paying it here, once and unasserted, keeps it out of every timed
+    * window instead of hiding it behind a larger timeout.
+    */
+  private val warmedTransport = ResourceSuiteLocalFixture("warmed loopback transport", Resource.eval(warmUp))
+
+  override def munitFixtures = List(warmedTransport)
+
+  private def warmUp: IO[Unit] =
+    PrometheusTestServer.resource(PrometheusTestResponse(200, oauthToken())).use { tokenServer =>
+      PrometheusTestServer.resource(PrometheusTestResponse(200, successVector())).use { queryServer =>
+        def attempt(remaining: Int): IO[Unit] =
+          client(oauthSettings(queryServer, tokenServer)).use(_.instant(query, at)).flatMap { result =>
+            if result.isRight || remaining <= 1 then IO.unit else attempt(remaining - 1)
+          }
+        attempt(remaining = 5)
+      }
+    }
+
   test("probe is an authenticated bounded form POST below a reverse-proxy prefix") {
     val response = successVector(timestamp = "1789907696.123456789", value = "1")
 
