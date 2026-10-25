@@ -608,6 +608,143 @@ describe("a browse session", () => {
     });
   });
 
+  test("releasing a pause on a bounded browse appends what was held, in delivery order", () => {
+    withSession((session, fake) => {
+      session.start(DEFAULT_BROWSE);
+      fake.emit(record("1"));
+      session.setPaused(true);
+      fake.emit(record("2"));
+      fake.emit(record("3"));
+      void flush();
+      expect(session.rows().map((r) => r.offset)).toEqual(["1"]);
+      expect(session.held()).toBe(2);
+
+      session.setPaused(false);
+      void flush();
+      expect(session.rows().map((r) => r.offset)).toEqual(["1", "2", "3"]);
+      expect(session.pageRows().map((r) => r.offset)).toEqual(["1", "2", "3"]);
+      expect(session.held()).toBe(0);
+    });
+  });
+
+  test.each([
+    ["live", true],
+    ["bounded", false],
+  ])("releasing a %s pause hands its payload bytes over without leaking or losing them", (_, live) => {
+    /* The bytes held during a pause move to the visible list and its page when the pause is
+     * released. If that hand-over counted them twice, later records would lose their payloads
+     * early; if it dropped them, the budget would be overrun. Either way the records that arrive
+     * after the release would be stripped differently from a browse that was never paused. */
+    const text = `{"padding":"${"x".repeat(300_000)}"}`;
+    const large = (offset: string): KafkaRecord => ({ ...record(offset), value: { kind: "json", text } });
+    const strippedAfterRelease = (pause: boolean): string[] => {
+      let stripped: string[] = [];
+      withSession((session, fake) => {
+        session.start({ ...DEFAULT_BROWSE, live });
+        fake.emit(large("before"));
+        if (pause) session.setPaused(true);
+        for (let index = 0; index < 8; index += 1) fake.emit(large(`held-${String(index)}`));
+        void flush();
+        session.setPaused(false);
+        void flush();
+        for (let index = 0; index < 8; index += 1) fake.emit(large(`after-${String(index)}`));
+        void flush();
+        stripped = session
+          .rows()
+          .filter((row) => row.value.kind === "large" && row.value.text === undefined)
+          .map((row) => row.offset)
+          .sort();
+      });
+      return stripped;
+    };
+
+    const neverPaused = strippedAfterRelease(false);
+    expect(neverPaused.length).toBeGreaterThan(0);
+    expect(neverPaused.every((offset) => offset.startsWith("after-"))).toBe(true);
+    expect(neverPaused.length).toBeLessThan(8);
+    expect(strippedAfterRelease(true)).toEqual(neverPaused);
+  });
+
+  test.each([
+    ["live", true],
+    ["bounded", false],
+  ])("records released from a %s pause give their payload bytes back once they leave the screen", (_, live) => {
+    /* The complement of the case above: a reference left behind by the release would keep the
+     * bytes of records nobody can see any more, and every later record would pay for them. */
+    const text = `{"padding":"${"x".repeat(300_000)}"}`;
+    const large = (offset: string): KafkaRecord => ({ ...record(offset), value: { kind: "json", text } });
+    withSession((session, fake) => {
+      session.start({ ...DEFAULT_BROWSE, live });
+      fake.emit(large("before"));
+      session.setPaused(true);
+      for (let index = 0; index < 8; index += 1) fake.emit(large(`held-${String(index)}`));
+      void flush();
+      session.setPaused(false);
+      void flush();
+      if (live) {
+        // A tail drops its oldest end from the rows and the page alike.
+        for (let index = 0; index < MAX_ROWS; index += 1) fake.emit(record(`small-${String(index)}`));
+      } else {
+        // A bounded browse keeps the first rows of a page, so the held records leave only when
+        // their page is evicted from the cache and the combined rows have moved past them.
+        for (let index = 0; index < MAX_ROWS - 9; index += 1) fake.emit(record(`small-${String(index)}`));
+        fake.close("cursor-1");
+        void flush();
+        session.nextPage();
+        for (let index = 0; index < MAX_ROWS; index += 1) fake.emit(record(`next-${String(index)}`));
+        fake.close("cursor-2");
+        void flush();
+        session.nextPage();
+      }
+      void flush();
+      expect(session.rows().some((row) => row.offset === "before" || row.offset.startsWith("held-"))).toBe(false);
+
+      for (let index = 0; index < 10; index += 1) fake.emit(large(`after-${String(index)}`));
+      void flush();
+      const after = session.rows().filter((row) => row.offset.startsWith("after-"));
+      expect(after).toHaveLength(10);
+      expect(after.every((row) => row.value.kind === "json")).toBe(true);
+    });
+  });
+
+  test("records released from a bounded pause stay counted while only their cached page holds them", () => {
+    /* A bounded browse's combined rows move past a page before the page leaves the cache. The
+     * release gives the page its own reference, so the bytes stay counted until both are gone. */
+    const text = `{"padding":"${"x".repeat(300_000)}"}`;
+    const large = (offset: string): KafkaRecord => ({ ...record(offset), value: { kind: "json", text } });
+    const strippedOnNextPage = (pause: boolean): string[] => {
+      let stripped: string[] = [];
+      withSession((session, fake) => {
+        session.start(DEFAULT_BROWSE);
+        fake.emit(large("before"));
+        if (pause) session.setPaused(true);
+        for (let index = 0; index < 8; index += 1) fake.emit(large(`held-${String(index)}`));
+        void flush();
+        session.setPaused(false);
+        void flush();
+        for (let index = 0; index < MAX_ROWS - 9; index += 1) fake.emit(record(`small-${String(index)}`));
+        fake.close("cursor-1");
+        void flush();
+        session.nextPage();
+        for (let index = 0; index < MAX_ROWS; index += 1) fake.emit(record(`next-${String(index)}`));
+        void flush();
+        expect(session.rows().some((row) => row.offset.startsWith("held-"))).toBe(false);
+        for (let index = 0; index < 8; index += 1) fake.emit(large(`after-${String(index)}`));
+        void flush();
+        stripped = session
+          .rows()
+          .filter((row) => row.value.kind === "large" && row.value.text === undefined)
+          .map((row) => row.offset)
+          .sort();
+      });
+      return stripped;
+    };
+
+    const neverPaused = strippedOnNextPage(false);
+    expect(neverPaused.length).toBeGreaterThan(0);
+    expect(strippedOnNextPage(true)).toEqual(neverPaused);
+  });
+
   test("stopping shows what was held rather than discarding it", () => {
     // Those records were delivered. Throwing them away because somebody pressed Stop loses
     // evidence that arrived before the press, and on a tail there is no second chance to read it.

@@ -603,25 +603,18 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
     setPausedSignal(false);
     if (heldList.length > 0) {
       const page = pageList[activePageNow] ?? [];
-      if (liveNow) {
-        const nextRows = [...heldList, ...rowList].slice(0, MAX_ROWS);
-        const nextPage = [...heldList, ...page].slice(0, MAX_ROWS);
-        releaseAll(rowList);
-        releaseAll(page);
-        for (const record of nextRows) retain(record);
-        for (const record of nextPage) retain(record);
-        rowList = nextRows;
-        pageList[activePageNow] = nextPage;
-      } else {
-        const nextRows = [...rowList, ...heldList].slice(-MAX_ROWS);
-        const nextPage = [...page, ...heldList].slice(0, MAX_ROWS);
-        releaseAll(rowList);
-        releaseAll(page);
-        for (const record of nextRows) retain(record);
-        for (const record of nextPage) retain(record);
-        rowList = nextRows;
-        pageList[activePageNow] = nextPage;
-      }
+      const nextRows = liveNow
+        ? [...heldList, ...rowList].slice(0, MAX_ROWS)
+        : [...rowList, ...heldList].slice(-MAX_ROWS);
+      const nextPage = liveNow
+        ? [...heldList, ...page].slice(0, MAX_ROWS)
+        : [...page, ...heldList].slice(0, MAX_ROWS);
+      releaseAll(rowList);
+      releaseAll(page);
+      for (const record of nextRows) retain(record);
+      for (const record of nextPage) retain(record);
+      rowList = nextRows;
+      pageList[activePageNow] = nextPage;
       releaseAll(heldList);
       heldList = [];
     }
