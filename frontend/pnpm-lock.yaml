@@ -42,11 +42,11 @@ importers:
         specifier: 14.6.1
         version: 14.6.1(@testing-library/dom@10.4.1)
       '@types/node':
-        specifier: 22.13.0
-        version: 22.13.0
+        specifier: 26.6.5
+        version: 26.6.5
       '@vitest/browser':
         specifier: 5.0.5
-        version: 5.0.5(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))(vitest@5.0.5)
+        version: 5.0.5(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))(vitest@5.0.5)
       '@vitest/coverage-v8':
         specifier: 5.0.5
         version: 5.0.5(@vitest/browser@5.0.5)(vitest@5.0.5)
@@ -67,19 +67,19 @@ importers:
         version: 10.6.3(@types/react@19.2.18)(react@19.2.8)
       storybook-solidjs-vite:
         specifier: 10.7.1
-        version: 10.7.1(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(solid-js@2.0.0-rc.6)(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(typescript@5.9.3)(vite-plugin-solid@3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2)))(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+        version: 10.7.1(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(solid-js@2.0.0-rc.6)(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(typescript@5.9.3)(vite-plugin-solid@3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2)))(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
       typescript:
         specifier: 5.9.3
         version: 5.9.3
       vite:
         specifier: 8.2.4
-        version: 8.2.4(@types/node@22.13.0)(esbuild@0.28.2)
+        version: 8.2.4(@types/node@26.6.5)(esbuild@0.28.2)
       vite-plugin-solid:
         specifier: 3.0.0-next.27
-        version: 3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+        version: 3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
       vitest:
         specifier: 5.0.5
-        version: 5.0.5(@types/node@22.13.0)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+        version: 5.0.5(@types/node@26.6.5)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
 
   packages/api:
     dependencies:
@@ -95,7 +95,7 @@ importers:
         version: 7.13.0(typescript@5.9.3)
       vitest:
         specifier: 5.0.5
-        version: 5.0.5(@types/node@22.13.0)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+        version: 5.0.5(@types/node@26.6.5)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
 
   packages/feature-alerts:
     dependencies:
@@ -273,10 +273,10 @@ importers:
         version: 10.6.3(@types/react@19.2.18)(react@19.2.8)
       storybook-solidjs-vite:
         specifier: 10.7.1
-        version: 10.7.1(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(solid-js@2.0.0-rc.6)(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(typescript@5.9.3)(vite-plugin-solid@3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2)))(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+        version: 10.7.1(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(solid-js@2.0.0-rc.6)(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(typescript@5.9.3)(vite-plugin-solid@3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2)))(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
       vitest:
         specifier: 5.0.5
-        version: 5.0.5(@types/node@22.13.0)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+        version: 5.0.5(@types/node@26.6.5)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
 
   packages/shell:
     dependencies:
@@ -340,10 +340,10 @@ importers:
         version: 10.6.3(@types/react@19.2.18)(react@19.2.8)
       storybook-solidjs-vite:
         specifier: 10.7.1
-        version: 10.7.1(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(solid-js@2.0.0-rc.6)(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(typescript@5.9.3)(vite-plugin-solid@3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2)))(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+        version: 10.7.1(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(solid-js@2.0.0-rc.6)(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(typescript@5.9.3)(vite-plugin-solid@3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2)))(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
       vitest:
         specifier: 5.0.5
-        version: 5.0.5(@types/node@22.13.0)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+        version: 5.0.5(@types/node@26.6.5)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
 
 packages:
 
@@ -1242,8 +1242,8 @@ packages:
   '@types/mdx@2.0.14':
     resolution: {integrity: sha512-T48PeuJtvLosNTPVhfnIp3i/n3a4g4Bad7YCq5k64D4u7NwDrAotikQ+5+sjtUvBmxCMlbo3dVL+C2dP0rWHzg==}
 
-  '@types/node@22.13.0':
-    resolution: {integrity: sha512-ClIbNe36lawluuvq3+YYhnIN2CELi+6q8NpnM7PYp4hBn/TatfboPgVSm2rwKRfnV2M+Ty9GWDFI64KEe+kysA==}
+  '@types/node@26.6.5':
+    resolution: {integrity: sha512-uMzsv9stDdofIZBx4UGh4Z9ZgXnGC9seRDscilBcTHAeOFk67MZg/k9bWVfO+bk4qZmG+l52hRnLwUiH2LnJTg==}
 
   '@types/react@19.2.18':
     resolution: {integrity: sha512-AnzbBERsrLKtk2XSfTbYRLjQPdy116Sty4q+T+Bp3IC4l6jNBvreVPAHmpq9qhXQM7CXZPjLVmGMw9sy+hxQ3w==}
@@ -2182,8 +2182,8 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
-  undici-types@6.20.0:
-    resolution: {integrity: sha512-Ny6QZ2Nju20vw1SRHe3d9jVu6gJ+4e3+MMpqu7pqE5HT6WsTSlce++GQmK5UXS8mzV8DSYHrQH+Xrf2jVcuKNg==}
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
   undici@8.12.2:
     resolution: {integrity: sha512-XtuDWVdqTLr3NAxm2ly9/hU6kUsJOgGh1RASzMBbsw6aWCOaQzHdW+QQDfdERjfJ2V5vL5pRPa4RetO9UfivDg==}
@@ -2989,7 +2989,7 @@ snapshots:
 
   '@solidjs/signals@2.0.0-rc.6': {}
 
-  '@solidjs/vite-plugin@3.0.0-next.38(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))':
+  '@solidjs/vite-plugin@3.0.0-next.38(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))':
     dependencies:
       '@ampproject/remapping': 2.3.0
       '@babel/core': 7.29.7(supports-color@10.2.2)
@@ -2999,8 +2999,8 @@ snapshots:
       '@types/babel__core': 7.20.5
       merge-anything: 5.1.7
       solid-js: 2.0.0-rc.6
-      vite: 8.2.4(@types/node@22.13.0)(esbuild@0.28.2)
-      vitefu: 1.1.3(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+      vite: 8.2.4(@types/node@26.6.5)(esbuild@0.28.2)
+      vitefu: 1.1.3(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
     optionalDependencies:
       '@testing-library/jest-dom': 7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5)
     transitivePeerDependencies:
@@ -3034,11 +3034,11 @@ snapshots:
     transitivePeerDependencies:
       - '@types/react-dom'
 
-  '@storybook/builder-vite@10.6.0(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))':
+  '@storybook/builder-vite@10.6.0(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))':
     dependencies:
       storybook: 10.6.3(@types/react@19.2.18)(react@19.2.8)
       ts-dedent: 2.3.0
-      vite: 8.2.4(@types/node@22.13.0)(esbuild@0.28.2)
+      vite: 8.2.4(@types/node@26.6.5)(esbuild@0.28.2)
 
   '@storybook/global@5.0.0': {}
 
@@ -3084,7 +3084,7 @@ snapshots:
       picocolors: 1.1.1
       redent: 3.0.0
     optionalDependencies:
-      vitest: 5.0.5(@types/node@22.13.0)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+      vitest: 5.0.5(@types/node@26.6.5)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
 
   '@testing-library/user-event@14.6.1(@testing-library/dom@10.4.1)':
     dependencies:
@@ -3133,9 +3133,9 @@ snapshots:
 
   '@types/mdx@2.0.14': {}
 
-  '@types/node@22.13.0':
+  '@types/node@26.6.5':
     dependencies:
-      undici-types: 6.20.0
+      undici-types: 8.9.0
 
   '@types/react@19.2.18':
     dependencies:
@@ -3145,17 +3145,17 @@ snapshots:
     dependencies:
       '@typescript/old': typescript@6.0.3
 
-  '@vitest/browser@5.0.5(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))(vitest@5.0.5)':
+  '@vitest/browser@5.0.5(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))(vitest@5.0.5)':
     dependencies:
       '@blazediff/core': 1.10.0
-      '@vitest/mocker': 5.0.5(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+      '@vitest/mocker': 5.0.5(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
       '@vitest/ui': 5.0.5(vitest@5.0.5)
       '@vitest/utils': 5.0.5
       magic-string: 1.4.3
       pngjs: 7.0.0
       sirv: 3.0.2
       tinyrainbow: 3.2.0
-      vitest: 5.0.5(@types/node@22.13.0)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+      vitest: 5.0.5(@types/node@26.6.5)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
       ws: 8.22.0
     transitivePeerDependencies:
       - bufferutil
@@ -3173,9 +3173,9 @@ snapshots:
       obug: 3.0.0
       std-env: 4.3.0
       tinyrainbow: 3.2.0
-      vitest: 5.0.5(@types/node@22.13.0)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+      vitest: 5.0.5(@types/node@26.6.5)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
     optionalDependencies:
-      '@vitest/browser': 5.0.5(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))(vitest@5.0.5)
+      '@vitest/browser': 5.0.5(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))(vitest@5.0.5)
 
   '@vitest/expect@3.2.4':
     dependencies:
@@ -3191,14 +3191,14 @@ snapshots:
     dependencies:
       '@vitest/istanbul-lib-coverage': 1.0.2
 
-  '@vitest/mocker@5.0.5(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))':
+  '@vitest/mocker@5.0.5(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       '@vitest/spy': 5.0.5
       estree-walker: 3.0.3
       magic-string: 1.4.3
     optionalDependencies:
-      vite: 8.2.4(@types/node@22.13.0)(esbuild@0.28.2)
+      vite: 8.2.4(@types/node@26.6.5)(esbuild@0.28.2)
 
   '@vitest/pretty-format@3.2.4':
     dependencies:
@@ -3222,7 +3222,7 @@ snapshots:
       pathe: 2.0.3
       sirv: 3.0.2
       tinyrainbow: 3.2.0
-      vitest: 5.0.5(@types/node@22.13.0)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+      vitest: 5.0.5(@types/node@26.6.5)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
 
   '@vitest/utils@3.2.4':
     dependencies:
@@ -3979,9 +3979,9 @@ snapshots:
 
   std-env@4.3.0: {}
 
-  storybook-solidjs-vite@10.7.1(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(solid-js@2.0.0-rc.6)(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(typescript@5.9.3)(vite-plugin-solid@3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2)))(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2)):
+  storybook-solidjs-vite@10.7.1(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(solid-js@2.0.0-rc.6)(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(typescript@5.9.3)(vite-plugin-solid@3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2)))(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2)):
     dependencies:
-      '@storybook/builder-vite': 10.6.0(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+      '@storybook/builder-vite': 10.6.0(storybook@10.6.3(@types/react@19.2.18)(react@19.2.8))(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
       '@storybook/global': 5.0.0
       '@typescript/typescript6': 6.0.2
       '@volar/language-core': 2.4.28
@@ -3989,8 +3989,8 @@ snapshots:
       semver: 7.8.5
       solid-js: 2.0.0-rc.6
       storybook: 10.6.3(@types/react@19.2.18)(react@19.2.8)
-      vite: 8.2.4(@types/node@22.13.0)(esbuild@0.28.2)
-      vite-plugin-solid: 3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+      vite: 8.2.4(@types/node@26.6.5)(esbuild@0.28.2)
+      vite-plugin-solid: 3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
     optionalDependencies:
       '@solidjs/web': 2.0.0-rc.6(solid-js@2.0.0-rc.6)
       typescript: 5.9.3
@@ -4076,7 +4076,7 @@ snapshots:
 
   typescript@6.0.3: {}
 
-  undici-types@6.20.0: {}
+  undici-types@8.9.0: {}
 
   undici@8.12.2: {}
 
@@ -4107,9 +4107,9 @@ snapshots:
 
   validate-html-nesting@1.2.4: {}
 
-  vite-plugin-solid@3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2)):
+  vite-plugin-solid@3.0.0-next.27(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2)):
     dependencies:
-      '@solidjs/vite-plugin': 3.0.0-next.38(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+      '@solidjs/vite-plugin': 3.0.0-next.38(@solidjs/web@2.0.0-rc.6(solid-js@2.0.0-rc.6))(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.5))(solid-js@2.0.0-rc.6)(supports-color@10.2.2)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
     transitivePeerDependencies:
       - '@solidjs/start-devtools'
       - '@solidjs/web'
@@ -4119,7 +4119,7 @@ snapshots:
       - supports-color
       - vite
 
-  vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2):
+  vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -4127,18 +4127,18 @@ snapshots:
       rolldown: 1.2.7
       tinyglobby: 0.2.17
     optionalDependencies:
-      '@types/node': 22.13.0
+      '@types/node': 26.6.5
       esbuild: 0.28.2
       fsevents: 2.3.3
 
-  vitefu@1.1.3(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2)):
+  vitefu@1.1.3(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2)):
     optionalDependencies:
-      vite: 8.2.4(@types/node@22.13.0)(esbuild@0.28.2)
+      vite: 8.2.4(@types/node@26.6.5)(esbuild@0.28.2)
 
-  vitest@5.0.5(@types/node@22.13.0)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2)):
+  vitest@5.0.5(@types/node@26.6.5)(@vitest/coverage-v8@5.0.5)(@vitest/ui@5.0.5)(jsdom@30.0.1)(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2)):
     dependencies:
       '@types/chai': 5.2.3
-      '@vitest/mocker': 5.0.5(vite@8.2.4(@types/node@22.13.0)(esbuild@0.28.2))
+      '@vitest/mocker': 5.0.5(vite@8.2.4(@types/node@26.6.5)(esbuild@0.28.2))
       chai: 6.3.0
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
@@ -4149,10 +4149,10 @@ snapshots:
       tinybench: 6.2.2
       tinyexec: 1.3.1
       tinyglobby: 0.2.17
-      vite: 8.2.4(@types/node@22.13.0)(esbuild@0.28.2)
+      vite: 8.2.4(@types/node@26.6.5)(esbuild@0.28.2)
       why-is-node-running: 3.2.1
     optionalDependencies:
-      '@types/node': 22.13.0
+      '@types/node': 26.6.5
       '@vitest/coverage-v8': 5.0.5(@vitest/browser@5.0.5)(vitest@5.0.5)
       '@vitest/ui': 5.0.5(vitest@5.0.5)
       jsdom: 30.0.1
