@@ -39,7 +39,7 @@ object OpenApiDocument {
     val expected = render
 
     if !check then {
-      java.nio.file.Files.createDirectories(file.getParent)
+      Option(file.getParent).foreach(java.nio.file.Files.createDirectories(_))
       java.nio.file.Files.writeString(file, expected)
       println(s"wrote $path")
     } else if !java.nio.file.Files.exists(file) then {
