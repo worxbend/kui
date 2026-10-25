@@ -2122,6 +2122,43 @@ describe("the search field", () => {
     app.dispose();
   });
 
+  /**
+   * Unmounting the frame ends the search it owned, at either stage.
+   *
+   * A search outlives its keystroke by up to a debounce and a gateway fold, and the frame can be
+   * torn down inside either interval. Neither leftover is visible on screen — there is no screen —
+   * which is why both are asserted at the gateway: a timer that survives disposal still sends a
+   * request nobody can read, and a request that survives it keeps a three-service fan-out running.
+   */
+  it("aborts a search still in flight when the frame is disposed", async () => {
+    const gateway = stubHeldSearch();
+    const app = mountApp();
+    await settle();
+
+    type(app, "orders");
+    await requested();
+    expect(gateway.asked).toEqual(["orders"]);
+    expect(gateway.signal("orders").aborted).toBe(false);
+
+    app.dispose();
+
+    expect(gateway.signal("orders").aborted).toBe(true);
+  });
+
+  it("sends nothing for a keystroke whose debounce was still pending at disposal", async () => {
+    const gateway = stubHeldSearch();
+    const app = mountApp();
+    await settle();
+
+    type(app, "orders");
+    expect(gateway.asked).toEqual([]);
+
+    app.dispose();
+    await requested();
+
+    expect(gateway.asked).toEqual([]);
+  });
+
   it("stops searching when the box is emptied rather than searching for nothing", async () => {
     const searched = stubSearch();
     const app = mountApp();
