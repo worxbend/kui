@@ -299,3 +299,23 @@ Q07 is resolved. Q01–Q03 and Q11 require behavior/dependency changes and remai
 Cleanup: the temporary quickstart and distributed stacks were removed, including their test volumes; the website and Storybook verification servers were stopped. Unrelated pre-existing containers were left running. Build caches/images remain normal local build artifacts; no tracked generated file or lockfile changed.
 
 Commit hygiene: work stayed on `main`, using the existing Git identity, without pushing, creating branches, rebasing or rewriting pre-session history. Messages were inspected after each commit with `git log -1 --format=%B` and across the session with `git log --format=%B 2257ab75^..HEAD`; no prohibited attribution was found. The final report is a separate `docs: add refactoring results` commit.
+
+## Phase 5 — R1 follow-up fixes (2026-10-25)
+
+Each finding landed on its own `fix/` branch. An independent reviewer checked each branch before merge.
+
+| Finding | Branch | Outcome |
+| --- | --- | --- |
+| Q04 `TransportCancellationSuite` | `fix/q04a-transport-cancellation` | Test-only. The fake peer's blocking `accept`/reads ignored cancellation, so a failed run hung cleanup until the 30s munit timeout. They now close on cancel. Its 3s `SoTimeout` raced the test's 5s guard and was removed. Reproduced 2 times in about 75 runs, only under load average 44-126. Remaining risk: cold-JVM starvation can still exhaust the test's own 5s guard. |
+| Q04 `PrometheusQueryClientSuite` | `fix/q04b-metrics-tests` | Test-only. Only the first plain case and the first OAuth case failed. Cause: first-request class loading and JIT ran inside the 2s call timeout. A suite fixture now warms both paths once, unasserted. Before: 5 failures in 11 loaded runs. After: 0 in 20. |
+| Q04 `MetricsWiringSuite` | none | Already fixed by `8e46f6fc` (polls for the first bucket instead of a fixed sleep). 21/21 green. |
+| Q04 `AllInOneWiringSuite` | `fix/q04c-admin-pool-close` | Product fix. `AdminClientPool.closeAll` waited the full 5s `CloseTimeout` per pool for calls abandoned against an unreachable broker. Four pools spent about 20s of the 30s budget. It now aborts pending calls first. New `AdminClientPoolSuite` case: red at 5000 ms before, green after. Release still runs if the abort throws (`IsolatedProbeSuite`). |
+| Q05 | `fix/q05-shell-search` | Characterization tests first (in-flight abort and pending debounce on disposal), then Extract Function into `shell/src/data/searchController.ts`. |
+| Q06 | `fix/q06-session-release` | Characterization tests first (ordering, byte ownership, reference release), then one shared release/retain/update sequence. |
+| Q08 | `fix/q08-openapi-driver` | `kui.http.OpenApiDocumentFile` replaces ten copies. Messages and exit codes unchanged. One behaviour change, committed separately: a target path with no directory part now writes instead of throwing an NPE. This matches the gateway, and Mill never passes such a path. |
+
+Integration verification on `integration/r1`: `./mill __.compile`, `__.checkFormat`, `__.fix --check`, `checkArchitecture` and `__.openApiCheck` passed. `./mill -k __.test`: 492 suites, 4,922 tests, 0 failed. The four Q04 suites passed 5 consecutive runs. Frontend `pnpm typecheck`, `test` (105 files, 2,156 tests), `build`, `lint:boundaries` and `bundle-shape` passed.
+
+Browser E2E against a current-source quickstart: the first full run had 2 failures. One was the traffic stat cards: `net::ERR_NETWORK_CHANGED` from the host. The other was the topic-delete auto-create warning: the topic was reported as not existing right after creation. After those 2 failures, 14 later tests in the same serial groups did not run. Both specs then passed 3 times in isolation. A second full run passed 126 with 2 deployment-shape skips. Treat the topic-delete case as a possible metadata-propagation flake to watch.
+
+The DESIGN.md R1 exit criterion is still open: at least 5 consecutive green CI runs.

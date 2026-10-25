@@ -9,6 +9,9 @@ Labels: **[F]** fact with evidence path · **[A]** assumption · **[D]** decisio
 marked accepted) · **[Q]** open question. "verify" marks a third-party capability that has not
 been checked here.
 
+**Status 2026-10-25:** R0 (Q01, Q02/Q03, Q09, Q10, Q11) and R1 (Q04, Q05, Q06, Q08) are merged.
+QUALITY_REVIEW.md "Phase 5" records the R1 evidence. Sections below keep the 2026-10-24 analysis.
+
 ## 1. Summary
 
 - [F] KUI is a pre-1.0 Kafka web console. The same Mill modules ship in two backend shapes: a
@@ -56,7 +59,7 @@ overall, because no evidence of production scale, paying users, or compliance sc
 | F8 | Upstream HTTP budget per backend: 10 finite + 10 streaming sockets, at most 256 queued per pool | `DEPENDENCY_MATRIX.md` |
 | F9 | Metadata lives in compacted Kafka topics `__kui_config` (one partition) and `__kui_files` (4 MiB cap), plus `__kui_audit`. There is no RDBMS. | ARCHITECTURE.md §10.1 |
 | F10 | CI jobs: compile, style, architecture, security (pins + `pnpm audit --audit-level high`), generated, test (+coverage ratchet), frontend, browser (quickstart + Playwright), compose (`smoke.sh`). `pages.yml` builds the website without an audit. | `.github/workflows/ci.yml`, `pages.yml` |
-| F11 | Review findings Q01-Q11. Q07 is resolved. The others are open. | `QUALITY_REVIEW.md` |
+| F11 | Review findings Q01-Q11. All resolved by 2026-10-25 (Q07 first, then R0 and R1). | `QUALITY_REVIEW.md` |
 | F12 | The Prometheus query core is specified and approved. Later slices follow the capability map. | `SPEC-prometheus-query-core.md`, `CAPABILITY-MAP-…md` |
 
 | # | Assumption | Decision it affects |
@@ -663,15 +666,15 @@ Door type: **one-way** (costly to reverse) or **two-way** (cheap to reverse).
 | F-6 | Dependency risk | `pnpm audit --audit-level high`, `check-action-pins.sh` | [F] in CI. Website audit [D] to add. |
 | F-7 | ARCHITECTURE.md §3 vs tree | `ArchitectureDocumentSuite` | [F]. Extending it to the §1/§2 catalog vs `deployment/compose` and `build.mill` images is [D], a separate change. |
 | F-8 | Fault isolation | `deployment/compose/smoke.sh` in the `compose` job | [F] in CI |
-| F-9 | Issuer binding and claim totality | New `OidcRelyingPartySuite` cases | [D] (ADR-D02/D03) |
-| F-10 | No limiter interference in E2E | Fixture status check, 0 × 429 | [D] (ADR-D04) |
+| F-9 | Issuer binding and claim totality | New `OidcRelyingPartySuite` cases | [F] in CI (R0) |
+| F-10 | No limiter interference in E2E | Fixture status check, 0 × 429 | [F] in CI (R0) |
 
 ## 12. Roadmap (risk-reducing increments; the walking skeleton already exists)
 
 | Milestone | Content | Retires | Exit criteria |
 | --- | --- | --- | --- |
-| R0 Review fixes | ADR-D02/D03 (Q02/Q03), D06 (Q11), D04 (Q10), D05 (Q01), D07 (Q09) | R-1 (after experiment), R-3 (partly), TB3/TB6 gaps | New regression tests fail before and pass after. Audit gate passes. Docs corrected. |
-| R1 Trustworthy safety net | Diagnose Q04 under isolated resources. Then the Q05/Q06 refactors. | R-3 | ≥ 5 consecutive green full CI runs. Test counts not decreasing. |
+| R0 Review fixes (done) | ADR-D02/D03 (Q02/Q03), D06 (Q11), D04 (Q10), D05 (Q01), D07 (Q09) | R-1 (after experiment), R-3 (partly), TB3/TB6 gaps | New regression tests fail before and pass after. Audit gate passes. Docs corrected. |
+| R1 Trustworthy safety net (merged; CI streak pending) | Diagnose Q04 under isolated resources. Then the Q05/Q06 refactors. | R-3 | ≥ 5 consecutive green full CI runs. Test counts not decreasing. |
 | R2 Auth in every shape | Resolve Q-c (identity image or gateway composition). Real-IdP compatibility check (verify which containerized IdP CI can run). Threat-model doc from §9. | R-4 | Smoke variant with `authType != disabled` passes |
 | R3 Observability slices | Confirm Q-g. Finish the capability map, or choose I6 link-out. | — | Per the capability map's own criteria |
 | R4 1.0 readiness | Published images, revisit deferred HA/Helm triggers, raise coverage floors (review notices) | R-5 | Release checklist |
