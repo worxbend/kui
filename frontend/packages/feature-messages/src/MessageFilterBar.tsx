@@ -90,8 +90,16 @@ export interface MessageFilterBarProps {
   readonly onPartitionsChange: (partitions: readonly number[]) => void;
   readonly filter: string;
   readonly onFilterChange: (filter: string) => void;
-  /** Fired when the filter is committed — Enter, or the debounce elapsing. */
+  /** Fired when the filter is committed — Enter, the debounce elapsing, or a flush. */
   readonly onFilterCommit: (filter: string) => void;
+  /**
+   * Receives the function that commits, at once, whatever a debounced box is still holding.
+   *
+   * Read calls it before it starts a browse. Typing, Tab and Enter fits inside the debounce, and a
+   * Read that went ahead without it started the browse the boxes no longer described — and the
+   * commit that landed a moment later stopped that browse and left its unfiltered rows on screen.
+   */
+  readonly flushRef?: ((flush: () => void) => void) | undefined;
   readonly live: boolean;
   readonly onLiveChange: (live: boolean) => void;
   readonly liveAvailability?: LiveAvailability | undefined;
@@ -197,6 +205,34 @@ export function MessageFilterBar(props: MessageFilterBarProps): JSX.Element {
 
   let debounce: ReturnType<typeof setTimeout> | undefined;
 
+  /* The commit each box's debounce is still waiting to make, by box. A flush makes them now. */
+  const pending = new Map<string, () => void>();
+  /* While a flush runs, predicate commits are composed here and emitted once. Each box spreads the
+   * predicates it was rendered with, so two boxes committed in one turn would each drop the other's
+   * change — the router has not caught up between them. */
+  let flushing: Predicates | undefined;
+
+  function changePredicates(change: Partial<Predicates>): void {
+    if (flushing !== undefined) {
+      flushing = { ...flushing, ...change };
+      return;
+    }
+    props.onPredicatesChange({ ...props.predicates, ...change });
+  }
+
+  function flushPending(): void {
+    if (pending.size === 0) return;
+    const commits = [...pending.entries()];
+    const before = props.predicates;
+    flushing = before;
+    for (const [box, commit] of commits) if (box !== "filter") commit();
+    const next = flushing;
+    flushing = undefined;
+    if (next !== before) props.onPredicatesChange(next);
+    pending.get("filter")?.();
+  }
+  untrack(() => props.flushRef?.(flushPending));
+
   /* The upper bounds are typed text too, and committed the same debounced way as the plain filter
    * box above: `onPredicatesChange` stops a running browse and rewrites the address (see
    * `FieldPredicateControl` below for the fuller reasoning), so applying it on every digit made
@@ -222,11 +258,9 @@ export function MessageFilterBar(props: MessageFilterBarProps): JSX.Element {
       clearTimeout(untilOffsetDebounce);
       untilOffsetDebounce = undefined;
     }
+    pending.delete("untilOffset");
     emittedUntilOffset = digits;
-    props.onPredicatesChange({
-      ...props.predicates,
-      untilOffset: digits === "" ? undefined : digits,
-    });
+    changePredicates({ untilOffset: digits === "" ? undefined : digits });
   }
 
   const [untilTimeText, setUntilTimeText] = createSignal(
@@ -250,8 +284,9 @@ export function MessageFilterBar(props: MessageFilterBarProps): JSX.Element {
       clearTimeout(untilTimeDebounce);
       untilTimeDebounce = undefined;
     }
+    pending.delete("untilTime");
     emittedUntilTime = raw;
-    props.onPredicatesChange({ ...props.predicates, untilTime: epochOf(raw) });
+    changePredicates({ untilTime: epochOf(raw) });
   }
 
   onCleanup(() => {
@@ -266,6 +301,7 @@ export function MessageFilterBar(props: MessageFilterBarProps): JSX.Element {
 
   function commitFilter(value: string): void {
     if (debounce !== undefined) clearTimeout(debounce);
+    pending.delete("filter");
     props.onFilterCommit(value);
   }
 
@@ -353,6 +389,7 @@ export function MessageFilterBar(props: MessageFilterBarProps): JSX.Element {
             setUntilOffsetText(digits);
             if (untilOffsetDebounce !== undefined) clearTimeout(untilOffsetDebounce);
             untilOffsetDebounce = setTimeout(() => commitUntilOffset(digits), FILTER_DEBOUNCE_MS);
+            pending.set("untilOffset", () => commitUntilOffset(digits));
           }}
           onKeyDown={(event) => {
             if (event.key === "Enter") commitUntilOffset(untilOffsetText());
@@ -389,6 +426,7 @@ export function MessageFilterBar(props: MessageFilterBarProps): JSX.Element {
               setUntilTimeText(raw);
               if (untilTimeDebounce !== undefined) clearTimeout(untilTimeDebounce);
               untilTimeDebounce = setTimeout(() => commitUntilTime(raw), FILTER_DEBOUNCE_MS);
+              pending.set("untilTime", () => commitUntilTime(raw));
             }}
             onKeyDown={(event) => {
               if (event.key === "Enter") commitUntilTime(event.currentTarget.value);
@@ -430,6 +468,7 @@ export function MessageFilterBar(props: MessageFilterBarProps): JSX.Element {
           props.onFilterChange(value);
           if (debounce !== undefined) clearTimeout(debounce);
           debounce = setTimeout(() => commitFilter(value), FILTER_DEBOUNCE_MS);
+          pending.set("filter", () => commitFilter(value));
         }}
         onKeyDown={(event) => {
           if (event.key === "Enter") commitFilter(props.filter);
@@ -452,13 +491,19 @@ export function MessageFilterBar(props: MessageFilterBarProps): JSX.Element {
           field="key"
           glyph="key"
           predicate={props.predicates.key}
-          onChange={(key) => props.onPredicatesChange({ ...props.predicates, key })}
+          onChange={(key) => changePredicates({ key })}
+          onPending={(commit) =>
+            commit === undefined ? pending.delete("key") : pending.set("key", commit)
+          }
         />
         <FieldPredicateControl
           field="value"
           glyph="braces"
           predicate={props.predicates.value}
-          onChange={(value) => props.onPredicatesChange({ ...props.predicates, value })}
+          onChange={(value) => changePredicates({ value })}
+          onPending={(commit) =>
+            commit === undefined ? pending.delete("value") : pending.set("value", commit)
+          }
         />
 
         <Show when={props.smartFilter}>
@@ -536,6 +581,8 @@ function FieldPredicateControl(props: {
   readonly glyph: "key" | "braces";
   readonly predicate?: FieldPredicate | undefined;
   readonly onChange: (predicate: FieldPredicate | undefined) => void;
+  /** The commit the debounce is waiting to make, or `undefined` once it is made. */
+  readonly onPending: (commit: (() => void) | undefined) => void;
 }): JSX.Element {
   const [text, setText] = createSignal(untrack(() => props.predicate?.text ?? ""));
   let emitted = untrack(() => props.predicate?.text ?? "");
@@ -565,6 +612,7 @@ function FieldPredicateControl(props: {
       clearTimeout(debounce);
       debounce = undefined;
     }
+    props.onPending(undefined);
     emitted = nextText;
     /* An empty box is not a predicate that matches everything; it is no predicate. Emitting
        `undefined` is what keeps `record.keyAsText.contains("")` out of the compiled expression,
@@ -594,6 +642,7 @@ function FieldPredicateControl(props: {
           setText(next);
           if (debounce !== undefined) clearTimeout(debounce);
           debounce = setTimeout(() => commit(next, mode()), FILTER_DEBOUNCE_MS);
+          props.onPending(() => commit(next, mode()));
         }}
         onKeyDown={(event) => {
           if (event.key === "Enter") commit(text(), mode());

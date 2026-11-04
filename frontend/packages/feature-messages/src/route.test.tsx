@@ -729,6 +729,75 @@ describe("the typed predicates", () => {
     expect(opened).toHaveLength(1);
   });
 
+  /*
+   * Read pressed inside the filter boxes' debounce: typing, Tab and Enter fits in 350 ms. The
+   * browse has to read what the boxes say, and the commit that would have landed afterwards must
+   * not stop the browse it just started.
+   */
+  test("Read applies substring text still waiting on its debounce", async () => {
+    const { api } = fakeApi({ topicAnswer: topicWith(12, "orders.flush-substring") });
+    const opened: string[] = [];
+    await withFetch(
+      (url) => opened.push(url),
+      async () => {
+        const { container, dispose } = routeAt("", api, "orders.flush-substring");
+        await settle();
+
+        type(container, "Filter by key or value", "order-42");
+        await settle();
+        press(container, "Read");
+        await settle();
+
+        expect(opened).toHaveLength(1);
+        expect(new URL(opened[0] ?? "", "http://localhost").searchParams.get("q")).toBe("order-42");
+
+        await pastDebounce();
+        expect(opened).toHaveLength(1);
+        expect(() => press(container, "Stop")).not.toThrow();
+        dispose();
+      },
+    );
+  });
+
+  test("Read applies key and value predicates still waiting on their debounce", async () => {
+    const { api, calls } = fakeApi({
+      topicAnswer: topicWith(12, "orders.flush-predicates"),
+      filterId: "abc0123456789def",
+    });
+    const opened: string[] = [];
+    await withFetch(
+      (url) => opened.push(url),
+      async () => {
+        const { container, dispose } = routeAt("", api, "orders.flush-predicates");
+        await settle();
+
+        // Both boxes pending at once: neither commit may spread the predicates from before the other.
+        type(container, "Key predicate", "ord_");
+        await settle();
+        type(container, "Value predicate", "UAH");
+        await settle();
+        press(container, "Read");
+        await settle();
+
+        const registration = calls.find(
+          (call) => call.path === "/api/v1/clusters/{clusterId}/messages/filters",
+        );
+        expect((registration?.body as { readonly source?: string } | undefined)?.source).toBe(
+          'record.keyAsText.contains("ord_") && record.valueAsText.contains("UAH")',
+        );
+        expect(opened).toHaveLength(1);
+        expect(new URL(opened[0] ?? "", "http://localhost").searchParams.get("filterId")).toBe(
+          "abc0123456789def",
+        );
+
+        await pastDebounce();
+        expect(opened).toHaveLength(1);
+        expect(() => press(container, "Stop")).not.toThrow();
+        dispose();
+      },
+    );
+  });
+
   test("applies the configured page size when the URL does not name one", async () => {
     const { api } = fakeApi({ topicAnswer: topicWith(12, "orders.default-size") });
     const opened: string[] = [];

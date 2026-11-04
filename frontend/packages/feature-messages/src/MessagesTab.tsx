@@ -223,7 +223,14 @@ export function MessagesTab(props: MessagesTabProps): JSX.Element {
     },
   );
 
+  /* Commits whatever the bar's debounced boxes still hold. See `flushRef` on the bar. */
+  let flushBar: (() => void) | undefined;
+
   function read(): void {
+    /* Text typed inside the debounce is part of what Read asks for. Committing it first writes it
+       to the address the route's Read composes from, and leaves no timer behind to stop the
+       browse this starts. */
+    flushBar?.();
     /* The route's Read, when there is one: it compiles and registers the typed predicates before a
        browse quotes them. Falling back to starting the session directly keeps this component
        usable on its own, which every story and every test in this package relies on. */
@@ -267,6 +274,7 @@ export function MessagesTab(props: MessagesTabProps): JSX.Element {
         onPartitionsChange={(partitions) => change({ ...props.query, partitions })}
         filter={filterText()}
         onFilterChange={setFilterText}
+        flushRef={(flush) => (flushBar = flush)}
         onFilterCommit={(text) => {
           emittedContains = text;
           change({ ...props.query, ...(text === "" ? { contains: undefined } : { contains: text }) });
