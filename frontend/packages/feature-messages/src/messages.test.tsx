@@ -1383,6 +1383,94 @@ describe("the messages screen", () => {
     vi.unstubAllGlobals();
   });
 
+  test("infinite scroll keeps one observer and stops at the display limit", async () => {
+    /* Every completed page re-runs the observer effect. Each run has to disconnect the observer
+     * the previous run attached, or the earlier ones keep watching the sentinel and keep loading
+     * after the newest run has decided the display limit is reached. */
+    const observers: { intersect: () => void; disconnected: boolean }[] = [];
+    class Observer {
+      readonly entry: { intersect: () => void; disconnected: boolean };
+      constructor(callback: IntersectionObserverCallback) {
+        this.entry = {
+          // A disconnected observer reports nothing, as a real one does.
+          intersect: () => {
+            if (this.entry.disconnected) return;
+            callback(
+              [{ isIntersecting: true } as IntersectionObserverEntry],
+              this as unknown as IntersectionObserver,
+            );
+          },
+          disconnected: false,
+        };
+        observers.push(this.entry);
+      }
+      observe(): void {}
+      disconnect(): void { this.entry.disconnected = true; }
+      unobserve(): void {}
+      takeRecords(): IntersectionObserverEntry[] { return []; }
+      readonly root = null;
+      readonly rootMargin = "720px 0px";
+      readonly thresholds = [0];
+    }
+    vi.stubGlobal("IntersectionObserver", Observer);
+    const live = (): number => observers.filter((observer) => !observer.disconnected).length;
+    const page = MAX_ROWS / 5;
+
+    const fake = fakeTransport();
+    const query = { ...DEFAULT_BROWSE, limit: page };
+    let session!: BrowseSession;
+    const { container, dispose } = mount(() => {
+      session = createBrowseSession({
+        streamUrl: "/stream",
+        transport: fake.transport,
+        // Paint scheduling is not what this case is about; commit every page as it arrives.
+        scheduleAfterPaint: (resume) => {
+          resume();
+          return () => undefined;
+        },
+      });
+      return (
+        <MessagesTab
+          topic="orders.payments.v2"
+          partitionCount={12}
+          predicates={NO_PREDICATES}
+          onPredicatesChange={() => undefined}
+          query={query}
+          onQueryChange={() => undefined}
+          session={session}
+          defaultView="infinite"
+        />
+      );
+    });
+    session.start(query);
+    let offset = 0;
+    const deliverPage = async (cursor: string): Promise<void> => {
+      for (let index = 0; index < page; index += 1) fake.emit(record(String(offset++)));
+      fake.close(cursor);
+      await flush();
+    };
+
+    await deliverPage("cursor-1");
+    expect(live()).toBe(1);
+    for (let next = 2; next <= 5; next += 1) {
+      observers.at(-1)?.intersect();
+      await flush();
+      await deliverPage(`cursor-${String(next)}`);
+      expect(live()).toBeLessThanOrEqual(1);
+    }
+
+    expect(session.rows()).toHaveLength(MAX_ROWS);
+    expect(container.textContent).toContain("display limit reached");
+    const requested = fake.urls.length;
+    for (const observer of observers) observer.intersect();
+    await flush();
+    expect(fake.urls).toHaveLength(requested);
+
+    dispose();
+    expect(live()).toBe(0);
+    vi.unstubAllGlobals();
+  });
+
   test("the whole row is the control and it says which way it will go", async () => {
     const { container, fake, session, dispose } = screen();
     session().start(DEFAULT_BROWSE);

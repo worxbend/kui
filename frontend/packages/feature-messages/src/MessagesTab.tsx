@@ -215,7 +215,11 @@ export function MessagesTab(props: MessagesTabProps): JSX.Element {
         { rootMargin: "720px 0px" },
       );
       observer.observe(sentinel);
-      onCleanup(() => observer.disconnect());
+      /* Returned, not registered with `onCleanup`: Solid 2 runs an effect's callback with no owner,
+       * so an `onCleanup` here is never run. Every completed page re-runs this effect, and an
+       * observer the re-run did not disconnect keeps loading after the newest run has stopped at
+       * the display limit — and after the screen is gone. Same rule as `kernel/src/media.ts`. */
+      return () => observer.disconnect();
     },
   );
 
