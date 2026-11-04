@@ -1544,6 +1544,22 @@ describe("the messages screen", () => {
     dispose();
   });
 
+  test("an expression with no id yet still draws the expression's empty state", async () => {
+    /* What an expression-only preset puts on the address: the source, and no id until Read
+     * registers it. The browse is filtered by that expression, so an empty answer is the
+     * expression matching nothing, not a range that holds nothing. */
+    const filtered = { ...DEFAULT_BROWSE, filterSource: 'record.value.contains("refund")' };
+    const { container, fake, session, dispose } = screen(filtered);
+    session().start({ ...filtered, filterId: "abc0123456789def" });
+    fake.consumed(40);
+    fake.close();
+    await flush();
+
+    expect(container.textContent).toContain("No record matched that expression.");
+    expect(container.textContent).not.toContain("No records in that range");
+    dispose();
+  });
+
   test("reports filter evaluation errors instead of claiming every record was a clean non-match", async () => {
     const filtered = {
       ...DEFAULT_BROWSE,

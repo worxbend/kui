@@ -381,6 +381,8 @@ export function MessagesTab(props: MessagesTabProps): JSX.Element {
             filtered={
               props.query.contains !== undefined ||
               props.query.filterId !== undefined ||
+              /* An expression-only preset writes the source and no id; Read registers it. */
+              props.query.filterSource !== undefined ||
               !isEmpty(props.predicates)
             }
             byExpression={props.query.filterSource}

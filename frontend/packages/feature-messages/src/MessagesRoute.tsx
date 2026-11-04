@@ -413,6 +413,12 @@ function BrowserScreen(props: {
     notify("Filter saved", { message: `${name} is on this browser only.`, tone: "info" });
   }
 
+  /* Whether a smart filter is on the address. Either half counts: a preset writes the source and
+     no id, because the id is minted when Read registers it, and that browse is filtered all the
+     same — so the controls that take a filter off are offered for it. */
+  const filterApplied = (): boolean =>
+    query().filterId !== undefined || query().filterSource !== undefined;
+
   function applyPreset(preset: FilterPreset): void {
     session.stop();
     /* Both halves at once, in one address write. Applying the predicates and then the expression
@@ -489,14 +495,14 @@ function BrowserScreen(props: {
               preview.reset();
               setEditingFilter(true);
             },
-            ...(query().filterId === undefined
-              ? {}
-              : {
+            ...(filterApplied()
+              ? {
                   onClear: () => {
                     session.stop();
                     applyFilter(undefined);
                   },
-                })
+                }
+              : {})
           }}
         />
       </TopicMessageContext>
@@ -525,15 +531,15 @@ function BrowserScreen(props: {
             setEditingFilter(false);
           });
         }}
-        {...(query().filterId === undefined
-          ? {}
-          : {
+        {...(filterApplied()
+          ? {
               onClear: () => {
                 session.stop();
                 applyFilter(undefined);
                 setEditingFilter(false);
               },
-            })}
+            }
+          : {})}
       />
 
       <ResendDialog

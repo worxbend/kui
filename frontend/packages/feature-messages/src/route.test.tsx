@@ -30,7 +30,7 @@ import { KuiProvider, clearToasts, toasts, type KuiContextValue, type KuiPaths }
 import { Actions, type KuiApiClient } from "@kui/api";
 
 import { mount } from "./testing.js";
-import { presetsKey } from "./presets.js";
+import { presetsKey, writePresets } from "./presets.js";
 import { FILTER_DEBOUNCE_MS } from "./MessageFilterBar.jsx";
 import Messages from "./MessagesRoute.jsx";
 
@@ -1119,6 +1119,43 @@ describe("saving what is on the filter bar", () => {
     } finally {
       window.prompt = original;
     }
+  });
+
+  test("a preset holding only an expression can be cleared from the bar and the editor", async () => {
+    /* Applying a preset writes the expression without an id — the id is minted when Read registers
+     * it. The browse is filtered all the same, so the controls that take a filter off have to be
+     * offered for it, or the only way out is to re-apply the expression to make Clear appear. */
+    const expression = 'record.value.contains("refund")';
+    writePresets(CLUSTER, [{ name: "Refunds", predicates: {}, expression }]);
+    const { api } = fakeApi({ topicAnswer: topicWith(12, "orders.expression-preset") });
+    const { container, dispose, url } = routeAt("", api, "orders.expression-preset");
+    await settle();
+
+    const chip = [...container.querySelectorAll<HTMLButtonElement>(".kui-fchip")].find(
+      (candidate) => (candidate.textContent ?? "").trim() === "Refunds",
+    );
+    expect(chip).toBeDefined();
+    chip?.click();
+    await settle();
+    expect(new URL(url(), "http://localhost").searchParams.get("filterSource")).toBe(expression);
+    expect(new URL(url(), "http://localhost").searchParams.get("filterId")).toBeNull();
+
+    // The editor offers its Clear too.
+    container.querySelector<HTMLButtonElement>(".kui-smart-chip")?.click();
+    await settle();
+    expect(dialogText()).toContain("Remove filter");
+    pressIn(overlay(), /^Cancel$/);
+    await settle();
+
+    const clear = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Stop filtering by this expression"]',
+    );
+    expect(clear).not.toBeNull();
+    clear?.click();
+    await settle();
+    expect(new URL(url(), "http://localhost").searchParams.get("filterSource")).toBeNull();
+
+    dispose();
   });
 
   test("cancelling the prompt saves nothing and says nothing", async () => {
