@@ -590,6 +590,17 @@ export function createBrowseSession(options: BrowseSessionOptions): BrowseSessio
     stopped?.close();
     commitRecords(pending.records, pending.omitted);
     setRunning(false);
+    /* The stream's own `closed` never reaches this run: the generation above drops it, and the
+     * transport stops forwarding connection changes before it closes. So the stop is recorded
+     * here, as the terminal reason the contract gives a browse the client itself stopped, or the
+     * status line would go on saying "Reading…" over a stream that is gone. */
+    if (stopped !== undefined) {
+      setProgress((current) => ({
+        ...current,
+        connection: { phase: "closed", reason: "stopped" },
+        endReason: "cancelled",
+      }));
+    }
     arrivedResetQueued = false;
     setArrived(new Set<string>());
     /* Whatever was held is shown rather than discarded. Those records were delivered; throwing

@@ -593,6 +593,7 @@ function phaseSentence(session: BrowseSession): string {
     case "open":
       return progress.phase === undefined ? "Reading…" : `${capitalise(progress.phase)}…`;
     case "closed":
+      if (progress.endReason === "cancelled") return "Stopped.";
       if (progress.endReason === "budget") {
         return session.canNextPage()
           ? "Scan paused at its safety budget — continue from the next offsets."

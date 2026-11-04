@@ -37,6 +37,7 @@ function fakeTransport(): {
   close: (marker?: string, reason?: "limit" | "exhausted" | "budget" | "cancelled") => void;
   closes: () => number;
   breakConnection: () => void;
+  connect: () => void;
 } {
   const urls: string[] = [];
   let handlers: Parameters<BrowseTransport["open"]>[1] | undefined;
@@ -76,6 +77,7 @@ function fakeTransport(): {
     },
     closes: () => closed,
     breakConnection: () => handlers?.onConnection({ phase: "closed", reason: "stream ended" }),
+    connect: () => handlers?.onConnection({ phase: "open" }),
   };
 }
 
@@ -1503,6 +1505,33 @@ describe("the messages screen", () => {
     // The label stays even with no headers. Dropping it makes the reader wonder whether the
     // product looked.
     expect(container.textContent).toContain("— none");
+    dispose();
+  });
+
+  test.each([
+    ["an open stream", true],
+    ["a stream still connecting", false],
+  ])("says the browse stopped when Stop closes %s", async (_name, opened) => {
+    /* The stream is closed and the button is back to Read; a status line that still said
+     * "Reading…" or "Connecting…" would claim a consumer is attached when none is. */
+    const { container, fake, session, dispose } = screen({ ...DEFAULT_BROWSE, live: true });
+    session().start({ ...DEFAULT_BROWSE, live: true });
+    if (opened) {
+      fake.connect();
+      fake.emit(record("1"));
+    }
+    await flush();
+    const phase = (): string => container.querySelector(".kui-browse__phase")?.textContent ?? "";
+    expect(phase()).toBe(opened ? "Reading…" : "Connecting…");
+
+    [...container.querySelectorAll("button")].find((b) => b.textContent === "Stop")?.click();
+    await flush();
+
+    expect(fake.closes()).toBe(1);
+    expect(session().running()).toBe(false);
+    expect(phase()).not.toContain("Reading");
+    expect(phase()).not.toContain("Connecting");
+    expect(phase()).toBe("Stopped.");
     dispose();
   });
 
