@@ -1,6 +1,7 @@
 package kui.kafka.auth
 
 import cats.effect.IO
+import cats.syntax.all.*
 
 import kui.kernel.cluster.SaslMechanism
 import kui.kernel.error.ErrorCode
@@ -100,6 +101,18 @@ final class CloudHandlersSuite extends KuiIOSuite {
     CloudHandlers
       .check[IO](id, SaslMechanism.Plain("u", secret))
       .map(result => assertEquals(result, Right(())))
+  }
+
+  test("everyMechanismThatNeedsNoLibraryIsAcceptedOnKafkaClientsAlone") {
+    // `requiredCoordinate == None` claims that every class the mechanism names ships with the JDK or
+    // with kafka-clients. This module's test classpath carries the kafka-clients release production
+    // ships (`Versions.kafkaClients`), so the claim can be checked against the real jar, which is
+    // what catches a class that a kafka-clients upgrade moved or removed. The `resolvesNothing`
+    // loader above cannot: it fails every name, right or wrong.
+    everyMechanism
+      .filter(CloudHandlers.requiredCoordinate(_).isEmpty)
+      .traverse(CloudHandlers.check[IO](id, _))
+      .map(results => assertEquals(results.collect { case Left(error) => error.message }, Nil))
   }
 
   test("checkDoesNotInitializeTheClass") {

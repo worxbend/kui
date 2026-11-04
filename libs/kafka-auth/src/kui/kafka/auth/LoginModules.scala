@@ -20,8 +20,12 @@ object LoginModules {
 
   val AwsMskIamCallbackHandler: String = "software.amazon.msk.auth.iam.IAMClientCallbackHandler"
 
+  /** kafka-clients' own client-credentials login handler. kafka-clients 3.x shipped it under both this name
+    * and a deprecated `...oauthbearer.secured.` alias; 4.x ships only this one, so the alias resolves
+    * nowhere.
+    */
   val OAuthBearerCallbackHandler: String =
-    "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler"
+    "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler"
 
   /** The callback handler shipped by `managed-kafka-auth-login-handler`, which obtains a Google
     * application-default credential and presents it as an OAuth bearer token.
