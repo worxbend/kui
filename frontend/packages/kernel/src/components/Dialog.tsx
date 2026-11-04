@@ -222,6 +222,15 @@ export function ConfirmDialog(props: ConfirmDialogProps): JSX.Element {
     props.busy === true
       ? "This action is already running."
       : `Type ${props.typeToConfirm ?? ""} in the box above to enable this action.`;
+  /**
+   * The confirm button's disablement, as props for the one button rather than as a second button.
+   * `disabled: false` is spelled out so that TypeScript keeps the two shapes `Button` accepts apart
+   * instead of merging them into one with an optional `disabled`, which `ButtonProps` refuses.
+   */
+  const blocked = () =>
+    canConfirm()
+      ? { disabled: false as const }
+      : { disabled: true as const, disabledReason: blockedReason() };
 
   let cancelButton: HTMLButtonElement | undefined;
   const inputId = nextId("kui-confirm-input");
@@ -243,51 +252,42 @@ export function ConfirmDialog(props: ConfirmDialogProps): JSX.Element {
             Cancel
           </Button>
           {/*
-           * Four spellings of one button, because `ButtonProps` makes both distinctions a type
-           * rather than a flag: `danger` requires a glyph, and `disabled` requires a reason. That
-           * is the right trade — it is exactly the pair of mistakes this product has shipped — and
-           * the cost is paid here, once, instead of at every call site.
+           * Two spellings of one button, because `ButtonProps` makes `danger` a type rather than a
+           * flag: it requires a glyph. Whether the button is usable is *not* a third branch. It is
+           * the same element with its `disabled` and `busy` props changed, because swapping
+           * elements here moved focus: pressing Confirm sets `busy`, and a `<Show>` that swapped in
+           * a busy twin removed the focused button and dropped focus to `<body>`, outside the
+           * dialog, where it stayed after the server refused and the dialog asked again.
            *
            * `disabled` on `Button` is the soft kind: it marks the control `aria-disabled` and
            * swallows the click rather than removing it from the tab order, so a keyboard user can
            * still reach it and hear why it is not available. That matters most in this exact case,
-           * where the reason is "you have not typed the name yet".
+           * where the reason is "you have not typed the name yet". `Button` also swallows a click
+           * while `busy`, so passing `onConfirm` in every state confirms nothing twice.
            */}
           <Show
-            when={canConfirm()}
+            when={destructive()}
             fallback={
-              <Show
-                when={destructive()}
-                fallback={
-                  <Button variant="primary" busy={props.busy === true} disabled disabledReason={blockedReason()}>
-                    {props.confirmLabel}
-                  </Button>
-                }
+              <Button
+                variant="primary"
+                icon={props.confirmIcon}
+                busy={props.busy === true}
+                {...blocked()}
+                onClick={() => props.onConfirm()}
               >
-                <Button
-                  variant="danger"
-                  icon={props.confirmIcon}
-                  busy={props.busy === true}
-                  disabled
-                  disabledReason={blockedReason()}
-                >
-                  {props.confirmLabel}
-                </Button>
-              </Show>
-            }
-          >
-            <Show
-              when={destructive()}
-              fallback={
-                <Button variant="primary" icon={props.confirmIcon} onClick={() => props.onConfirm()}>
-                  {props.confirmLabel}
-                </Button>
-              }
-            >
-              <Button variant="danger" icon={props.confirmIcon} onClick={() => props.onConfirm()}>
                 {props.confirmLabel}
               </Button>
-            </Show>
+            }
+          >
+            <Button
+              variant="danger"
+              icon={props.confirmIcon}
+              busy={props.busy === true}
+              {...blocked()}
+              onClick={() => props.onConfirm()}
+            >
+              {props.confirmLabel}
+            </Button>
           </Show>
         </>
       }

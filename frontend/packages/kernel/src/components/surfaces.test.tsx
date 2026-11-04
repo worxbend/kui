@@ -406,6 +406,43 @@ describe("Dialog", () => {
     dispose();
   });
 
+  it("pulls Tab back inside when focus has fallen out of the surface", async () => {
+    // Focus lands on `<body>` when a focused control inside the surface is removed. The wrap above
+    // only acts from the surface's own first or last stop, so from `<body>` the browser's default
+    // Tab ran and walked out into the page behind the aria-modal surface.
+    const user = userEvent.setup();
+    const behind = document.createElement("button");
+    behind.textContent = "Behind the dialog";
+    document.body.prepend(behind);
+    const { dispose } = mount(() => (
+      <Dialog open onClose={() => {}} title="Create topic" actions={<button type="button">Create</button>}>
+        <input data-testid="field" />
+      </Dialog>
+    ));
+    try {
+      await Promise.resolve();
+
+      const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+      const stops = focusableWithin(dialog);
+      const first = stops[0] as HTMLElement;
+      const last = stops[stops.length - 1] as HTMLElement;
+
+      (document.activeElement as HTMLElement).blur();
+      expect(document.activeElement).toBe(document.body);
+      await user.tab();
+      expect(document.activeElement).toBe(first);
+
+      (document.activeElement as HTMLElement).blur();
+      await user.tab({ shift: true });
+      expect(document.activeElement).toBe(last);
+    } finally {
+      // In `finally`: the surface is portalled onto `<body>`, and one left behind by a failing case
+      // is what the next case's `querySelector` would find.
+      behind.remove();
+      dispose();
+    }
+  });
+
   it("puts focus where the caller asks", async () => {
     let field: HTMLInputElement | undefined;
     const { dispose } = mount(() => (
@@ -541,6 +578,51 @@ describe("ConfirmDialog", () => {
     expect(confirm.hasAttribute("disabled")).toBe(false);
     expect(confirm.getAttribute("aria-disabled")).toBe("true");
     dispose();
+  });
+
+  it("keeps focus on the confirm button while the mutation runs and after it is refused", async () => {
+    // The defect: the enabled and the busy confirm buttons were two different elements behind a
+    // `<Show>`, so pressing Confirm unmounted the focused button and dropped focus to `<body>`,
+    // outside the aria-modal dialog, with no focus ring and nothing for Enter to press. It stayed
+    // there after the server refused and the dialog came back with the error.
+    const [busy, setBusy] = createSignal(false, { ownedWrite: true });
+    const [error, setError] = createSignal<{ readonly message: string } | undefined>(undefined, {
+      ownedWrite: true,
+    });
+    const { dispose } = mount(() => (
+      <ConfirmDialog
+        open
+        onClose={() => {}}
+        onConfirm={() => setBusy(true)}
+        {...props}
+        busy={busy()}
+        error={error()}
+      />
+    ));
+    try {
+      await Promise.resolve();
+      const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+      const confirm = (): HTMLButtonElement =>
+        Array.from(dialog.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("Purge"),
+        ) as HTMLButtonElement;
+
+      const pressed = confirm();
+      pressed.focus();
+      clickOn(pressed);
+      flush();
+      expect(confirm().getAttribute("aria-busy")).toBe("true");
+      expect(document.activeElement).toBe(pressed);
+
+      setBusy(false);
+      setError({ message: "The topic service refused the purge." });
+      flush();
+      expect(confirm().getAttribute("aria-busy")).toBeNull();
+      expect(document.activeElement).toBe(pressed);
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    } finally {
+      dispose();
+    }
   });
 
   it("draws the destructive action with the danger silhouette and a glyph", async () => {
@@ -773,6 +855,8 @@ describe("Drawer", () => {
     const sheet = document.querySelector(".kui-sheet") as HTMLElement;
     const stops = focusableWithin(sheet);
     const lastInDrawer = stops[stops.length - 1] as HTMLElement;
+    let drawerWrapped = 0;
+    stops[0]?.addEventListener("focus", () => (drawerWrapped += 1));
     lastInDrawer.focus();
     expect(document.activeElement).toBe(lastInDrawer);
 
@@ -781,9 +865,14 @@ describe("Drawer", () => {
 
     // The drawer is not the surface trapping the page, so it does not wrap. Left unscoped it runs
     // its own trap on every Tab and pulls focus round to its own first control — a surface the
-    // operator is not looking at, while the dialog over it owns the keyboard.
-    expect(document.activeElement).toBe(lastInDrawer);
-    expect(document.activeElement).not.toBe(stops[0]);
+    // operator is not looking at, while the dialog over it owns the keyboard. Counted as focus
+    // events rather than read off `activeElement`, because the dialog moves focus afterwards.
+    expect(drawerWrapped).toBe(0);
+    // The dialog does answer it. Focus outside the innermost surface is brought into that surface:
+    // this used to assert that focus stayed in the drawer, which is the trap letting focus sit
+    // behind an aria-modal dialog for the browser's own Tab to carry further out.
+    const inner = document.querySelector(".kui-modal") as HTMLElement;
+    expect(document.activeElement).toBe(focusableWithin(inner)[0]);
 
     dialog.dispose();
     await Promise.resolve();

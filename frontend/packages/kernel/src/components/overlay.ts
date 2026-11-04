@@ -182,6 +182,15 @@ export function modalBehaviour(options: ModalBehaviourOptions) {
       const last = stops[stops.length - 1] as HTMLElement;
       const active = document.activeElement;
 
+      // Focus outside the surface — on `<body>` after a focused control inside it was removed, or
+      // on something behind the veil — is brought back in rather than handed to the browser's
+      // default `Tab`, which would carry on from there into the page behind an aria-modal surface.
+      if (!element.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+
       if (event.shiftKey && (active === first || active === element)) {
         event.preventDefault();
         last.focus();
