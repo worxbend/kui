@@ -1,7 +1,9 @@
 package kui.http.upstream
 
-import java.net.{InetAddress, InetSocketAddress, ServerSocket, SocketTimeoutException}
+import java.net.{Inet6Address, InetAddress, InetSocketAddress, ServerSocket, SocketTimeoutException}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
+
+import scala.concurrent.duration.DurationInt
 
 import cats.effect.{IO, Resource}
 import com.sun.net.httpserver.{HttpExchange, HttpServer}
@@ -197,6 +199,66 @@ final class ConnectionPolicySuite extends KuiIOSuite {
             } yield {
               assert(result.isLeft)
               assert(!connected, "a policy rejection occurred only after TCP connected")
+            }
+          }
+      }
+  }
+
+  /** What the system resolver returns for a name whose AAAA record is IPv4-mapped, e.g.
+    * `0--ffff-7f00-1.sslip.io`: an `Inet6Address`, which reports itself as neither loopback nor link-local.
+    * `InetAddress.getByName("::ffff:127.0.0.1")` cannot stand in for it, because the literal parser already
+    * hands back the `Inet4Address` inside.
+    */
+  private def ipv4Mapped(a: Int, b: Int, c: Int, d: Int): InetAddress =
+    Inet6Address.getByAddress(null, (Array.fill(10)(0) ++ Array(0xff, 0xff, a, b, c, d)).map(_.toByte), 0)
+
+  test("an IPv4-mapped IPv6 DNS answer is classified as the IPv4 address that is dialled") {
+    val key = RequestKey.fromRequest(
+      org.http4s.Request[IO](uri = org.http4s.Uri.unsafeFromString("https://registry.invalid/probe"))
+    )
+    List(ipv4Mapped(127, 0, 0, 1), ipv4Mapped(169, 254, 169, 254), ipv4Mapped(10, 0, 0, 1)).foreach { address =>
+      assert(HttpTls.destination(key, UrlPolicy.Strict, _ => Array(address)).isLeft, address.toString)
+    }
+    val public = HttpTls
+      .destination(key, UrlPolicy.Strict, _ => Array(ipv4Mapped(8, 8, 8, 8)))
+      .toOption
+      .getOrElse(fail("a mapped public address was rejected"))
+    assertEquals(public.getAddress.getHostAddress, "8.8.8.8")
+  }
+
+  test("an IPv4-mapped loopback DNS answer never opens the forbidden listening socket") {
+    Resource
+      .make(IO.blocking {
+        val socket = new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))
+        socket.setSoTimeout(200)
+        socket
+      })(socket => IO.blocking(socket.close()))
+      .use { listener =>
+        HttpTls
+          .resourceWithResolver[IO](
+            HttpTlsConfig.Default,
+            UrlPolicy.Strict,
+            _ => Array(ipv4Mapped(127, 0, 0, 1))
+          )
+          .use { backend =>
+            for {
+              result <- basicRequest
+                .get(Uri.unsafeParse(s"http://registry.invalid:${listener.getLocalPort}/probe"))
+                .readTimeout(1.second)
+                .send(backend)
+                .attempt
+              connected <- IO.blocking {
+                try {
+                  val socket = listener.accept()
+                  socket.close()
+                  true
+                } catch {
+                  case _: SocketTimeoutException => false
+                }
+              }
+            } yield {
+              assert(result.isLeft, s"strict transport answered through a mapped loopback address: $result")
+              assert(!connected, "strict transport opened a socket to loopback through ::ffff:127.0.0.1")
             }
           }
       }

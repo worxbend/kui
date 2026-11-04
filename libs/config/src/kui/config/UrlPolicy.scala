@@ -70,10 +70,17 @@ object UrlPolicy {
 
   /** Check the numeric address the transport will actually dial, without performing DNS. Configuration-time
     * name validation is not an SSRF boundary: DNS can change after it.
+    *
+    * The address is classified in its canonical form, the one `InetAddress.getByAddress` builds from its
+    * bytes and the socket layer dials. A resolver answers an IPv4-mapped AAAA record
+    * (`::ffff:169.254.169.254`) with an `Inet6Address` that reports itself as neither loopback nor
+    * link-local, while the connection it produces goes to the IPv4 address inside it.
     */
-  def allowsAddress(address: InetAddress, policy: UrlPolicy): Boolean =
-    if address.isLoopbackAddress || address.isAnyLocalAddress then policy.allowLoopback
-    else !SafeUrl.addressIsNotPubliclyRoutable(address) || policy.allowPrivate
+  def allowsAddress(address: InetAddress, policy: UrlPolicy): Boolean = {
+    val dialled = InetAddress.getByAddress(address.getAddress)
+    if dialled.isLoopbackAddress || dialled.isAnyLocalAddress then policy.allowLoopback
+    else !SafeUrl.addressIsNotPubliclyRoutable(dialled) || policy.allowPrivate
+  }
 
   given CanEqual[UrlPolicy, UrlPolicy] = CanEqual.derived
 }
@@ -209,8 +216,28 @@ object SafeUrl {
     address.isLinkLocalAddress ||
     address.isSiteLocalAddress ||
     carrierGrade ||
-    uniqueLocalIpv6
+    uniqueLocalIpv6 ||
+    embeddedIpv4(bytes).exists(addressIsNotPubliclyRoutable)
   }
+
+  /** The IPv4 address an IPv6 address carries in its last four bytes, for the prefixes that exist to carry
+    * one: IPv4-mapped (`::ffff:0:0/96`), IPv4-compatible (`::/96`) and the NAT64 well-known prefix
+    * (`64:ff9b::/96`, RFC 6052), which a DNS64 network's translator turns back into that IPv4 address.
+    */
+  private def embeddedIpv4(bytes: Array[Byte]): Option[InetAddress] = {
+    def hasPrefix(prefix: List[Int]): Boolean =
+      prefix.zipWithIndex.forall((value, index) => (bytes(index) & 0xff) == value)
+    Option.when(bytes.length == 16 && Ipv4CarryingPrefixes.exists(hasPrefix))(
+      InetAddress.getByAddress(bytes.drop(12))
+    )
+  }
+
+  /** The first twelve bytes of `::ffff:0:0/96`, `::/96` and `64:ff9b::/96`. */
+  private val Ipv4CarryingPrefixes: List[List[Int]] = List(
+    List.fill(10)(0x00) ++ List(0xff, 0xff),
+    List.fill(12)(0x00),
+    List(0x00, 0x64, 0xff, 0x9b) ++ List.fill(8)(0x00)
+  )
 
   /** IPv6 link-local (`fe80::/10`) and unique-local (`fc00::/7`) prefixes.
     *

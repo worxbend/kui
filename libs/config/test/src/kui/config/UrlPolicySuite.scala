@@ -1,5 +1,7 @@
 package kui.config
 
+import java.net.{Inet6Address, InetAddress}
+
 import org.scalacheck.Gen
 import org.scalacheck.Prop.forAll
 
@@ -69,6 +71,61 @@ final class UrlPolicySuite extends KuiSuite {
     // The disguise check must not swallow ordinary public addresses, in any spelling.
     assert(accepted("https://93.184.216.34/", UrlPolicy.Strict))
     assert(accepted("https://[2606:2800:220:1:248:1893:25c8:1946]/", UrlPolicy.Strict))
+  }
+
+  /** An IPv6 address object whose last four bytes are an IPv4 address.
+    *
+    * Built with `Inet6Address.getByAddress` because that is the only constructor that keeps the IPv6 form:
+    * `InetAddress.getByName("::ffff:127.0.0.1")` hands back an `Inet4Address`, which is why a test written
+    * with it never saw what the system resolver returns for a DNS name whose AAAA record is IPv4-mapped.
+    */
+  private def ipv6Embedding(prefix: Array[Int], ipv4: (Int, Int, Int, Int)): Inet6Address = {
+    val (a, b, c, d) = ipv4
+    Inet6Address.getByAddress(null, (prefix ++ Array(a, b, c, d)).map(_.toByte), 0)
+  }
+
+  private val ipv4Mapped: Array[Int] = Array.fill(10)(0) ++ Array(0xff, 0xff)
+  private val ipv4Compatible: Array[Int] = Array.fill(12)(0)
+  private val nat64WellKnown: Array[Int] = Array(0x00, 0x64, 0xff, 0x9b) ++ Array.fill(8)(0)
+
+  test("an IPv6 answer that embeds a loopback, private or metadata IPv4 address is refused under Strict") {
+    val internal =
+      List((169, 254, 169, 254), (127, 0, 0, 1), (10, 0, 0, 1), (192, 168, 1, 1), (100, 64, 0, 1))
+    for {
+      prefix <- List(ipv4Mapped, ipv4Compatible, nat64WellKnown)
+      ipv4 <- internal
+    } {
+      val address = ipv6Embedding(prefix, ipv4)
+      assert(!UrlPolicy.allowsAddress(address, UrlPolicy.Strict), s"$address was allowed under Strict")
+      assert(UrlPolicy.allowsAddress(address, UrlPolicy.Dev), s"$address was refused under Dev")
+    }
+  }
+
+  test("an IPv4-mapped loopback answer needs the loopback permission, not the private one") {
+    // The socket layer dials `::ffff:127.0.0.1` as `127.0.0.1`, so it is the loopback rule that applies.
+    val loopback = ipv6Embedding(ipv4Mapped, (127, 0, 0, 1))
+    assert(UrlPolicy.allowsAddress(loopback, UrlPolicy.Strict.copy(allowLoopback = true)))
+    assert(!UrlPolicy.allowsAddress(loopback, UrlPolicy.Strict.copy(allowPrivate = true)))
+  }
+
+  test("an IPv6 answer that embeds a public IPv4 address is still allowed under Strict") {
+    List(ipv4Mapped, nat64WellKnown).foreach { prefix =>
+      val address = ipv6Embedding(prefix, (93, 184, 216, 34))
+      assert(UrlPolicy.allowsAddress(address, UrlPolicy.Strict), s"$address was refused under Strict")
+    }
+    assert(
+      UrlPolicy.allowsAddress(InetAddress.getByName("2606:2800:220:1:248:1893:25c8:1946"), UrlPolicy.Strict)
+    )
+  }
+
+  test("an IPv4-compatible or NAT64 literal of an internal address is refused in configuration too") {
+    List(
+      "http://[::169.254.169.254]/latest/meta-data/",
+      "http://[::a9fe:a9fe]/",
+      "http://[64:ff9b::169.254.169.254]/",
+      "http://[64:ff9b::a00:1]/"
+    ).foreach(url => assert(!accepted(url, UrlPolicy.Strict), s"$url was accepted under the strict policy"))
+    assert(accepted("https://[64:ff9b::5db8:d822]/", UrlPolicy.Strict))
   }
 
   test("a host name that merely starts with a private prefix is not mistaken for one") {

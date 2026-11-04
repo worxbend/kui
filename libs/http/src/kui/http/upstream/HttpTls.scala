@@ -215,14 +215,16 @@ object HttpTls {
       policy: UrlPolicy,
       resolve: String => Array[InetAddress]
   ): Either[Throwable, InetSocketAddress] =
-    Try(resolve(key.authority.host.value).toList).toEither.flatMap { addresses =>
+    // Strip the resolver's hostname metadata, not the HTTP authority or TLS peer name. This is also the
+    // canonical form (`::ffff:a.b.c.d` becomes `a.b.c.d`), so the policy judges the exact object dialled.
+    Try(
+      resolve(key.authority.host.value).toList.map(address => InetAddress.getByAddress(address.getAddress))
+    ).toEither.flatMap { addresses =>
       if addresses.isEmpty || addresses.exists(address => !UrlPolicy.allowsAddress(address, policy)) then
         Left(AddressRejected())
       else {
-        // Strip the resolver's hostname metadata, not the HTTP authority or TLS peer name.
-        val address = InetAddress.getByAddress(addresses.head.getAddress)
         val port = key.authority.port.getOrElse(if key.scheme == org.http4s.Uri.Scheme.https then 443 else 80)
-        Right(new InetSocketAddress(address, port))
+        Right(new InetSocketAddress(addresses.head, port))
       }
     }
 
