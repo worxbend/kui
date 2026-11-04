@@ -223,8 +223,7 @@ describe("what the controls show", () => {
 
   test("a serde the menu does not list falls back to Automatic", () => {
     expect(offeredSerde("JSON")).toBe("JSON");
-    // Never written into a picker that has no such option, which would leave the control showing
-    // one thing and the form holding another.
+    // A link naming a serde this build does not list is read as Automatic, not sent on.
     expect(offeredSerde("Avro_from_a_newer_kui")).toBe("");
   });
 });

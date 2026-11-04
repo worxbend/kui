@@ -66,25 +66,27 @@ export type SerdeName =
   | "FALLBACK";
 
 /**
- * The serdes both pickers offer, as `{value, label}`, with "Automatic" first.
+ * The serdes a browse may name, as `{value, label}`, with "Automatic" first.
  *
- * ## One list, two directions
+ * ## Where an override comes from today
  *
- * The filter bar chooses how a record is **decoded**; the produce drawer chooses how one is
- * **encoded**. They must stay the same set, because the mistake this screen can make that leaves a
- * topic worse than it found it is publishing with a serde the reader cannot read back. Two lists
- * maintained separately would drift the moment one gained an entry, and the drift would be
- * invisible until somebody published with it.
+ * Only from the address. A link carrying `keySerde` or `valueSerde` decodes the browse with that
+ * serde ({@link fromParams} reads it through {@link offeredSerde}), and the browse's own URL keeps
+ * it, so the link survives being shared. Neither the filter bar nor the produce drawer draws a
+ * serde picker: the bar has no control for the decode side, and the drawer always produces with
+ * Automatic, since `EMPTY_RECORD_DRAFT` holds no serde and nothing in the drawer sets one. A
+ * picker added on either side should offer this list rather than a second one: publishing with a
+ * serde the reader cannot read back is how this screen would leave a topic worse than it found it.
  *
  * ## Why "Automatic" is the empty string and the default
  *
  * The service already resolves a serde per topic and per half of the record, says which it used on
  * every record it returns, and is right for almost every topic. Sending no name at all is what
- * makes the produce form agree with the browse by default: the record is written with the serde it
- * would have been read with. The picker exists for the topic where that choice is wrong — a key
- * written as a big-endian long that autodetection reads as four characters of nonsense — where
- * without an override the only way to work with the topic is to edit the deployment's
- * configuration, which somebody in the middle of an incident cannot do.
+ * makes a produced record agree with the browse by default: the record is written with the serde
+ * it would have been read with. The override exists for the topic where that choice is wrong — a
+ * key written as a big-endian long that autodetection reads as four characters of nonsense — where
+ * without one the only way to work with the topic is to edit the deployment's configuration, which
+ * somebody in the middle of an incident cannot do.
  */
 export const SERDE_CHOICES: readonly { readonly value: SerdeName; readonly label: string }[] = [
   { value: "", label: "Automatic" },
@@ -102,13 +104,12 @@ export const SERDE_CHOICES: readonly { readonly value: SerdeName; readonly label
 ];
 
 /**
- * A serde this build's menu can actually show, or `""` for anything else.
+ * A serde {@link SERDE_CHOICES} lists, or `""` (Automatic) for anything else.
  *
- * Used when a record is opened for republishing: the record says which serde decoded it, and
- * defaulting the form to that one is what makes "republish" produce a record the same reader can
- * read. A serde this menu does not list — one a deployment configured itself, or one from a newer
- * KUI — falls back to Automatic rather than being written into a picker that has no such option,
- * which would leave the control showing one thing and the form holding another.
+ * Used when a link's `keySerde` or `valueSerde` parameter is read. A serde the list does not name —
+ * one a deployment configured itself, or one from a newer KUI — falls back to Automatic and is
+ * dropped from the browse rather than sent on, so the browse never asks for a serde this build
+ * cannot name.
  */
 export function offeredSerde(raw: string): SerdeName {
   const found = SERDE_CHOICES.find((choice) => choice.value !== "" && choice.value === raw);
