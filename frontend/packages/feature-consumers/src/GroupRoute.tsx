@@ -6,7 +6,7 @@
  * again, so a wizard that knows about clamping, no-op plans and expired tokens was unreachable from
  * the product.
  */
-import { Show, createEffect, createSignal } from "solid-js";
+import { Show, createEffect, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { useNavigate, useParams } from "@solidjs/router";
 import { Actions } from "@kui/api";
@@ -19,11 +19,18 @@ import { subscriptions, type GroupDetail } from "./detail.js";
 
 export function GroupRoute(): JSX.Element {
   const params = useParams<{ readonly clusterId?: string; readonly groupId?: string }>();
+  /*
+   * Keyed, as the topic, message and schema routes are. The router keeps this route mounted when
+   * only its parameters change, so without a key a history step from one group to another reused
+   * the screen and everything it held about the first group: an open delete confirmation came
+   * back as "Delete <the next group>?", and a receipt read after an `await` named whichever group
+   * was on screen by then. Keyed, each group gets a screen of its own.
+   */
   return (
-    <Show when={params.clusterId} fallback={<NoSubject what="cluster" />}>
+    <Show keyed when={params.clusterId} fallback={<NoSubject what="cluster" />}>
       {(clusterId) => (
-        <Show when={params.groupId} fallback={<NoSubject what="group" />}>
-          {(groupId) => <GroupScreen clusterId={clusterId()} groupId={groupId()} />}
+        <Show keyed when={params.groupId} fallback={<NoSubject what="group" />}>
+          {(groupId) => <GroupScreen clusterId={clusterId} groupId={groupId} />}
         </Show>
       )}
     </Show>
@@ -58,6 +65,11 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
    * `/ui/ui/clusters/…`, which matches no route.
    */
   const navigate = useNavigate();
+  /* False once the reader has moved to another group or cluster and this screen is disposed. A
+     delete's answer can still arrive after that: its toast names the group it deleted, which is
+     this screen's, but it must not navigate the page the reader has moved to. */
+  let active = true;
+  onCleanup(() => { active = false; });
   const [state, setState] = createSignal<Fetched<GroupDetail>>({ kind: "loading" });
   const [attempt, setAttempt] = createSignal(0);
   /*
@@ -91,7 +103,9 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
         void fetchGroup(kui.api, clusterId, groupId).then((next) => {
           // Switching group while a request is out must not land the old group's offsets on the new
           // group's page: real figures for the wrong subject is the most convincing wrong data there
-          // is, and this page's figures are what a reset is composed from.
+          // is, and this page's figures are what a reset is composed from. The keyed route already
+          // disposes this screen on a switch; the guard is what stops the late answer from
+          // scheduling a poll that nothing would ever clear.
           if (cancelled) return;
           // Keep last-known data only for transient failures, explicitly marked stale. An
           // authorization refusal must replace it rather than retaining now-forbidden offsets.
@@ -293,7 +307,7 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
                     `${props.groupId} and its committed offsets are gone. ` +
                     "No records were deleted.",
                 });
-                navigate(kui.paths.consumerGroups(props.clusterId), { resolve: false });
+                if (active) navigate(kui.paths.consumerGroups(props.clusterId), { resolve: false });
               });
             }}
           />

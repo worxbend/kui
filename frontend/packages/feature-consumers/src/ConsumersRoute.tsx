@@ -37,10 +37,16 @@ import type { GroupSummary } from "./model.js";
 
 export default function Consumers(): JSX.Element {
   const params = useParams<{ readonly clusterId?: string; readonly groupId?: string }>();
+  /*
+   * Keyed by cluster, as the topic, message and schema routes are: the router keeps this route
+   * mounted when only `clusterId` changes, and an unkeyed screen carried one cluster's page number
+   * into the next cluster's request and drew its rows under the next cluster while that loaded.
+   * The group page keys itself on both of its parameters.
+   */
   return (
-    <Show when={params.clusterId} fallback={<NoCluster />}>
+    <Show keyed when={params.clusterId} fallback={<NoCluster />}>
       {(clusterId) => (
-        <Show when={params.groupId} fallback={<GroupsScreen clusterId={clusterId()} />}>
+        <Show when={params.groupId} fallback={<GroupsScreen clusterId={clusterId} />}>
           {/* Every row in the list links here, and until now every one of those links landed back
               on the list: the detail page and the offset-reset wizard were both built and neither
               had a route to reach them from. */}

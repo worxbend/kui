@@ -13,10 +13,11 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { flush } from "solid-js";
+import { createRouter, memoryHistory } from "@solidjs/router";
 import { KuiProvider } from "@kui/kernel";
 import type { KuiApiClient } from "@kui/api";
 import { describeViolations, findViolations, mount, testContext } from "./testing.js";
-import { GroupsScreen } from "./ConsumersRoute.jsx";
+import Consumers, { GroupsScreen } from "./ConsumersRoute.jsx";
 import { coordinatorAddress } from "./data.js";
 import {
   LAG_WARN_ABOVE,
@@ -611,6 +612,114 @@ describe("the consumer groups screen", () => {
     const { container, dispose } = open(api, "coordinator-cluster");
     await settle(container);
     expect(container.textContent).toContain("kafka:9092");
+    dispose();
+  });
+});
+
+describe("the consumer groups route, moved from one cluster to another", () => {
+  /*
+   * The shell sends `/consumer-groups` to one route entry, and the router keeps a route's component
+   * mounted when only its parameters change. So a history step from one cluster's list to
+   * another's lands on the screen that drew the first one, and everything that screen holds about
+   * its cluster — the page it is on, the rows it last drew — is still there unless the route
+   * starts the screen again for the new cluster.
+   */
+  const FIRST = "alpha";
+  const SECOND = "bravo";
+
+  function listingFor(cluster: string, page: number, pageSize: number, totalItems: number): unknown {
+    const first = (page - 1) * pageSize;
+    const count = Math.max(0, Math.min(pageSize, totalItems - first));
+    return {
+      groups: {
+        status: "ok",
+        data: {
+          items: Array.from({ length: count }, (_, index) => ({
+            groupId: `${cluster}-group-${String(first + index)}`,
+            state: "STABLE",
+            members: 1,
+            topics: 1,
+            coordinatorId: 1,
+            coordinatorHost: "kafka",
+            coordinatorPort: 9092,
+            totalLag: 0,
+            excludedPartitions: 0,
+            incomplete: null,
+          })),
+          page: { page, pageSize, totalItems },
+        },
+      },
+      incompleteCoordinators: 0,
+    };
+  }
+
+  it("starts the second cluster's list on its first page, with none of the first's rows", async () => {
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const asked: { cluster: string; page: number | undefined }[] = [];
+    const get = async (
+      path: string,
+      init?: {
+        params?: { path?: { clusterId?: string }; query?: { page?: number; pageSize?: number } };
+      },
+    ) => {
+      const cluster = init?.params?.path?.clusterId ?? "";
+      if (path.endsWith("/lag")) {
+        return { ok: true, value: { changed: [], gone: [], token: "t", nextPollMs: 30_000, full: false } };
+      }
+      const query = init?.params?.query ?? {};
+      asked.push({ cluster, page: query.page });
+      // The second cluster's answer is held, so the case can look at the screen while it is out.
+      if (cluster === SECOND) await held;
+      // Eighty groups on the first cluster; three on the second, fewer than one page.
+      const total = cluster === FIRST ? 80 : 3;
+      return { ok: true, value: listingFor(cluster, query.page ?? 1, query.pageSize ?? 16, total) };
+    };
+    const api = { get, post: get, put: get, delete: get, patch: get, raw: {} } as unknown as KuiApiClient;
+
+    const history = memoryHistory(`/ui/clusters/${FIRST}/consumer-groups`);
+    const Router = createRouter({
+      routes: [{ path: "/clusters/:clusterId/consumer-groups", component: Consumers }],
+      base: "/ui",
+      history,
+      scrollRestoration: false,
+    });
+    const { container, dispose } = mount(() => (
+      <KuiProvider value={testContext(api)}>
+        <Router />
+      </KuiProvider>
+    ));
+    const settle = async (): Promise<void> => {
+      for (let turn = 0; turn < 20; turn += 1) await flush();
+    };
+    await settle();
+
+    container
+      .querySelector('[data-testid="consumer-groups-pagination"]')
+      ?.querySelector<HTMLButtonElement>('[aria-label="Next page"]')
+      ?.click();
+    await settle();
+    expect(asked).toEqual([
+      { cluster: FIRST, page: 1 },
+      { cluster: FIRST, page: 2 },
+    ]);
+    expect(container.textContent).toContain(`${FIRST}-group-16`);
+
+    history.set({ value: `/ui/clusters/${SECOND}/consumer-groups` });
+    await settle();
+    // While the second cluster's answer is out, nothing on the screen is the first cluster's.
+    expect(container.textContent).not.toContain(`${FIRST}-group-`);
+
+    release();
+    await settle();
+    // Page 1 of the cluster now on screen, not the first cluster's page 2 — which on a cluster of
+    // three groups is a page that does not exist, drawn as "No consumer groups yet".
+    expect(asked.filter((one) => one.cluster === SECOND)).toEqual([{ cluster: SECOND, page: 1 }]);
+    expect(container.textContent).toContain(`${SECOND}-group-0`);
+    expect(container.textContent).not.toContain(`${FIRST}-group-`);
+
     dispose();
   });
 });

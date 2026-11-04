@@ -37,7 +37,7 @@
  * including every field name, stays the server's.
  */
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flush } from "solid-js";
 import { createRouter, memoryHistory } from "@solidjs/router";
 import { KuiProvider, clearToasts, toasts, type KuiContextValue } from "@kui/kernel";
@@ -46,6 +46,7 @@ import { Actions, type KuiApiClient } from "@kui/api";
 import { mount, testContext } from "./testing.js";
 import { GroupRoute, consequenceOfDelete, consequenceOfForget } from "./GroupRoute.jsx";
 import { SAMPLE_GROUP_DETAIL } from "./fixtures.js";
+import { DEFAULT_POLL_MS } from "./lag.js";
 import groupDocument from "./recorded/group.json" with { type: "json" };
 
 const CLUSTER = "quickstart";
@@ -165,6 +166,8 @@ interface Stub {
   readonly calls: string[];
   /** The `topic` query each `DELETE …/offsets` carried, in order. */
   readonly forgotten: string[];
+  /** The group id each detail `GET` asked about, in order. */
+  readonly detailReads: string[];
 }
 
 /**
@@ -179,6 +182,8 @@ function stub(options: {
   readonly plan?: unknown;
   readonly applyFails?: string;
   readonly deleteFails?: string;
+  /** Held until this resolves, so a case can move to another group while the DELETE is out. */
+  readonly deletePending?: Promise<void>;
   /**
    * What `DELETE …/offsets` answers with. Absent means it removed every partition it was asked.
    *
@@ -204,6 +209,7 @@ function stub(options: {
 }): Stub {
   const calls: string[] = [];
   const forgotten: string[] = [];
+  const detailReads: string[] = [];
   const refuse = (message: string) => ({
     ok: false,
     error: {
@@ -223,6 +229,7 @@ function stub(options: {
     calls.push(`GET ${path}`);
     if (path === "/api/v1/clusters/{clusterId}/consumer-groups/{groupId}") {
       const groupId = init?.params?.path?.groupId ?? GROUP;
+      detailReads.push(groupId);
       const held = options.detailPending?.[groupId];
       if (held !== undefined) await held;
       const named = options.detailByGroup?.[groupId];
@@ -248,6 +255,7 @@ function stub(options: {
   ) => {
     calls.push(`DELETE ${path}`);
     if (path === "/api/v1/clusters/{clusterId}/consumer-groups/{groupId}") {
+      if (options.deletePending !== undefined) await options.deletePending;
       return options.deleteFails === undefined
         ? { ok: true, value: {} }
         : refuse(options.deleteFails);
@@ -272,6 +280,7 @@ function stub(options: {
   return {
     calls,
     forgotten,
+    detailReads,
     api: {
       get,
       post,
@@ -305,9 +314,10 @@ function openGroup(
   /**
    * Moves the mounted route to another address, the way the group list's link does.
    *
-   * A push onto the same history rather than a second mount: the route's cancellation guard is on
-   * the *effect that re-runs when `groupId` changes*, and a case that mounted twice would never run
-   * that effect a second time and could not see the guard at all.
+   * A push onto the same history rather than a second mount: the router keeps the route mounted
+   * when only `groupId` changes, and what the route does with that change — start a screen of its
+   * own for the new group, abandoning the old one's request — is only visible through it. A case
+   * that mounted twice would never make that transition and could not see it at all.
    */
   readonly goTo: (address: string) => void;
 } {
@@ -1008,8 +1018,9 @@ describe("the group page's destructive controls", () => {
      * exactly what a reset is composed from.
      *
      * `analytics-indexer` is held until this case releases it, so it lands *after* `orders-writer`
-     * has already been drawn. Deleting the guard leaves the last write standing and the page
-     * reverts to the group nobody is looking at.
+     * has already been drawn. Without the guard, and without the keyed route that now disposes the
+     * old group's screen, the last write stands and the page reverts to the group nobody is
+     * looking at. The case after this one is the guard's own.
      */
     let release = (): void => {};
     const held = new Promise<void>((resolve) => {
@@ -1036,6 +1047,112 @@ describe("the group page's destructive controls", () => {
     const heading = container.querySelector(".kui-page-head__title")?.textContent ?? "";
     expect(heading).toBe(OTHER_GROUP);
     expect(container.textContent).not.toContain(GROUP);
+
+    dispose();
+  });
+
+  it("stops asking about a group the reader has moved on from, even when its answer lands late", async () => {
+    /*
+     * The route is keyed, so moving to another group disposes the first group's screen and its late
+     * answer can no longer reach the page — the case above stays green on the key alone. What the
+     * fetch effect's `cancelled` guard still stops is that answer scheduling the next poll: a timer
+     * set after the effect's cleanup has run is never cleared, and a screen nobody can see would ask
+     * the coordinator about its group every poll interval for as long as the tab stays open.
+     */
+    vi.useFakeTimers();
+    try {
+      let release = (): void => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { api, detailReads } = stub({
+        detailByGroup: { [GROUP]: groupNamed(GROUP), [OTHER_GROUP]: groupNamed(OTHER_GROUP) },
+        detailPending: { [GROUP]: held },
+      });
+      const { dispose, goTo } = openGroup(api);
+      await settle();
+      goTo(`${BASE}/clusters/${CLUSTER}/consumer-groups/${OTHER_GROUP}`);
+      await settle();
+      release();
+      await settle();
+
+      await vi.advanceTimersByTimeAsync(DEFAULT_POLL_MS * 2);
+      await settle();
+
+      expect(detailReads.filter((one) => one === GROUP)).toHaveLength(1);
+      // The group on screen is still polled, so the count above is not a poll that never runs.
+      expect(detailReads.filter((one) => one === OTHER_GROUP).length).toBeGreaterThan(1);
+
+      dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reopen one group's delete confirmation on the next group the reader moves to", async () => {
+    /*
+     * The router keeps this route mounted when only `groupId` changes, so the screen that asked
+     * "Delete analytics-indexer?" is the screen that draws the next group, unless the route starts
+     * it again for that group. Its `confirmingDelete` was still true: the move dropped the page to
+     * `loading`, which hid the dialog, and once the next group arrived the dialog came back as
+     * "Delete orders-writer?" — a confirmation for a group nobody had asked to delete.
+     */
+    const { api } = stub({
+      detailByGroup: { [GROUP]: groupNamed(GROUP), [OTHER_GROUP]: groupNamed(OTHER_GROUP) },
+    });
+    const { container, dispose, goTo } = openGroup(api);
+    await settle();
+
+    press(container, /^Delete group$/);
+    await settle();
+    expect(confirmation().textContent).toContain(`Delete ${GROUP}?`);
+
+    goTo(`${BASE}/clusters/${CLUSTER}/consumer-groups/${OTHER_GROUP}`);
+    await settle(24);
+
+    expect(container.querySelector(".kui-page-head__title")?.textContent ?? "").toBe(OTHER_GROUP);
+    const asking = [...document.body.querySelectorAll<HTMLElement>("[role='dialog']")].map(
+      (dialog) => dialog.textContent ?? "",
+    );
+    expect(asking.filter((text) => text.includes(`Delete ${OTHER_GROUP}?`))).toEqual([]);
+
+    dispose();
+  });
+
+  it("a delete that finishes after the reader has moved on names its own group and stays put", async () => {
+    /*
+     * The delete's receipt is read after an `await`, and it used to read `props.groupId` from a
+     * screen that by then described the next group: the toast said "orders-writer and its committed
+     * offsets are gone" for a delete of analytics-indexer, and the navigation that follows a delete
+     * took the reader off the page they had moved to.
+     */
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { api } = stub({
+      detailByGroup: { [GROUP]: groupNamed(GROUP), [OTHER_GROUP]: groupNamed(OTHER_GROUP) },
+      deletePending: held,
+    });
+    const { container, dispose, goTo, url } = openGroup(api);
+    await settle();
+
+    press(container, /^Delete group$/);
+    await settle();
+    press(confirmation(), /^Delete group$/);
+    await settle();
+
+    const elsewhere = `${BASE}/clusters/${CLUSTER}/consumer-groups/${OTHER_GROUP}`;
+    goTo(elsewhere);
+    await settle();
+    release();
+    await settle(24);
+
+    const raised = toasts().find((toast) => toast.title === "Consumer group deleted");
+    expect(raised?.message).toContain(GROUP);
+    expect(raised?.message).not.toContain(OTHER_GROUP);
+    expect(url()).toBe(elsewhere);
+    expect(container.querySelector(".kui-page-head__title")?.textContent ?? "").toBe(OTHER_GROUP);
 
     dispose();
   });
