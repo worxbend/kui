@@ -5,9 +5,17 @@ import java.time.Instant
 import munit.FunSuite
 
 import kui.consumer.application.{AssignmentFreshness, GroupDetailView, SnapshotFreshness}
-import kui.consumer.domain.{ConsumerGroup, GroupCompleteness, GroupCoordinatorRef, GroupSummary, LagMath}
+import kui.consumer.domain.{
+  ConsumerGroup,
+  GroupCompleteness,
+  GroupCoordinatorRef,
+  GroupSummary,
+  LagMath,
+  PartitionState,
+  TopicSubscription
+}
 import kui.kernel.group.{GroupProtocol, GroupState}
-import kui.kernel.{BrokerId, GroupId}
+import kui.kernel.{BrokerId, GroupId, Offset, PartitionId, TopicName}
 
 /** That the coordinator reaches the wire as an address, and never as half of one.
   *
@@ -36,6 +44,7 @@ final class ConsumerMappingSuite extends FunSuite {
       partitionCount = 12,
       coordinator = ref,
       totalLag = Some(1240L),
+      excludedPartitions = 0,
       pace = None,
       completeness = GroupCompleteness.Complete
     )
@@ -92,5 +101,38 @@ final class ConsumerMappingSuite extends FunSuite {
     assertEquals(undescribed.coordinatorId, None)
     assertEquals(undescribed.coordinatorHost, None)
     assertEquals(undescribed.coordinatorPort, None)
+  }
+
+  test("theListRowCountsThePartitionsItsTotalLeavesOutTheWayTheDetailPageDoes") {
+    // P0 is committed at the log end; P1 is held by a member that has never committed. The total is
+    // the 0 of P0 alone, and the list row said nothing was excluded from it — so "never run" read as
+    // "caught up" on the list while the detail page said one partition could not be counted.
+    def state(n: Int, committed: Option[Long]): PartitionState =
+      PartitionState(
+        partition = PartitionId.unsafe(n),
+        committed = committed.map(Offset.unsafe),
+        begin = Some(Offset.unsafe(0L)),
+        end = Some(Offset.unsafe(500L)),
+        memberId = Some("m-1"),
+        host = Some("10.0.0.7"),
+        lag = LagMath.lagOf(committed.map(Offset.unsafe), Some(Offset.unsafe(0L)), Some(Offset.unsafe(500L)))
+      )
+
+    val group = detailView(Some(coordinator)).group.copy(
+      subscriptions = List(
+        TopicSubscription(TopicName.unsafe("orders"), List(state(0, Some(500L)), state(1, None)))
+      )
+    )
+    val view = detailView(Some(coordinator)).copy(group = group, total = group.lagTotal)
+
+    val row = ConsumerMapping.summary(group.summary)
+
+    assertEquals(row.totalLag, Some(0L))
+    assertEquals(
+      row.excludedPartitions,
+      ConsumerMapping.detail(view).excludedPartitions,
+      clue = "the list and the detail page disagree about how much of the group the total covers"
+    )
+    assertEquals(row.excludedPartitions, 1)
   }
 }

@@ -212,6 +212,7 @@ object KafkaGroupAdminPort {
         partitionCount = 0,
         coordinator = None,
         totalLag = None,
+        excludedPartitions = 0,
         pace = None,
         // A listing knows the group exists and nothing else. Saying so is what stops a row built
         // from a listing alone from rendering as a group with no members and no lag.

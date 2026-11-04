@@ -111,7 +111,7 @@ object ConsumerMapping {
       coordinatorPort = row.coordinator.map(_.port),
       totalLag = row.totalLag,
       pace = row.pace,
-      excludedPartitions = row.completeness.excludedPartitions.size,
+      excludedPartitions = row.excludedPartitions,
       incomplete = incomplete(row.completeness)
     )
 

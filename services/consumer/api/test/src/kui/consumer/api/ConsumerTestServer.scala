@@ -229,6 +229,7 @@ object ConsumerTestServer {
       partitionCount = 6,
       coordinator = None,
       totalLag = lag,
+      excludedPartitions = 0,
       pace = None,
       completeness = GroupCompleteness.Complete
     )

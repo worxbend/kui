@@ -41,6 +41,11 @@ final case class GroupSummary(
     coordinator: Option[GroupCoordinatorRef],
     /** `None` when no partition of this group has a computable lag — never `Some(0)`. */
     totalLag: Option[Long],
+    /** How many partitions `totalLag` leaves out because they have no computable lag: no commit, a commit
+      * past the log end, or a log end KUI could not read. `LagMath.total`'s count, the one the detail page
+      * prints, so the list cannot call a total complete that the detail page says is not.
+      */
+    excludedPartitions: Int,
     /** Committed-offset movement per second between the last two snapshot passes. */
     pace: Option[Double],
     completeness: GroupCompleteness
@@ -85,6 +90,7 @@ final case class ConsumerGroup(
       partitionCount = partitions.size,
       coordinator = coordinator,
       totalLag = lagTotal.value,
+      excludedPartitions = lagTotal.excluded,
       // A summary built from one observation cannot know a rate; the snapshot fills this in from
       // the previous pass (`GroupSnapshots`), which is the only place both observations exist.
       pace = None,
