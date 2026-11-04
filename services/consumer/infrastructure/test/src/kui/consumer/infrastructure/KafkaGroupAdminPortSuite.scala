@@ -289,6 +289,49 @@ final class KafkaGroupAdminPortSuite extends KuiIOSuite {
     }
   }
 
+  test("a partition skipped in the pass is excluded from the group that holds it, and from no other group") {
+    // The refresh pass reads every group's log ends in one call, so its skips are the whole cluster's.
+    // Folding all of them into every group marked a group that never touched the unreadable topic as
+    // incomplete, with a partition on its excluded list that it does not have.
+    val payments = GroupId.unsafe("payments-consumer")
+    val retired = TopicPartition(TopicName.unsafe("retired"), PartitionId.unsafe(0))
+    val paymentsGroup = description(
+      List(GroupMember.of("m-2", None, "client", "10.0.0.8", MemberAssignment(Set(retired)), None))
+    ).copy(groupId = payments)
+
+    for {
+      rigged <- rig(
+        described = Right(
+          BatchResult.complete(Map(orders -> description(List(member(Set(0)))), payments -> paymentsGroup))
+        ),
+        committed = Right(
+          BatchResult.complete(
+            Map(
+              orders -> List(CommittedOffset(partition(0), Offset.unsafe(90L), None, None)),
+              payments -> List(CommittedOffset(retired, Offset.unsafe(7L), None, None))
+            )
+          )
+        ),
+        endsSkipped = Map(retired -> SkipReason.NotAuthorized("TopicAuthorization"))
+      )
+      (port, _) = rigged
+      described <- port.describe(List(orders, payments))
+    } yield {
+      val groups = described.getOrElse(fail("describe failed"))
+
+      assertEquals(groups(orders).lagTotal.value, Some(10L))
+      assertEquals(
+        groups(orders).completeness.excludedPartitions,
+        Map.empty[TopicPartition, String],
+        clue =
+          "a group that does not consume the unreadable topic was told one of its partitions was excluded"
+      )
+      assert(groups(orders).completeness.isComplete)
+      assertEquals(groups(payments).completeness.excludedPartitions.keySet, Set(retired))
+      assertEquals(groups(payments).lagTotal.value, None)
+    }
+  }
+
   test("committed offsets KUI may not read degrade the page rather than failing it") {
     for {
       rigged <- rig(committed = Left(kui.kernel.error.ApplicationError.Forbidden("no READ on the topic")))

@@ -228,11 +228,14 @@ object KafkaGroupAdminPort {
     ): ConsumerGroup = {
       val endOffsets = ends.map(_.values).getOrElse(Map.empty)
       val beginOffsets = begins.map(_.values).getOrElse(Map.empty)
-      val skipped = ends.map(_.skipped).getOrElse(Map.empty)
       val committed = commits.map(offset => offset.partition -> offset.offset).toMap
       val holder = description.members.flatMap(member => member.assignment.partitions.map(_ -> member)).toMap
 
       val partitions = (committed.keySet ++ holder.keySet).toList.sorted
+
+      // The log ends were read for every group of the pass at once, so their skips are the whole
+      // cluster's. Only this group's own partitions are this group's exclusions.
+      val skipped = ends.map(_.skipped.view.filterKeys(partitions.toSet).toMap).getOrElse(Map.empty)
 
       val states = partitions.map { partition =>
         val member = holder.get(partition)
