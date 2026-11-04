@@ -389,6 +389,13 @@ export function createApiClient(options: ApiClientOptions): KuiApiClient {
       // absence. The value's real type is the one `ResultMethod` computes for this path.
       return ok(answer.data);
     } catch (failure: unknown) {
+      // `openapi-fetch` parses a 2xx body as JSON and throws a `SyntaxError` when it is not: an HTML
+      // sign-in page from a proxy, or an SPA fallback served under /api. Something answered, so it
+      // is a `decoding` failure; called `unreachable`, it sent the operator to check the network.
+      // Matched by name rather than `instanceof`, which a parser from another realm would fail.
+      if (failure instanceof Error && failure.name === "SyntaxError") {
+        return err({ kind: "decoding", cause: `the response body is not JSON: ${failure.message}` });
+      }
       return err(transportFailure(failure));
     }
   };

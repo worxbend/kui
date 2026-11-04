@@ -189,6 +189,25 @@ describe("failures are values, never exceptions", () => {
     if (!answer.ok) expect(answer.error.kind).toBe("decoding");
   });
 
+  test("a success status whose body is not JSON is a decoding failure, not `unreachable`", async () => {
+    // Something answered, so the gateway is not unreachable: a same-origin proxy's sign-in page or
+    // an SPA fallback served under /api. Reported as `unreachable`, three of these put up the
+    // full-screen "KUI cannot reach the server" and sent the operator to check the network.
+    const client = clientWith(() =>
+      Promise.resolve(
+        new Response("<!doctype html><title>Sign in</title>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        }),
+      ),
+    );
+
+    const answer = await client.get("/api/v1/capabilities");
+
+    expect(answer.ok).toBe(false);
+    if (!answer.ok) expect(answer.error.kind).toBe("decoding");
+  });
+
   test("an error status with an empty body is a failure, not a success with no value", async () => {
     // The defect: `openapi-fetch` answers a non-2xx with `Content-Length: 0` as `{ error: undefined }`,
     // and success was decided from `error` alone, so Netty's bare 503 during a gateway restart came
