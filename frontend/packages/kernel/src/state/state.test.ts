@@ -53,6 +53,25 @@ describe("the session", () => {
     });
   });
 
+  /* A start-up whose `/auth/me` and `/auth/settings` both failed knows nothing about this deployment:
+     drawing the password form there puts a locked door in front of an auth-disabled stack while its
+     gateway restarts. Controls stay closed regardless, because there is no identity to grant them. */
+  it("shows no sign-in screen when start-up never learned the deployment's auth mode", () => {
+    inRoot(() => {
+      const { state } = session();
+      state.markExpired();
+      state.acceptSettings(undefined);
+      flush();
+      expect(state.authType()).toBeUndefined();
+      expect(state.mustSignIn()).toBe(false);
+      expect(state.permits("topic", "edit", "prod")).toBe(false);
+      // Once the deployment says it uses a sign-in, the lapsed session keeps sign-in on screen.
+      state.acceptSettings({ authType: "form", rbacEnabled: true });
+      flush();
+      expect(state.mustSignIn()).toBe(true);
+    });
+  });
+
   it("uses the session's auth mode when the settings call fails", () => {
     inRoot(() => {
       const { state } = session();

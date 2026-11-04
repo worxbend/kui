@@ -15,9 +15,10 @@
  * The demonstration environment, the quickstart, and every deployment until an identity provider is
  * configured run with `authType: "disabled"`, and none of them may ever meet a login screen: that is
  * the product's front door and a locked door there is worse than any other bug on the screen. So
- * Sign-in uses the last known configured mode, falling back to `/auth/me` when settings fail.
- * A loading identity is not an expired identity: expiry must keep sign-in visible and controls
- * closed while the shell obtains a fresh anonymous session and CSRF token.
+ * Sign-in uses the last known configured mode, falling back to `/auth/me` when settings fail, and
+ * when neither has ever answered the answer is "no sign-in". A loading identity is not an expired
+ * identity: expiry must keep sign-in visible and controls closed while the shell obtains a fresh
+ * anonymous session and CSRF token.
  *
  * ## Permissions disable controls rather than letting them fail at the server
  *
@@ -174,8 +175,10 @@ export function createSession(options: SessionOptions): SessionState {
     mustSignIn: () => {
       const configured = settings()?.authType ?? authType();
       if (configured === AuthDisabled) return false;
-      if (expired()) return true;
+      // Before expiry, deliberately: a start-up whose `/auth/me` and `/auth/settings` both failed is
+      // "expired" with no mode known, and the deployment may be one that has no sign-in at all.
       if (configured === undefined || configured === "unknown") return false;
+      if (expired()) return true;
       const current = identity();
       // `undefined` means `/auth/me` has not answered yet, which is also not a reason to demand a
       // sign-in: a signed-in user reloading the page would be asked to sign in again, in a loop.

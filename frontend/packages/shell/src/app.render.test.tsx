@@ -37,7 +37,7 @@ import { ALERTS_EVENT_NAME } from "@kui/kernel";
 
 import { App } from "./App.jsx";
 import { SEARCH_DEBOUNCE_MS } from "./data/search.js";
-import { FailuresBeforeGivingUp } from "./health.js";
+import { FailuresBeforeGivingUp, FirstBackoffMs } from "./health.js";
 import { featureRegistry } from "./features/registry.js";
 
 /**
@@ -392,6 +392,100 @@ describe("the application, mounted", () => {
       expect(app.host.querySelector("[data-testid='login-page']")).not.toBeNull();
       expect(reads).toBe(2);
     } finally { releaseSettings(); release(); app.dispose(); }
+  });
+
+  /**
+   * A page loaded while the gateway behind the frontend's nginx is restarting.
+   *
+   * nginx answers both start-up reads with its own 502 page. That is a `decoding` failure, which
+   * the connectivity tracker counts as the gateway answering, so the unreachable screen stays away.
+   * What must also stay away is the sign-in form: nothing has said this deployment uses one, and
+   * the quickstart does not. Once the gateway is back the shell has to ask again by itself, because
+   * no 401 and no lost connection will ever prompt it to.
+   */
+  it("keeps a failed start-up off the sign-in screen and asks for the session again", async () => {
+    vi.stubGlobal("EventSource", SilentEventSource);
+    const realCreate = ApiModule.createApiClient;
+    let csrf!: Parameters<typeof realCreate>[0]["csrf"];
+    vi.spyOn(ApiModule, "createApiClient").mockImplementation((options) => {
+      csrf = options.csrf;
+      return realCreate(options);
+    });
+    let gatewayUp = false;
+    const asked: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (request: Request) => {
+      const path = new URL(request.url).pathname;
+      asked.push(path);
+      if (!gatewayUp) {
+        return new Response("<html>502 Bad Gateway</html>", {
+          status: 502,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (path.endsWith("/auth/me")) return Response.json(SESSION);
+      if (path.endsWith("/auth/settings")) return Response.json({ authType: "disabled", rbacEnabled: false });
+      return Response.json({ code: "KUI-ROUTE-NOT-FOUND", message: "no route" }, { status: 404 });
+    }));
+    const sessionReads = () => asked.filter((path) => path.endsWith("/auth/me")).length;
+    const settingsReads = () => asked.filter((path) => path.endsWith("/auth/settings")).length;
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const app = mountApp();
+    try {
+      await drain();
+      expect(sessionReads()).toBe(1);
+      expect(settingsReads()).toBe(1);
+      expect(app.host.querySelector("[data-testid='login-page']")).toBeNull();
+      expect(app.host.querySelector("[data-testid='gateway-unreachable']")).toBeNull();
+      expect(csrf.currentToken()).toBeUndefined();
+
+      gatewayUp = true;
+      vi.advanceTimersByTime(FirstBackoffMs);
+      await drain();
+
+      expect(sessionReads()).toBe(2);
+      expect(settingsReads()).toBe(2);
+      expect(app.host.querySelector("[data-testid='login-page']")).toBeNull();
+      // The session exists again, so a write would carry its token.
+      expect(csrf.currentToken()).toBe("test-token");
+    } finally {
+      vi.useRealTimers();
+      app.dispose();
+    }
+  });
+
+  /* And once the misses are transport failures enough to bring the unreachable screen up, that
+     screen's countdown is what asks again. A second loop beside it would send requests the
+     countdown never announced. */
+  it("leaves asking again to the unreachable screen once it is up", async () => {
+    vi.stubGlobal("EventSource", SilentEventSource);
+    let sessionReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (request: Request) => {
+      if (new URL(request.url).pathname.endsWith("/auth/me")) sessionReads += 1;
+      throw new TypeError("Failed to fetch");
+    }));
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const app = mountApp();
+    const step = async (ms: number) => {
+      vi.advanceTimersByTime(ms);
+      await drain();
+    };
+    try {
+      await drain();
+      // Start-up's own retries, 2 s and then 4 s apart, until the third miss gives up.
+      await step(FirstBackoffMs);
+      await step(FirstBackoffMs * 2);
+      expect(sessionReads).toBe(FailuresBeforeGivingUp);
+      expect(app.host.querySelector("[data-testid='gateway-unreachable']")).not.toBeNull();
+
+      // The screen's countdown asks after 2 s, then 4 s, then 8 s: three reads in fourteen seconds.
+      for (let second = 0; second < 14; second += 1) await step(1_000);
+      expect(sessionReads).toBe(FailuresBeforeGivingUp + 3);
+    } finally {
+      vi.useRealTimers();
+      app.dispose();
+    }
   });
 
   it("draws its frame", () => {
@@ -2246,6 +2340,19 @@ describe("the permissions the features ask for", () => {
 async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
   flush();
+}
+
+/**
+ * {@link settle} for a case that fakes `setTimeout`.
+ *
+ * `setImmediate` is left real by `toFake`, so this still lets the client's promise chain and the
+ * response bodies run to completion without firing any of the timers the case is stepping by hand.
+ */
+async function drain(): Promise<void> {
+  for (let turn = 0; turn < 10; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    flush();
+  }
 }
 
 describe("start-up asks for the session before anything else", () => {

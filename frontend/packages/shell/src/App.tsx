@@ -102,7 +102,7 @@ import {
 import { createSearchController } from "./data/searchController.js";
 import { featureRegistry } from "./features/registry.js";
 import { FeatureGate } from "./features/FeatureGate.jsx";
-import { createHealth, type CallScope } from "./health.js";
+import { backoffAfter, createHealth, FirstBackoffMs, type CallScope } from "./health.js";
 import { degradedBanner, StaleBanner } from "./messages.js";
 import {
   navigationGroups,
@@ -518,6 +518,31 @@ export function App() {
   let sessionFlight: Promise<void> | undefined;
   const sessionRequest = new AbortController();
   onCleanup(() => sessionRequest.abort());
+
+  /*
+   * Asking again after a start-up that got no session.
+   *
+   * Nothing else would. A 401 re-runs start-up, and so does the unreachable screen's countdown, but
+   * an auth-disabled gateway sends no 401, and a gateway behind the frontend's nginx answers its
+   * outage with nginx's 502 page, which is an answer and so never takes connectivity to "lost". The
+   * page then sat with no identity, every control closed, until somebody reloaded it.
+   *
+   * The same backoff as the unreachable screen, and no retry of our own while that screen is up:
+   * its countdown is already re-running start-up, and a second loop would make the countdown wrong.
+   */
+  let sessionRetry: ReturnType<typeof setTimeout> | undefined;
+  let sessionRetryMs = FirstBackoffMs;
+  const retrySessionLater = (): void => {
+    if (sessionRetry !== undefined || sessionRequest.signal.aborted) return;
+    sessionRetry = setTimeout(() => {
+      sessionRetry = undefined;
+      if (health.connectivity().kind === "lost") retrySessionLater();
+      else void startUp();
+    }, sessionRetryMs);
+    sessionRetryMs = backoffAfter(sessionRetryMs);
+  };
+  onCleanup(() => clearTimeout(sessionRetry));
+
   const startUp = (): Promise<void> => {
     if (sessionFlight !== undefined) return sessionFlight;
     sessionFlight = Promise.resolve().then(async () => {
@@ -526,12 +551,16 @@ export function App() {
 
       report("shell", me.ok ? undefined : me.error);
       if (me.ok) {
+        clearTimeout(sessionRetry);
+        sessionRetry = undefined;
+        sessionRetryMs = FirstBackoffMs;
         session.accept(me.value);
         if (me.value.principal.kind !== "anonymous") reauthenticationRequested = false;
       } else {
         session.markExpired();
         // Release settings/sign-in reads, but never invent a successfully established identity.
         csrf.settle(undefined);
+        retrySessionLater();
       }
 
       // Only now, with the session established and the gate open, does anything else go out.
