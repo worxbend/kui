@@ -1775,6 +1775,143 @@ describe("the frame, given a cluster in the address", () => {
 
     app.dispose();
   });
+
+  /** Escape anywhere, the way the kernel's own overlays hear it. */
+  const pressEscape = (): void => {
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    flush();
+  };
+  const pressOn = (target: Element): void => {
+    target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    flush();
+  };
+
+  /**
+   * The other ways out of the bell's panel.
+   *
+   * `App` owns the panel's openness precisely so that something besides the bell can close it, and
+   * the bell itself says `aria-haspopup="dialog"`: a dialog that ignores Escape is a keyboard trap
+   * in reverse, and one that ignores a click on the page sits over that page.
+   */
+  it("closes the notification panel on Escape and on a press elsewhere", async () => {
+    stubCluster();
+    window.history.replaceState({}, "", "/ui");
+    const app = mountApp();
+    await settled();
+    const bell = app.host.querySelector<HTMLButtonElement>("[data-testid='notifications']")!;
+    const panel = () => app.host.querySelector("[data-testid='notification-panel']");
+
+    bell.click();
+    await settled();
+    expect(panel(), "the bell did not open the panel, so nothing below closes it").not.toBeNull();
+    // Focus inside the panel, which Escape must hand back to the bell rather than drop on <body>.
+    panel()!.querySelector<HTMLElement>(".kui-notices__head")?.setAttribute("tabindex", "-1");
+    panel()!.querySelector<HTMLElement>(".kui-notices__head")?.focus();
+    pressEscape();
+    expect(panel(), "Escape left the notification panel open").toBeNull();
+    expect(document.activeElement).toBe(bell);
+
+    bell.click();
+    await settled();
+    expect(panel()).not.toBeNull();
+    // A press on the panel itself, or on the bell that toggles it, is not a press elsewhere.
+    pressOn(panel()!);
+    pressOn(bell);
+    expect(panel()).not.toBeNull();
+    pressOn(app.host.querySelector(".kui-frame__content")!);
+    expect(panel(), "a press on the page left the notification panel over it").toBeNull();
+
+    app.dispose();
+  });
+
+  it("closes the notification panel when a notice is followed", async () => {
+    window.history.replaceState({}, "", "/ui/clusters/prod-kyiv-01");
+    stubCluster({
+      "/api/v1/clusters/prod-kyiv-01/alerts/events": {
+        events: {
+          status: "ok",
+          fetchedAt: "2026-09-06T09:00:00.000Z",
+          data: {
+            items: [
+              {
+                id: "evt-1",
+                severity: "critical",
+                tone: "danger",
+                category: "storage",
+                glyph: "storage",
+                openedAt: "2026-09-06T08:00:00.000Z",
+                lastSeenAt: "2026-09-06T08:55:00.000Z",
+                title: "Log directory past its critical threshold",
+                detail: "broker-3 · /data/a at 94%",
+                resolution: null,
+              },
+            ],
+            openCount: 1,
+            unreadCount: 1,
+            lastReadAt: "2026-09-06T06:00:00.000Z",
+            evaluatedAt: "2026-09-06T08:59:00.000Z",
+          },
+        },
+      },
+    });
+    const app = mountApp();
+    await settled();
+    announce(healthy("prod-kyiv-01"));
+    await settled();
+
+    app.host.querySelector<HTMLButtonElement>("[data-testid='notifications']")!.click();
+    await settled();
+    const link = app.host.querySelector<HTMLAnchorElement>("[data-testid='notice-evt-1'] a");
+    expect(link, "the panel drew no link for the notice, so this case follows nothing").not.toBeNull();
+    link!.click();
+    await settled();
+
+    expect(window.location.pathname).toContain("/alerts");
+    expect(
+      app.host.querySelector("[data-testid='notification-panel']"),
+      "following a notice left the panel open over the page it led to",
+    ).toBeNull();
+
+    app.dispose();
+  });
+
+  /* The account panel at the rail's foot is owned by `App` for the same reason, so it answers the
+     same two gestures. It exists only where there is a session to end. */
+  it("closes the account panel on Escape and on a press elsewhere", async () => {
+    vi.stubGlobal("EventSource", SilentEventSource);
+    vi.stubGlobal("fetch", vi.fn(async (request: Request) => {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith("/auth/me")) {
+        return Response.json({ ...SESSION, authType: "form", principal: { kind: "session", name: "ada" } });
+      }
+      if (path.endsWith("/auth/settings")) return Response.json({ authType: "form", rbacEnabled: true });
+      return Response.json({ code: "KUI-ROUTE-NOT-FOUND", message: "no route" }, { status: 404 });
+    }));
+    window.history.replaceState({}, "", "/ui");
+    const app = mountApp();
+    await settled();
+    const avatar = app.host.querySelector<HTMLButtonElement>(".kui-rail__account button");
+    expect(avatar, "the rail offered no account control, so nothing below opens it").not.toBeNull();
+    const panel = () => app.host.querySelector(".kui-rail__account-panel");
+
+    avatar!.click();
+    await settled();
+    expect(panel(), "the avatar did not open the account panel").not.toBeNull();
+    panel()!.querySelector<HTMLElement>("button")?.focus();
+    pressEscape();
+    expect(panel(), "Escape left the account panel open").toBeNull();
+    expect(document.activeElement).toBe(avatar);
+
+    avatar!.click();
+    await settled();
+    pressOn(panel()!);
+    pressOn(avatar!);
+    expect(panel()).not.toBeNull();
+    pressOn(app.host.querySelector(".kui-frame__content")!);
+    expect(panel(), "a press on the page left the account panel over it").toBeNull();
+
+    app.dispose();
+  });
 });
 
 /**

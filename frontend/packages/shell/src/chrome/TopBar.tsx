@@ -2,6 +2,7 @@ import { Show, createSignal, onCleanup } from "solid-js";
 import { Icon } from "@kui/kernel";
 import { AppearancePopover, type AppearancePreferences } from "./AppearancePopover.js";
 import { Breadcrumb } from "./Breadcrumb.js";
+import { dismissOnEscapeOrPressElsewhere } from "./dismissal.js";
 import { NotificationBell, NotificationPanel, type NoticeFeed } from "./Notifications.js";
 import { SearchField, type SearchFieldProps } from "./SearchField.js";
 import type { Crumb } from "./types.js";
@@ -99,10 +100,12 @@ export type TopBarProps = {
   readonly alertsOpen?: number | null | undefined;
   /** Whether this principal has anything unread, as the service counted it. The badge's tone. */
   readonly alertsUnread?: boolean | undefined;
-  /** Whether the notifications panel is showing. Owned by the caller, so that Escape and a click
-   * elsewhere can close it from outside this component. */
+  /** Whether the notifications panel is showing. Owned by the caller, so that something besides the
+   * bell can close it: this bar asks through {@link onCloseNotifications} on Escape, on a press
+   * elsewhere and when a link in the panel is followed. */
   readonly notificationsOpen?: boolean | undefined;
   readonly onToggleNotifications?: (() => void) | undefined;
+  readonly onCloseNotifications?: (() => void) | undefined;
   /** What the panel shows. Absent means it has not been asked for yet. */
   readonly notifications?: NoticeFeed | undefined;
   readonly onMarkAllRead?: (() => void) | undefined;
@@ -154,6 +157,14 @@ export function TopBar(props: TopBarProps) {
   };
   document.addEventListener("mousedown", closeOnOutsideClick);
   onCleanup(() => document.removeEventListener("mousedown", closeOnOutsideClick));
+
+  let bellAnchor: HTMLDivElement | undefined;
+  dismissOnEscapeOrPressElsewhere({
+    anchor: () => bellAnchor,
+    open: () => props.notificationsOpen === true,
+    close: () => props.onCloseNotifications?.(),
+    returnFocus: () => bellAnchor?.querySelector<HTMLElement>('[data-testid="notifications"]'),
+  });
 
   const toggleAppearance = () => {
     props.onOpenAppearance?.();
@@ -228,7 +239,7 @@ export function TopBar(props: TopBarProps) {
 
         {/* The panel is anchored to the bell rather than portalled, so that it stays under it when
             the window is resized and so that Tab moves from the bell straight into it. */}
-        <div class="kui-topbar__bell-anchor">
+        <div class="kui-topbar__bell-anchor" ref={(element) => (bellAnchor = element)}>
           <NotificationBell
             unreadCount={unread()}
             /* Passed through untouched, `null` included. Collapsing a `null` to a `0` here would
@@ -241,7 +252,17 @@ export function TopBar(props: TopBarProps) {
             onToggle={() => props.onToggleNotifications?.()}
           />
           <Show when={props.notificationsOpen === true}>
-            <div class="kui-topbar__bell-panel">
+            {/* A followed link leaves the panel behind it, so following one closes it. Watched here
+                rather than through `onOpenNotice`, which would turn a notice with no address into
+                a link to nowhere. */}
+            <div
+              class="kui-topbar__bell-panel"
+              onClick={(event) => {
+                if (event.target instanceof Element && event.target.closest("a[href]") !== null) {
+                  props.onCloseNotifications?.();
+                }
+              }}
+            >
               <NotificationPanel
                 feed={props.notifications ?? { kind: "loading" }}
                 onMarkAllRead={props.onMarkAllRead}

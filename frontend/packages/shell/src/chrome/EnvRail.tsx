@@ -42,6 +42,7 @@
 import { For, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { Avatar, Icon, Tooltip, type IconName } from "@kui/kernel";
+import { dismissOnEscapeOrPressElsewhere } from "./dismissal.js";
 import { healthWord, type ClusterSummary } from "./types.js";
 
 /**
@@ -98,9 +99,11 @@ export type EnvRailProps = {
    * The panel is passed in rather than built here for the same reason the drawer takes its groups:
    * the rail knows nothing about sessions, so every state of it — signed in, signing out, a
    * sign-out the gateway refused — is reachable from a story with no server. Openness is the
-   * caller's too, so that Escape and a click elsewhere can close it from outside this component.
+   * caller's too, so that something besides the avatar can close it: the rail asks through
+   * {@link onCloseAccount} on Escape and on a press elsewhere.
    */
   readonly accountOpen?: boolean | undefined;
+  readonly onCloseAccount?: (() => void) | undefined;
   readonly accountPanel?: JSX.Element | undefined;
   /** Where the product mark links to. */
   readonly homeHref?: string | undefined;
@@ -124,6 +127,14 @@ export function EnvRail(props: EnvRailProps) {
   const destinations = () => props.destinations ?? [];
   const body = () => destinations().filter((destination) => destination.atFoot !== true);
   const foot = () => destinations().filter((destination) => destination.atFoot === true);
+
+  let accountAnchor: HTMLDivElement | undefined;
+  dismissOnEscapeOrPressElsewhere({
+    anchor: () => accountAnchor,
+    open: () => props.accountOpen === true && props.accountPanel !== undefined,
+    close: () => props.onCloseAccount?.(),
+    returnFocus: () => accountAnchor?.querySelector<HTMLElement>(":scope > button"),
+  });
 
   return (
     <nav class="kui-rail" aria-label="Environment navigation" data-testid="env-rail">
@@ -202,7 +213,7 @@ export function EnvRail(props: EnvRailProps) {
         </ul>
       </Show>
 
-      <div class="kui-rail__account">
+      <div class="kui-rail__account" ref={(element) => (accountAnchor = element)}>
         {/* The kernel's Avatar owns the rule that an unknown identity is a neutral person glyph
             rather than guessed initials, and that rule has to live in exactly one place. */}
         <Avatar name={props.accountName} onClick={props.onOpenAccount} />

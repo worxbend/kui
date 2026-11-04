@@ -1133,6 +1133,26 @@ describe("TopBar", () => {
     open.dispose();
   });
 
+  /* The kernel's dialogs listen for Escape on `document` as well, and they register after the bar,
+     so one key would otherwise close the dialog and the panel beneath it together. */
+  it("leaves Escape to a modal surface open over the panel", () => {
+    const close = vi.fn();
+    const { dispose } = mount(() => (
+      <TopBar {...base} theme="dark" notificationsOpen notifications={{ kind: "ready", notices: [] }}
+        onCloseNotifications={close} />
+    ));
+    const escape = () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const modal = document.createElement("div");
+    modal.setAttribute("aria-modal", "true");
+    document.body.appendChild(modal);
+    escape();
+    expect(close).not.toHaveBeenCalled();
+    modal.remove();
+    escape();
+    expect(close).toHaveBeenCalledTimes(1);
+    dispose();
+  });
+
   it("says where you are, and does not link the page you are on", () => {
     const { container, dispose } = mount(() => <TopBar {...base} theme="dark" />);
     const current = container.querySelector('[aria-current="page"]')!;

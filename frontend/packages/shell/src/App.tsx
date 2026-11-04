@@ -923,6 +923,7 @@ export function App() {
                  becoming a button that opens a panel offering to end nothing. */
               onOpenAccount={canSignOut() ? () => setAccountOpen(!accountOpen()) : undefined}
               accountOpen={accountOpen()}
+              onCloseAccount={() => setAccountOpen(false)}
               accountPanel={
                 canSignOut() ? (
                   <AccountMenu
@@ -1007,6 +1008,7 @@ export function App() {
               appearance={{ ...appearance.preferences, persistence: appearance.status }}
               notificationsOpen={noticesOpen()}
               onToggleNotifications={() => setNoticesOpen(!noticesOpen())}
+              onCloseNotifications={() => setNoticesOpen(false)}
               /* The bell's two facts, and neither is folded here. The figure is the alerts
                  service's own **cluster-wide** open count, straight off the kernel store's one
                  derivation — `null` while nothing has said, and `null` too for a `0` the service's
