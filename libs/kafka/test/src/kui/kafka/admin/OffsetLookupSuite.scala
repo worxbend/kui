@@ -3,7 +3,10 @@ package kui.kafka.admin
 import scala.jdk.CollectionConverters.*
 
 import cats.effect.{IO, Ref}
+import cats.syntax.all.*
 import org.apache.kafka.clients.admin.{Admin, DescribeTopicsResult, ListOffsetsResult, TopicDescription}
+import org.apache.kafka.common.errors.{TopicAuthorizationException, UnknownTopicOrPartitionException}
+import org.apache.kafka.common.internals.KafkaFutureImpl
 import org.apache.kafka.common.{KafkaFuture, Node, TopicPartition as KafkaTopicPartition, TopicPartitionInfo}
 
 import kui.kafka.SkipReason
@@ -206,5 +209,133 @@ final class OffsetLookupSuite extends KuiIOSuite {
       (lookup, _) = pair
       offline <- lookup.leaderless(connection, Set(partition(0), partition(1)))
     } yield assertEquals(offline, Right(Set(partition(1))))
+  }
+
+  // ------------------------------------------------------------------ one topic, one partition
+
+  private def topicPartition(topic: String, n: Int): TopicPartition =
+    TopicPartition(TopicName.unsafe(topic), PartitionId.unsafe(n))
+
+  private def failed[A](failure: Throwable): KafkaFuture[A] = {
+    val future = new KafkaFutureImpl[A]()
+    val _ = future.completeExceptionally(failure)
+    future
+  }
+
+  /** One future per topic, which is what a broker's per-topic error code becomes in the client. */
+  private def describeEach(answers: Map[String, KafkaFuture[TopicDescription]]): DescribeTopicsResult = {
+    val factory = classOf[DescribeTopicsResult].getDeclaredMethods
+      .find(m => m.getName == "ofTopicNames")
+      .getOrElse(fail("kafka-clients no longer offers DescribeTopicsResult.ofTopicNames"))
+    factory.setAccessible(true)
+    factory.invoke(null, answers.asJava).asInstanceOf[DescribeTopicsResult]
+  }
+
+  private def described(topic: String, partitions: Int*): KafkaFuture[TopicDescription] =
+    KafkaFuture.completedFuture(
+      new TopicDescription(topic, false, partitions.map(info(_, hasLeader = true)).toList.asJava)
+    )
+
+  private def listEach(
+      answers: Map[KafkaTopicPartition, KafkaFuture[ListOffsetsResult.ListOffsetsResultInfo]]
+  ): ListOffsetsResult = {
+    val constructor = classOf[ListOffsetsResult].getDeclaredConstructors.head
+    constructor.setAccessible(true)
+    constructor.newInstance(answers.asJava).asInstanceOf[ListOffsetsResult]
+  }
+
+  private def answered(offset: Long): KafkaFuture[ListOffsetsResult.ListOffsetsResultInfo] =
+    KafkaFuture.completedFuture(
+      new ListOffsetsResult.ListOffsetsResultInfo(offset, -1L, java.util.Optional.empty())
+    )
+
+  /** The consumer refresh pass asks about every group's partitions in one call, so the topic that fails here
+    * is not the only one in the request — and before this was per topic, it was the only one that answered.
+    */
+  private def withUndescribable(failure: Throwable): OffsetLookup[IO] =
+    OffsetLookup.make[IO](
+      StubAdmin.pool(StubAdmin {
+        case "describeTopics" =>
+          describeEach(Map("payments" -> described("payments", 0), "retired" -> failed(failure)))
+        case "listOffsets" =>
+          listEach(Map(new KafkaTopicPartition("payments", 0) -> answered(100L)))
+      })
+    )
+
+  test("a topic KUI is not told about costs only its own partitions, not every other topic's offsets") {
+    // `allTopicNames()` is `KafkaFuture.allOf`: one deleted topic still named by a member's assignment
+    // failed the whole lookup, and the refresh pass then showed every group on the cluster as NO_LEADER.
+    val lookup = withUndescribable(new UnknownTopicOrPartitionException("retired"))
+
+    lookup.endOffsets(connection, Set(topicPartition("payments", 0), topicPartition("retired", 0))).map {
+      answer =>
+        assertEquals(answer.map(_.values), Right(Map(topicPartition("payments", 0) -> Offset.unsafe(100L))))
+        assertEquals(
+          answer.map(_.skipped.get(topicPartition("retired", 0)).map {
+            case SkipReason.NotFound(_) => "not-found"
+            case other => s"unexpected $other"
+          }),
+          Right(Some("not-found")),
+          clue = "a topic that is not there was reported as something other than not found"
+        )
+    }
+  }
+
+  test("a topic KUI may not describe costs only its own partitions, and says it is not authorized") {
+    val lookup = withUndescribable(new TopicAuthorizationException(java.util.Set.of("retired")))
+
+    lookup
+      .beginningOffsets(connection, Set(topicPartition("payments", 0), topicPartition("retired", 0)))
+      .map { answer =>
+        assertEquals(answer.map(_.values), Right(Map(topicPartition("payments", 0) -> Offset.unsafe(100L))))
+        assertEquals(
+          answer.map(_.skipped.get(topicPartition("retired", 0)).map {
+            case SkipReason.NotAuthorized(_) => "not-authorized"
+            case other => s"unexpected $other"
+          }),
+          Right(Some("not-authorized")),
+          clue = "an ACL KUI lacks was reported as something other than not authorized"
+        )
+      }
+  }
+
+  test("a partition whose own offset lookup failed is a skip; the rest of its chunk keeps its offsets") {
+    // The other half of the all-or-nothing: `ListOffsetsResult.all()` is `allOf` too, and a topic
+    // deleted between the metadata read and the offset request failed the chunk it shared.
+    val lookup = OffsetLookup.make[IO](
+      StubAdmin.pool(StubAdmin {
+        case "describeTopics" => describeTopics(List(info(0, hasLeader = true), info(1, hasLeader = true)))
+        case "listOffsets" =>
+          listEach(
+            Map(
+              kafkaPartition(0) -> answered(100L),
+              kafkaPartition(1) -> failed(new UnknownTopicOrPartitionException("orders-1"))
+            )
+          )
+      })
+    )
+
+    lookup.endOffsets(connection, Set(partition(0), partition(1))).map { answer =>
+      assertEquals(answer.map(_.values), Right(Map(partition(0) -> Offset.unsafe(100L))))
+      assertEquals(answer.map(_.skipped.keySet), Right(Set(partition(1))))
+    }
+  }
+
+  test("a timeout is still the lookup's failure, never a quietly smaller answer") {
+    // `KafkaErrorMapper.suppressible`: a partial result caused by slowness is indistinguishable from a
+    // cluster that has less data, so only a true statement about the one topic becomes a skip.
+    val lookup = withUndescribable(new org.apache.kafka.common.errors.TimeoutException("slow"))
+
+    lookup
+      .endOffsets(connection, Set(topicPartition("payments", 0), topicPartition("retired", 0)))
+      .map(answer => assertEquals(answer.map(_ => ()).leftMap(_.code), Left(ErrorCode.Timeout)))
+  }
+
+  test("the reset's leader check still refuses a topic it cannot describe, rather than calling it online") {
+    withUndescribable(new UnknownTopicOrPartitionException("retired"))
+      .leaderless(connection, Set(topicPartition("payments", 0), topicPartition("retired", 0)))
+      .map(answer =>
+        assert(answer.isLeft, s"a reset would have been planned over a topic KUI cannot see: $answer")
+      )
   }
 }
