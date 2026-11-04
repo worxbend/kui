@@ -188,6 +188,24 @@ describe("failures are values, never exceptions", () => {
     expect(answer.ok).toBe(false);
     if (!answer.ok) expect(answer.error.kind).toBe("decoding");
   });
+
+  test("an error status with an empty body is a failure, not a success with no value", async () => {
+    // The defect: `openapi-fetch` answers a non-2xx with `Content-Length: 0` as `{ error: undefined }`,
+    // and success was decided from `error` alone, so Netty's bare 503 during a gateway restart came
+    // back as `ok(undefined)`. A read then threw on `undefined` inside a memo, and a sign-out or a
+    // delete in that window reported `done` when nothing had happened.
+    const client = clientWith(() =>
+      Promise.resolve(new Response(null, { status: 503, headers: { "Content-Length": "0" } })),
+    );
+
+    const answer = await client.get("/api/v1/clusters");
+
+    expect(answer.ok).toBe(false);
+    if (!answer.ok) {
+      expect(answer.error.kind).toBe("decoding");
+      expect(answer.error.kind === "decoding" && answer.error.cause).toContain("503");
+    }
+  });
 });
 
 describe("the session", () => {

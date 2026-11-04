@@ -372,8 +372,18 @@ export function createApiClient(options: ApiClientOptions): KuiApiClient {
   const run = async (send: () => Promise<AnyFetchResponse>): Promise<ApiResult<unknown>> => {
     try {
       const answer = await send();
-      if (answer.error !== undefined) {
-        return err(withCorrelation(decodeEnvelope(answer.error), answer.response));
+      // Success is the status, not the absence of `error`. `openapi-fetch` leaves `error` undefined
+      // for a failure that sent `Content-Length: 0`, which is exactly what Netty sends for its bare
+      // 503 while the gateway shuts down; read from `error`, that answer became `ok(undefined)`.
+      if (!answer.response.ok) {
+        const failure: ApiError =
+          answer.error === undefined
+            ? {
+                kind: "decoding",
+                cause: `the server answered ${answer.response.status} with an empty body`,
+              }
+            : decodeEnvelope(answer.error);
+        return err(withCorrelation(failure, answer.response));
       }
       // `data` is genuinely `undefined` for a `204 No Content`, which is a success and not an
       // absence. The value's real type is the one `ResultMethod` computes for this path.
