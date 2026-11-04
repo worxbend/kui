@@ -202,7 +202,7 @@ export function App() {
 
   const cluster = createCurrentCluster({ storage: safeLocalStorage() });
   const writePolicy = createClusterWritePolicy(api, session);
-  createEffect(() => session.identity(), () => writePolicy.refresh());
+  createEffect(() => session.identity(), () => writePolicy.reset());
   onSettled(() => {
     const timer = setInterval(() => writePolicy.refresh(), 30_000);
     return () => clearInterval(timer);

@@ -9,7 +9,10 @@ type Session = {
 
 /** One reactive, fail-closed policy for every cluster, including a copy's destination.
  * Reads may register a cluster for loading but never write reactive state synchronously.
- * The shell refreshes observed clusters periodically and on identity changes.
+ * The shell refreshes observed clusters periodically and resets them on identity changes.
+ * A refresh keeps each known flag until an answer replaces it, so neither a reload in flight nor a
+ * failed one closes controls the last answer opened; the server enforces read-only regardless. A
+ * reset forgets every flag: nothing is known for a new principal until it has been asked.
  */
 export function createClusterWritePolicy(api: KuiApiClient, session: Session) {
   const [states, setStates] = createSignal<ReadonlyMap<string, boolean | undefined>>(new Map());
@@ -31,19 +34,22 @@ export function createClusterWritePolicy(api: KuiApiClient, session: Session) {
         params: { path: { clusterId } }, signal: request.signal,
       });
       pending.delete(request);
-      if (disposed || episode !== generation) return;
-      const body = answer.ok ? answer.value as { cluster?: { readOnly?: unknown } } | null : undefined;
+      // A failure has learned nothing, so whatever was known before, or nothing, still stands.
+      if (disposed || episode !== generation || !answer.ok) return;
+      const body = answer.value as { cluster?: { readOnly?: unknown } } | null;
       const flag = body?.cluster?.readOnly;
       setStates((previous) => new Map(previous).set(clusterId, typeof flag === "boolean" ? flag : undefined));
     });
   };
 
-  const invalidate = (): void => {
+  const reload = (forget: boolean): void => {
+    if (disposed) return;
     generation += 1;
     for (const request of pending) request.abort();
     pending.clear();
     attempted.clear();
-    setStates(new Map());
+    if (forget) setStates(new Map());
+    if (session.identity() !== undefined) for (const clusterId of observed) load(clusterId);
   };
 
   return {
@@ -59,10 +65,13 @@ export function createClusterWritePolicy(api: KuiApiClient, session: Session) {
       if (readOnly === undefined || disposed) return "The cluster write policy is not available yet.";
       return undefined;
     },
+    /** Asks again for every observed cluster, keeping each known flag until it is answered. */
     refresh(): void {
-      if (disposed) return;
-      invalidate();
-      if (session.identity() !== undefined) for (const clusterId of observed) load(clusterId);
+      reload(false);
+    },
+    /** Forgets every flag and asks again, for an identity that has changed. */
+    reset(): void {
+      reload(true);
     },
     dispose(): void {
       disposed = true;
