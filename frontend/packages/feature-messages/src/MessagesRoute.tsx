@@ -28,7 +28,14 @@
 import { Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
-import { createMutation, notify, useQuery, useKui, type KafkaRecord } from "@kui/kernel";
+import {
+  createMutation,
+  notify,
+  useQuery,
+  useKui,
+  type KafkaRecord,
+  type Mutation,
+} from "@kui/kernel";
 import { Actions } from "@kui/api";
 import { MessagesTab } from "./MessagesTab.jsx";
 import { ProduceDrawer } from "./ProduceDrawer.jsx";
@@ -38,7 +45,7 @@ import { registerFilter, testFilter, type RegisteredFilter } from "./filters.js"
 import { resend, type ResendDraft } from "./resend.js";
 import { toDto } from "./wire.js";
 import { TrackPage } from "./TrackPage.jsx";
-import { emptyQuery, track, type TrackQuery } from "./track.js";
+import { emptyQuery, track, type TrackQuery, type TrackResult } from "./track.js";
 import { produce, type RecordDraft } from "./produce.js";
 import { createBrowseSession } from "./session.js";
 import { createBrowseTransport } from "./transport.js";
@@ -635,6 +642,15 @@ function TrackScreen(props: { readonly clusterId: string }): JSX.Element {
      empty form on its own, with "at least one topic". */
   const holdsRead = () => kui.permits(Actions.TopicMessagesRead);
 
+  /* The query the last Search sent. The reset below cannot clear an answer that is still on its
+     way — the mutation keeps a running request running — so an answer is drawn only while the
+     form still holds the query it answers. */
+  const [asked, setAsked] = createSignal<TrackQuery>();
+  const shown = (): Mutation<TrackResult> => {
+    const state = run.state();
+    return state.kind === "running" || asked() === query() ? state : { kind: "idle" };
+  };
+
   return (
     <TrackPage
       query={query()}
@@ -644,8 +660,12 @@ function TrackScreen(props: { readonly clusterId: string }): JSX.Element {
            how somebody concludes a value is absent from a window they never searched. */
         run.reset();
       }}
-      onSearch={() => void run.run(query())}
-      state={run.state()}
+      onSearch={() => {
+        const sent = query();
+        setAsked(sent);
+        void run.run(sent);
+      }}
+      state={shown()}
       disabledReason={disabledReasonFor(holdsRead(), refusedTopic())}
     />
   );

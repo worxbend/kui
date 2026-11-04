@@ -76,6 +76,8 @@ function fakeApi(options: {
   readonly produceFails?: string;
   /** What `POST …/messages/resend` answers with: the server's own two figures. */
   readonly copied?: { readonly toTopic: string; readonly read: number; readonly written: number };
+  /** What successive `POST …/messages/track` calls answer with, in order. */
+  readonly trackReplies?: Promise<unknown>[];
 }): { readonly api: KuiApiClient; readonly calls: Call[] } {
   const calls: Call[] = [];
   const api = {
@@ -138,6 +140,10 @@ function fakeApi(options: {
             })),
           },
         };
+      }
+      if (path === "/api/v1/clusters/{clusterId}/messages/track") {
+        const reply = options.trackReplies?.shift();
+        if (reply !== undefined) return { ok: true, value: await reply };
       }
       if (path === "/api/v1/clusters/{clusterId}/topics/{topicName}/messages/resend") {
         return {
@@ -1264,6 +1270,47 @@ describe("the write controls the route offers", () => {
     await settle();
     await fillTrack(container);
 
+    expect(control(container, "Search").getAttribute("aria-disabled")).toBeNull();
+
+    dispose();
+  });
+
+  test("does not draw a track answer under a form edited while it was running", async () => {
+    /* A slow multi-topic scan is exactly when somebody edits the value or the window. The answer
+     * that lands afterwards describes the query that was sent, and drawn under the edited form it
+     * says a value is absent from a window nobody searched for it. */
+    const answered = (value: unknown): Promise<unknown> => Promise.resolve(value);
+    let release!: (value: unknown) => void;
+    const slow = new Promise<unknown>((resolve) => (release = resolve));
+    const empty = { hits: [], scanned: 1_204_331, matched: 0, truncated: false };
+    const { api, calls } = fakeApi({
+      topicAnswer: topicWith(12, "orders.trackable"),
+      trackReplies: [answered(empty), slow],
+    });
+    const { container, dispose } = trackAt(api);
+    await settle();
+    await fillTrack(container);
+    const searches = (): number =>
+      calls.filter((call) => call.path === "/api/v1/clusters/{clusterId}/messages/track").length;
+
+    // The plumbing first: an answer to the query on the form is drawn.
+    control(container, "Search").click();
+    await settle();
+    expect(searches()).toBe(1);
+    expect(container.querySelector(".kui-track__summary")?.textContent).toContain("0 matched");
+
+    control(container, "Search").click();
+    await settle();
+    expect(searches()).toBe(2);
+    expect(container.querySelector(".kui-track__summary")).toBeNull();
+    type(container, "Value", "order-9999");
+    await settle();
+
+    release(empty);
+    await settle();
+
+    expect(container.querySelector(".kui-track__summary")).toBeNull();
+    expect(container.textContent).not.toContain("No record matched.");
     expect(control(container, "Search").getAttribute("aria-disabled")).toBeNull();
 
     dispose();
