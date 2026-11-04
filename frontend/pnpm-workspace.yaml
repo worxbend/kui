@@ -20,10 +20,18 @@ dedupePeerDependents: true
 # and GHSA-jp82-f5mq-hwhp. Solid rc.8 itself moved to seroval ~1.6.7, but bumping Solid pulls
 # @solidjs/signals rc.15 and breaks the runtime (setConsoleFooter), so lift seroval alone until the
 # pinned prerelease Solid moves past rc.6 (see package.json kui.pinnedPrereleaseDependencies).
+# The lift is exact, so Dependabot cannot move it (its security run ends in
+# security_update_not_possible): raise both lines by hand to the newest 1.6.x when an advisory
+# lands. 1.6.12 is past GHSA-f86p-h4j2-7qgj, which 1.6.11 fixed.
+#
+# No override for minimatch, on purpose. The same Redocly parser pins minimatch 5.1.9, open to
+# GHSA-g3hv-75wg-m249 (moderate, below the audit gate), and the only fix is 11.0.1. Redocly calls
+# `require("minimatch")` as a function, which 9.x and later no longer export, and only to match
+# remote URLs; `pnpm --filter @kui/api generate` reads a local file. Accepted until Redocly moves.
 overrides:
   js-yaml: 4.3.2
-  seroval: 1.6.10
-  seroval-plugins: 1.6.10
+  seroval: 1.6.12
+  seroval-plugins: 1.6.12
 
 minimumReleaseAgeExclude:
   - playwright-core@1.63.0
