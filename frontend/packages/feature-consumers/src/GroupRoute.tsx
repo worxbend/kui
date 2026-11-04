@@ -60,6 +60,14 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
   const navigate = useNavigate();
   const [state, setState] = createSignal<Fetched<GroupDetail>>({ kind: "loading" });
   const [attempt, setAttempt] = createSignal(0);
+  /*
+   * Bumped by this page's own successful writes, apart from `attempt`, because the two re-reads
+   * differ in what the operator must keep seeing. A retry starts from a failure and has nothing to
+   * keep. A re-read after a reset or a forget has the page on screen and the wizard's receipt in it,
+   * and dropping to `loading` for it unmounts both: the receipt is the operator's one record of what
+   * the broker wrote, and the wizard that came back was a fresh, closed one.
+   */
+  const [revision, setRevision] = createSignal(0);
   const [confirmingDelete, setConfirmingDelete] = createSignal(false);
   /* Which topic's offsets are about to be forgotten, or nothing. The topic is the state rather
      than a boolean beside a second signal: the confirmation names it, the request carries it and
@@ -67,11 +75,14 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
   const [forgetting, setForgetting] = createSignal<string | undefined>(undefined);
 
   createEffect(
-    () => [props.clusterId, props.groupId, attempt()] as const,
-    ([clusterId, groupId]) => {
+    () => [props.clusterId, props.groupId, attempt(), revision()] as const,
+    ([clusterId, groupId, tries], previous) => {
       let cancelled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      setState({ kind: "loading" });
+      // Only `revision` moved: the same group, re-read behind the page the way a poll is.
+      const reread = previous !== undefined && previous[0] === clusterId &&
+        previous[1] === groupId && previous[2] === tries;
+      if (!reread) setState({ kind: "loading" });
 
       // Reused for the initial fetch and every poll after it, so a group whose page an operator is
       // actively watching stays live the way the group list does — via `pollLag` — instead of going
@@ -95,7 +106,7 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
         });
       };
 
-      refresh(false);
+      refresh(reread);
       return () => {
         cancelled = true;
         if (timer !== undefined) clearTimeout(timer);
@@ -158,10 +169,10 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
                 // wizard — the lag, the per-partition positions — now describes the state before the
                 // reset, which is the one state it must not be showing.
                 if (outcome.ok) {
-                  setAttempt(attempt() + 1);
+                  setRevision(revision() + 1);
                   /*
                    * The wizard's receipt is on screen and says what the broker wrote, so this is not
-                   * the only confirmation — but the wizard closes and the page behind it looks
+                   * the only confirmation — but once the operator closes it the page behind it looks
                    * exactly as it did before, only with different numbers. The toast is what
                    * survives that transition and names the group the offsets belong to.
                    */
@@ -223,7 +234,7 @@ function GroupScreen(props: { readonly clusterId: string; readonly groupId: stri
                     // The page behind this dialog is drawn from offsets that have just changed;
                     // the assignments table would otherwise keep showing positions Kafka no
                     // longer holds.
-                    setAttempt(attempt() + 1);
+                    setRevision(revision() + 1);
                     /*
                        Two sentences, chosen by the server's own figure, and never one sentence
                        with a number in it.

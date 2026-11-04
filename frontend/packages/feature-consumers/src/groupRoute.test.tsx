@@ -451,10 +451,10 @@ describe("the group page's destructive controls", () => {
     await settle();
 
     /*
-     * The wizard's own receipt is on screen and says what the broker wrote — but the wizard closes,
-     * and the page behind it then looks exactly as it did before with different numbers. The toast
-     * is what survives that, which is why the rule is "on the destructive success", not "somewhere
-     * on the screen".
+     * The wizard's own receipt is on screen and says what the broker wrote — but once the operator
+     * closes the wizard, the page behind it looks exactly as it did before with different numbers.
+     * The toast is what survives that, which is why the rule is "on the destructive success", not
+     * "somewhere on the screen". The receipt itself is the next case's subject.
      */
     expect(titles()).toContain("Offsets reset");
     const raised = toasts().find((toast) => toast.title === "Offsets reset");
@@ -462,6 +462,67 @@ describe("the group page's destructive controls", () => {
     // Not `danger`: this succeeded. A `danger` toast never auto-dismisses, and one that stays on
     // screen after a success reads as an error nobody explained.
     expect(raised?.tone).toBe("success");
+
+    dispose();
+  });
+
+  it("keeps the wizard's receipt on screen while the page re-reads the group behind it", async () => {
+    /*
+     * The receipt is the operator's one record of what the broker wrote. The route re-reads the
+     * group after a successful apply, and that re-read used to drop the page to `loading`: the
+     * `<Show when={group()}>` around the whole page fell back to its loading sentence, disposed
+     * `GroupDetail` and the wizard inside it, and the page that came back had a fresh, closed
+     * wizard. The toast case above stays green over that, because the toast lives in the kernel.
+     */
+    const { api, calls } = stub({});
+    const { container, dispose } = openGroup(api);
+    await settle();
+    const readsBefore = calls.filter((call) => call.startsWith("GET ")).length;
+
+    press(container, /^Reset offsets$/);
+    await settle();
+    press(container, /^Preview the plan$/);
+    await settle();
+    press(container, /^Apply this plan$/);
+    // Long enough for the re-read the apply starts to come back and redraw the page.
+    await settle(24);
+
+    // The re-read still happens: the figures behind the wizard describe the group before the reset.
+    expect(calls.filter((call) => call.startsWith("GET ")).length).toBeGreaterThan(readsBefore);
+    const receipt = container.querySelector('[data-testid="group-reset-receipt"]');
+    expect(receipt, "the receipt is gone from the page").not.toBeNull();
+    const rows = [...(receipt?.querySelectorAll('[data-testid="group-reset-receipt-table"] tbody tr') ?? [])];
+    const cells = rows.map((row) =>
+      [...row.querySelectorAll("td")].map((cell) => (cell.textContent ?? "").trim()),
+    );
+    // The stub's answer to the apply: partition 0, written from 40 to 0.
+    expect(cells).toHaveLength(1);
+    expect(cells[0]?.slice(0, 3)).toEqual(["0", "40", "0"]);
+
+    dispose();
+  });
+
+  it("re-reads the group after a forget without tearing the page down", async () => {
+    /*
+     * The same re-read, on the forget path. The page an operator is reading should change its
+     * figures, not blank to "Asking the coordinator…" and be rebuilt from scratch.
+     */
+    const { api, calls } = stub({});
+    const { container, dispose } = openGroup(api);
+    await settle();
+    const page = container.querySelector('[data-testid="group-assignments-card"]');
+    expect(page).not.toBeNull();
+    const readsBefore = calls.filter((call) => call.startsWith("GET ")).length;
+
+    press(forgetRow(container, FIRST_TOPIC), /^Forget offsets$/);
+    await settle();
+    press(forgetConfirmation(), /^Forget offsets$/);
+    await settle(24);
+
+    expect(titles()).toContain("Committed offsets forgotten");
+    expect(calls.filter((call) => call.startsWith("GET ")).length).toBeGreaterThan(readsBefore);
+    // The same element, not a new one drawn after a loading sentence.
+    expect(container.querySelector('[data-testid="group-assignments-card"]')).toBe(page);
 
     dispose();
   });
@@ -982,12 +1043,11 @@ describe("the group page's destructive controls", () => {
   it("a successful forget closes its confirmation", async () => {
     /*
      * The dialog is a `<Show when={forgetting()}>`, and the success path both clears that signal
-     * and re-reads the group. Without the clear, the refetch is what hides the dialog — the page
-     * drops to `loading`, the whole subtree unmounts — and the operator watches the same armed
-     * confirmation come **back** a moment later, now describing a group that no longer holds those
-     * offsets, with a `Forget offsets` button that would take the branch the receipt calls
-     * impossible. Deleting `setForgetting(undefined)` left every other case here green because they
-     * all assert on toasts, which are raised either way.
+     * and re-reads the group. Without the clear, the armed confirmation stays open over the
+     * re-read page, now describing a group that no longer holds those offsets, with a `Forget
+     * offsets` button that would take the branch the receipt calls impossible. Deleting
+     * `setForgetting(undefined)` left every other case here green because they all assert on
+     * toasts, which are raised either way.
      */
     const { api } = stub({});
     const { container, dispose } = openGroup(api);
