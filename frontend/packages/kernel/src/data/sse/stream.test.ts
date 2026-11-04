@@ -198,6 +198,31 @@ describe("a stream over EventSource", () => {
     });
   });
 
+  it("tells the subscriber when the EventSource gives up, not only the connection indicator", () => {
+    // The defect: a non-200 answer on a reconnect (a proxy's 502 while the gateway restarts) makes
+    // the browser give up for good, and this branch closed the handle without calling `onError`.
+    // The alert store marks its feed stale only from `onError`, so the bell went on reading as live.
+    const source = fakeSource();
+    const { errors, subscriber } = recorder();
+
+    createRoot((dispose) => {
+      const handle = openEventSourceWith(() => source, subscriber);
+      source.emit("open");
+      source.state = 2;
+      source.emit("error");
+      flush();
+
+      expect(errors).toEqual([
+        { kind: "transport", cause: "the connection was lost and will not be retried" },
+      ]);
+      expect(handle.connection()).toEqual({
+        phase: "closed",
+        reason: "the connection was lost and will not be retried",
+      });
+      dispose();
+    });
+  });
+
   it("closes once, however many times close is called", () => {
     const source = fakeSource();
     const { subscriber } = recorder();

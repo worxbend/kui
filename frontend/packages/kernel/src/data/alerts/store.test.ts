@@ -18,7 +18,14 @@ import { describe, expect, it } from "vitest";
 import { ErrorCodes, type ApiResult } from "@kui/api";
 import { createRoot, createSignal, flush } from "solid-js";
 
-import type { SseConnection, SseHandle, SseSubscriber } from "../sse/stream.js";
+import {
+  backoffFor,
+  openEventSourceWith,
+  type EventSourceLike,
+  type SseConnection,
+  type SseHandle,
+  type SseSubscriber,
+} from "../sse/stream.js";
 import {
   createAlerts,
   ALERTS_EVENT_NAME,
@@ -155,6 +162,30 @@ function fakeStream() {
   };
 }
 
+/**
+ * A clock the case advances by hand.
+ *
+ * Every harness passes one, so that a reopen the store schedules after a dropped stream can never
+ * fire on a real timer after its case has finished and open a stream into the next one.
+ */
+function handDrivenTimers() {
+  const pending: Array<{ readonly delayMs: number; readonly action: () => void }> = [];
+  return {
+    schedule: (delayMs: number, action: () => void): void => {
+      pending.push({ delayMs, action });
+    },
+    /** The delays asked for and not yet run, oldest first. */
+    get delays(): readonly number[] {
+      return pending.map((one) => one.delayMs);
+    },
+    /** Runs everything that is due, as the clock would once the longest delay has passed. */
+    runAll(): void {
+      for (const one of pending.splice(0)) one.action();
+      flush();
+    },
+  };
+}
+
 function harness(
   options: {
     load?: (markRead: boolean) => Promise<ApiResult<unknown>>;
@@ -165,6 +196,7 @@ function harness(
   const stream = fakeStream();
   const warnings: string[] = [];
   const reads: boolean[] = [];
+  const timers = handDrivenTimers();
 
   const alerts = createAlerts({
     openStream: (subscriber) => stream.open(subscriber),
@@ -175,6 +207,7 @@ function harness(
     cluster: options.cluster ?? (() => "quickstart"),
     cache: options.cache,
     warn: (message) => warnings.push(message),
+    schedule: timers.schedule,
   });
 
   return {
@@ -183,6 +216,8 @@ function harness(
     warnings,
     /** One entry per read, holding the `markRead` it asked for. */
     reads,
+    /** What the store asked to run later. Nothing runs until a case says so. */
+    timers,
     async settle(): Promise<void> {
       await Promise.resolve();
       await Promise.resolve();
@@ -579,6 +614,88 @@ describe("the alert feed store", () => {
       // goes takes the last known figures away exactly when they are wanted.
       expect(world.alerts.openCount()).toBe(2);
       expect(world.alerts.connection().phase).toBe("closed");
+      dispose();
+    });
+  });
+
+  it("reopens a stream that closed without being asked to, and re-reads once it is back", async () => {
+    // The defect: `connect()` was reached only from `start()`, so a stream that ended — the browser
+    // giving up on a proxy's 502 while the gateway restarted, or the heartbeat watchdog after a long
+    // outage — was never opened again. The bell stayed on the pre-restart count for the rest of the
+    // session, and no new alert arrived until a reload or a cluster switch.
+    await createRoot(async (dispose) => {
+      let served = 2;
+      const world = harness({ load: () => answering(body(wireFeed({ openCount: served }))) });
+      world.alerts.start();
+      await world.settle();
+      world.stream.live();
+      expect(world.stream.opens).toBe(1);
+
+      world.stream.fail("the connection was lost and will not be retried");
+      expect(world.alerts.feed().kind).toBe("stale");
+      expect(world.timers.delays).toHaveLength(1);
+
+      world.timers.runAll();
+      expect(world.stream.opens).toBe(2);
+      // Opened again is not the same as caught up: nothing that changed during the outage reached
+      // this store, so the rows stay badged until a read after the new stream is up says otherwise.
+      expect(world.alerts.feed().kind).toBe("stale");
+      expect(world.reads).toEqual([false]);
+
+      served = 5;
+      world.stream.live();
+      await world.settle();
+      expect(world.reads).toEqual([false, false]);
+      expect(world.alerts.feed().kind).toBe("ready");
+      expect(world.alerts.openCount()).toBe(5);
+      expect(world.alerts.connection()).toEqual({ phase: "open" });
+      dispose();
+    });
+  });
+
+  it("backs off between reopen attempts, and a stopped or restarted store reopens nothing", async () => {
+    await createRoot(async (dispose) => {
+      const world = harness();
+      world.alerts.start();
+      await world.settle();
+      world.stream.live();
+
+      const withinBackoff = (attempt: number): void => {
+        const [delay] = world.timers.delays;
+        expect(delay).toBeGreaterThanOrEqual(backoffFor(attempt) * 0.8);
+        expect(delay).toBeLessThanOrEqual(backoffFor(attempt));
+      };
+
+      // Two failures in a row with no `open` between them: the second waits longer.
+      world.stream.fail("the connection was lost");
+      withinBackoff(1);
+      world.timers.runAll();
+      world.stream.fail("the connection was lost");
+      withinBackoff(2);
+
+      // A teardown is not an outage. The reopen already on the clock must not resurrect a stream
+      // the shell has released, and the release itself must not schedule another one.
+      world.alerts.stop();
+      world.timers.runAll();
+      expect(world.stream.opens).toBe(2);
+      expect(world.timers.delays).toEqual([]);
+
+      // Nor may one from an earlier life open a second stream beside the one a new start opened.
+      world.alerts.start();
+      await world.settle();
+      world.stream.live();
+      world.stream.fail("the connection was lost");
+      world.alerts.start();
+      await world.settle();
+      expect(world.stream.opens).toBe(4);
+      world.timers.runAll();
+      expect(world.stream.opens).toBe(4);
+
+      // And the count starts again from the first attempt in the new life.
+      world.stream.live();
+      world.stream.fail("the connection was lost");
+      withinBackoff(1);
+      world.alerts.stop();
       dispose();
     });
   });
@@ -1069,5 +1186,90 @@ describe("the alert feed store", () => {
     // The names wave 5 would have shipped instead, each refused rather than folded into nothing.
     expect(decodeAlertFeed({ events: [wireEvent()], openCount: 2 }).ok).toBe(false);
     expect(decodeAlertFeed({ entries: [wireEvent()], openCount: 2 }).ok).toBe(false);
+  });
+});
+
+/** An `EventSource` driven by hand, for the case that runs the store over the real transport. */
+function fakeEventSource(): EventSourceLike & { emit(name: string): void; state: number } {
+  const listeners = new Map<string, Array<(event: Event) => void>>();
+  return {
+    state: 0,
+    get readyState(): number {
+      return this.state;
+    },
+    addEventListener(name: string, handler: (event: Event) => void): void {
+      listeners.set(name, [...(listeners.get(name) ?? []), handler]);
+    },
+    close(): void {
+      this.state = 2;
+    },
+    emit(name: string): void {
+      for (const handler of listeners.get(name) ?? []) handler(new Event(name));
+    },
+  };
+}
+
+describe("the alert store over the real stream transport", () => {
+  it("goes stale when the browser gives up on the stream, and opens a new one", async () => {
+    /*
+     * The fake in the cases above delivers a terminal failure the way `SseSubscriber.onError`
+     * promises one — the subscriber is told and the connection then reads `closed` — and the real
+     * transport did not keep that promise when the browser itself gave up: it closed the handle and
+     * told nobody. Every case above stayed green while the bell went on reading as live. This one
+     * runs the store over `openEventSourceWith`, so the two halves cannot drift apart again.
+     */
+    await createRoot(async (dispose) => {
+      const sources: Array<ReturnType<typeof fakeEventSource>> = [];
+      const timers = handDrivenTimers();
+      const reads: boolean[] = [];
+      const alerts = createAlerts({
+        openStream: (subscriber) =>
+          openEventSourceWith(() => {
+            const source = fakeEventSource();
+            sources.push(source);
+            return source;
+          }, subscriber),
+        load: (markRead) => {
+          reads.push(markRead);
+          return answering(body(wireFeed()));
+        },
+        cluster: () => "quickstart",
+        schedule: timers.schedule,
+        warn: () => {},
+      });
+      const settle = async (): Promise<void> => {
+        await Promise.resolve();
+        await Promise.resolve();
+        flush();
+      };
+
+      alerts.start();
+      await settle();
+      sources[0]?.emit("open");
+      flush();
+      expect(alerts.feed().kind).toBe("ready");
+
+      // A proxy's 502 on the browser's own reconnect: the browser fails the connection for good,
+      // reports a bare `error` event and reads CLOSED.
+      if (sources[0] !== undefined) sources[0].state = 2;
+      sources[0]?.emit("error");
+      flush();
+
+      expect(alerts.feed().kind).toBe("stale");
+      expect(alerts.openCount()).toBe(2);
+      expect(alerts.connection().phase).toBe("closed");
+
+      timers.runAll();
+      expect(sources).toHaveLength(2);
+      sources[1]?.emit("open");
+      flush();
+      await settle();
+
+      expect(reads).toEqual([false, false]);
+      expect(alerts.feed().kind).toBe("ready");
+      expect(alerts.connection()).toEqual({ phase: "open" });
+      alerts.stop();
+      dispose();
+    });
   });
 });

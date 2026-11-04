@@ -164,13 +164,21 @@
  * unusable. The feed is not that: when its stream drops, what is held is real and simply not
  * current, which is what `stale` says. A second fetch path would be a second decoder against the
  * same wire, which is the pair of half-contracts this file exists to avoid.
+ *
+ * The stream itself is opened again, though, and that is a different thing. The browser's
+ * `EventSource` retries a dropped connection on its own, and it stops for good on a non-200 answer,
+ * which is what a proxy sends while the gateway restarts. The heartbeat watchdog also ends a
+ * stream that has been silent too long. Without a reopen, any of these left the bell on the
+ * pre-restart count, badged `stale`, for the rest of the session. So a stream that closes without
+ * this store asking is reopened on `backoff()`'s schedule, and the first `open` after a reopen
+ * re-reads the feed, because whatever changed during the outage never arrived as a frame.
  */
 import type { ApiResult } from "@kui/api";
 import { decodeSection, isTransportFailure, userMessage } from "@kui/api";
 import { createEffect, createRoot, createSignal, type Accessor } from "solid-js";
 
 import { apiFailure, type Fetched } from "../fetched.js";
-import type { SseConnection, SseHandle, SseSubscriber } from "../sse/stream.js";
+import { backoff, type SseConnection, type SseHandle, type SseSubscriber } from "../sse/stream.js";
 import {
   decodeAlertChange,
   decodeAlertFeed,
@@ -216,6 +224,11 @@ export interface AlertFeedCache {
 export interface AlertsOptions {
   /** Subscribes to the change stream. A function, because a new one is opened after a close. */
   readonly openStream: (subscriber: SseSubscriber<AlertChange>) => SseHandle;
+  /**
+   * Runs an action after a delay: how a stream that closed on its own is reopened later. Defaults
+   * to `setTimeout`; a test passes a clock it drives by hand.
+   */
+  readonly schedule?: ((delayMs: number, action: () => void) => void) | undefined;
   /**
    * `GET …/alerts/events`, with the endpoint's `markRead` query.
    *
@@ -272,6 +285,11 @@ export function createAlerts(options: AlertsOptions): Alerts {
     ((message: string) => {
       console.warn(message);
     });
+  const schedule =
+    options.schedule ??
+    ((delayMs: number, action: () => void) => {
+      setTimeout(action, delayMs);
+    });
 
   // Written from network callbacks, which can be reached while an owned scope is current — the
   // same one-writer-many-readers shape the capability store has.
@@ -310,6 +328,14 @@ export function createAlerts(options: AlertsOptions): Alerts {
   /** Disposes the computation following the current handle's connection. */
   let disposeWatch: (() => void) | undefined;
   let stopped = false;
+  /**
+   * The reopen waiting on the clock, if any, and how many have been tried since a stream was last
+   * `open`. A scheduled reopen cannot be recalled, so it runs only while it is still the one held
+   * here: `start()` and `stop()` both drop it, which is what stops a reopen from an earlier life
+   * opening a second stream beside the current one, or resurrecting a stream the shell released.
+   */
+  let pendingReopen: object | undefined;
+  let reopens = 0;
 
   /**
    * Which life of this store the read in flight belongs to.
@@ -402,12 +428,14 @@ export function createAlerts(options: AlertsOptions): Alerts {
    * computation to be disposable — the capability store, one directory over, carries the same note
    * for the same reason.
    *
-   * This used to open with `if (stopped) return;`, which could not fire: `start()` is the only
-   * caller and it assigns `stopped = false` on the line above the call. It is deleted rather than
-   * left, because an unreachable guard reads as a considered defence of a state that does not
-   * exist, and the next person to add a caller would trust it instead of thinking. `stop()` does
-   * not route through here — it calls {@link releaseHandle} directly — and the case *"a second stop
-   * changes nothing, and a stopped store opens nothing"* holds it to that.
+   * There is no `if (stopped) return;` here. Its two callers are `start()`, which assigns
+   * `stopped = false` on the line above the call, and {@link reopenLater}, whose action runs only
+   * while its reopen is still the pending one, which `stop()` clears. `stop()` does not route
+   * through here — it calls {@link releaseHandle} directly — and the case *"a second stop changes
+   * nothing, and a stopped store opens nothing"* holds it to that.
+   *
+   * A `closed` read from the handle this store still holds is one it did not ask for: a release
+   * clears `handle` before it closes, so the client's own close never reaches the branch.
    */
   function connect(): void {
     releaseHandle();
@@ -417,10 +445,29 @@ export function createAlerts(options: AlertsOptions): Alerts {
       createEffect(
         () => opened.connection(),
         (current) => {
-          if (handle === opened) setConnection(current);
+          if (handle !== opened) return;
+          setConnection(current);
+          if (current.phase === "closed") {
+            reopenLater();
+          } else if (current.phase === "open" && reopens > 0) {
+            reopens = 0;
+            read(false);
+          }
         },
       );
       return dispose;
+    });
+  }
+
+  /** Opens the stream again after {@link backoff}'s wait, unless the store moved on meanwhile. */
+  function reopenLater(): void {
+    const token = {};
+    pendingReopen = token;
+    reopens += 1;
+    schedule(backoff(reopens), () => {
+      if (pendingReopen !== token) return;
+      pendingReopen = undefined;
+      connect();
     });
   }
 
@@ -628,6 +675,8 @@ export function createAlerts(options: AlertsOptions): Alerts {
 
     start(): void {
       stopped = false;
+      pendingReopen = undefined;
+      reopens = 0;
       setStreamed(null);
       setFeed({ kind: "loading" });
       read(false, true);
@@ -636,6 +685,8 @@ export function createAlerts(options: AlertsOptions): Alerts {
 
     stop(): void {
       stopped = true;
+      pendingReopen = undefined;
+      reopens = 0;
       setStreamed(null);
       releaseHandle();
       setConnection({ phase: "closed", reason: "closed by the client" });

@@ -256,9 +256,16 @@ export function openEventSourceWith<A>(
       return;
     }
     // A dropped connection: `EventSource` is either already retrying or has given up, and
-    // `readyState` is the only way to tell which.
+    // `readyState` is the only way to tell which. Giving up is terminal, so the subscriber is told
+    // exactly as the watchdog tells it: a caller that reacts to `onError` (the alert store marks
+    // its feed stale there) must not be left reading a dead stream as a live one.
     if (source.readyState === EVENT_SOURCE_CLOSED) {
-      closeWith("the connection was lost and will not be retried");
+      const cause = "the connection was lost and will not be retried";
+      try {
+        subscriber.onError({ kind: "transport", cause });
+      } finally {
+        closeWith(cause);
+      }
     } else {
       attempts += 1;
       setConnection({ phase: "reconnecting", attempt: attempts });
