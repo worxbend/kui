@@ -1,5 +1,5 @@
 import type { JSX } from "@solidjs/web";
-import { For, createMemo, createUniqueId } from "solid-js";
+import { For, Show, createMemo, createUniqueId } from "solid-js";
 import { Button, Checkbox } from "@kui/kernel";
 
 import { analyzeJsonValue, formatJsonValue, tokenizeJsonValue } from "./jsonValue.js";
@@ -13,6 +13,14 @@ export interface JsonValueEditorProps {
   readonly help: string;
   readonly minifyBeforeSending: boolean;
   readonly onMinifyChange: (checked: boolean) => void;
+  /**
+   * The operator's word that a value which starts like JSON is not JSON.
+   *
+   * Offered only while the grammar check fails. String topics carry log lines such as
+   * `[INFO] started`, and without this the check would leave them impossible to send.
+   */
+  readonly sendAsText: boolean;
+  readonly onSendAsTextChange: (checked: boolean) => void;
 }
 
 /** A native textarea with a safe, non-interactive JSON syntax layer behind its text. */
@@ -117,6 +125,14 @@ export function JsonValueEditor(props: JsonValueEditorProps): JSX.Element {
           disabled={!validJson() || props.disabled === true}
           onChange={props.onMinifyChange}
         />
+        <Show when={analysis().kind === "invalid-json"}>
+          <Checkbox
+            label="Send as plain text"
+            checked={props.sendAsText}
+            disabled={props.disabled === true}
+            onChange={props.onSendAsTextChange}
+          />
+        </Show>
       </div>
 
       <span id={helpId} class="kui-json-editor__help">

@@ -67,6 +67,32 @@ describe("the produce value editor", () => {
     mounted.dispose();
   });
 
+  it("lets text that only starts like JSON be sent as plain text", async () => {
+    /* String topics carry log lines such as `[INFO] started`. The grammar check stays the default,
+     * but the operator must be able to say the value is not JSON and send it as typed. */
+    const onSend = vi.fn();
+    const mounted = mount(() => <ProduceDrawer {...base} onSend={onSend} />);
+    await flush();
+
+    const editor = drawer().querySelector<HTMLTextAreaElement>("textarea[aria-label='Value']")!;
+    setValue(editor, "[INFO] started");
+    await flush();
+    expect(button(/^Produce record$/)?.getAttribute("aria-disabled")).toBe("true");
+
+    const asText = [...drawer().querySelectorAll<HTMLLabelElement>("label.kui-checkbox")].find(
+      (label) => label.textContent?.includes("Send as plain text"),
+    );
+    expect(asText).toBeDefined();
+    asText?.querySelector<HTMLInputElement>("input[type='checkbox']")?.click();
+    await flush();
+
+    expect(button(/^Produce record$/)?.getAttribute("aria-disabled")).not.toBe("true");
+    button(/^Produce record$/)?.click();
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ value: "[INFO] started" }));
+
+    mounted.dispose();
+  });
+
   it("minifies valid JSON only when the checkbox is selected", async () => {
     const onSend = vi.fn();
     const mounted = mount(() => <ProduceDrawer {...base} onSend={onSend} />);

@@ -58,6 +58,7 @@ export function ProduceDrawer(props: ProduceDrawerProps): JSX.Element {
   const [partitionText, setPartitionText] = createSignal("");
   const [countText, setCountText] = createSignal("1");
   const [minifyBeforeSending, setMinifyBeforeSending] = createSignal(false);
+  const [sendAsText, setSendAsText] = createSignal(false);
 
   const patch = (change: Partial<RecordDraft>): void => {
     setDraft({ ...draft(), ...change });
@@ -74,7 +75,9 @@ export function ProduceDrawer(props: ProduceDrawerProps): JSX.Element {
     const structural = draftProblem(draft());
     if (structural !== undefined) return structural;
     const value = valueAnalysis();
-    return value.kind === "invalid-json" ? value.message : undefined;
+    /* The grammar check is the default, not a wall: a value that only starts like JSON — a
+       `[WARN] disk full` log line — goes out as typed once the operator says it is plain text. */
+    return value.kind === "invalid-json" && !sendAsText() ? value.message : undefined;
   });
   const canSend = () => problem() === undefined && !busy();
 
@@ -197,6 +200,8 @@ export function ProduceDrawer(props: ProduceDrawerProps): JSX.Element {
           }
           minifyBeforeSending={minifyBeforeSending()}
           onMinifyChange={setMinifyBeforeSending}
+          sendAsText={sendAsText()}
+          onSendAsTextChange={setSendAsText}
         />
 
         <TextField
