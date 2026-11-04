@@ -45,6 +45,10 @@ object Versions {
   val otel4s          = "1.1.0"
   val otelSdk         = "1.65.0"
   val kafkaClients    = "4.3.1"
+  // The version kafka-clients 4.3.1 itself is built against (`gradle/dependencies.gradle`). Its
+  // client-side OAUTHBEARER login path links against jose4j, but its pom leaves jose4j out
+  // (`compileOnly`), so nothing brings it in unless KUI names it. See `libs.kafkaAuth`.
+  val jose4j          = "0.9.6"
   val fs2Kafka        = "4.0.0"
   val snappy          = "1.1.10.8"
   val lz4             = "1.11.2"
@@ -458,6 +462,15 @@ object libs extends Module {
       mvn"co.fs2::fs2-io::${Versions.fs2}",
       mvn"org.typelevel::log4cats-core::${Versions.log4cats}"
     )
+
+    // Runtime only, and named by neither this module's code nor the compiler. The OAUTHBEARER and
+    // Azure Entra mechanisms render kafka-clients' own `OAuthBearerLoginCallbackHandler`, which
+    // cannot be instantiated without jose4j (`NoClassDefFoundError:
+    // org/jose4j/keys/resolvers/VerificationKeyResolver`), and kafka-clients' pom does not declare
+    // it. It is here rather than beside kafka-clients in `libs.kafka` because both client families
+    // that render through this module, `libs.kafka` and `libs.config`'s metadata store, need it.
+    // `KafkaOAuthBearerSuite` instantiates the handler on this module's test runtime classpath.
+    def runMvnDeps = Seq(mvn"org.bitbucket.b_c:jose4j:${Versions.jose4j}")
 
     object test extends KuiCoverageTests {
       def moduleDeps = super.moduleDeps ++ Seq(testkit.jvm)
