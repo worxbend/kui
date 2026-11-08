@@ -1,5 +1,8 @@
 package kui.kafka
 
+import scala.annotation.tailrec
+
+import org.apache.kafka.common.KafkaException
 import org.apache.kafka.common.config.ConfigException
 import org.apache.kafka.common.errors.*
 
@@ -57,8 +60,42 @@ object KafkaErrorMapper {
     * searchable. `apiTimeoutMs` is the bound that was actually in force — `AdminTuning.apiTimeout` — so that
     * the message names a number an operator can go and change, rather than a number this file invented.
     */
-  def map(operation: String, t: Throwable, apiTimeoutMs: Long = 0L): KuiError =
-    KafkaFutures.unwrap(t) match {
+  def map(operation: String, t: Throwable, apiTimeoutMs: Long = 0L): KuiError = {
+    // `Admin.create` wraps a bootstrap typo, and the channel builder wraps a bad store, in a plain
+    // `KafkaException`. `KafkaClientConfigurationFailure` is the same kind of failure raised before
+    // `Admin.create`, already classified. Both used to miss every case below and become
+    // `Upstream("kafka", 502)`.
+    val (thrown, fromKafkaException) = peel(t)
+
+    mapKnown(operation, thrown, apiTimeoutMs) match {
+      case InfrastructureError.Upstream("kafka", 502)
+          if fromKafkaException && !thrown.isInstanceOf[ApiException] =>
+        InfrastructureError.Unreachable("kafka", thrown.getClass.getName)
+      case mapped => mapped
+    }
+  }
+
+  /** Drops `new KafkaException("Failed to create new KafkaAdminClient", cause)` so the cause can hit a
+    * specific case. The boolean is true when at least one such wrapper was removed, which is what tells the
+    * catch-all that nothing answered.
+    */
+  @tailrec
+  private def peel(t: Throwable, fromKafkaException: Boolean = false): (Throwable, Boolean) = {
+    val unwrapped = KafkaFutures.unwrap(t)
+
+    if unwrapped.getClass == classOf[KafkaException] then
+      Option(unwrapped.getCause) match {
+        case Some(cause) => peel(cause, true)
+        case None => (unwrapped, true)
+      }
+    else (unwrapped, fromKafkaException)
+  }
+
+  private def mapKnown(operation: String, thrown: Throwable, apiTimeoutMs: Long): KuiError =
+    thrown match {
+      // Raised by the pool when the keystore or the SASL library cannot be prepared. The error
+      // already names the field or the missing coordinate; replacing it with a 502 drops both.
+      case failure: KafkaClientConfigurationFailure => failure.error
 
       // ---- Reconnect class. The connection, not the request, is what broke.
       case _: TimeoutException => InfrastructureError.Timeout(operation, apiTimeoutMs)

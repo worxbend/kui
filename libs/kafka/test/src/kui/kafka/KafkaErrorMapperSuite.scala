@@ -2,13 +2,14 @@ package kui.kafka
 
 import java.util.concurrent.{CompletionException, ExecutionException}
 
+import org.apache.kafka.common.KafkaException
 import org.apache.kafka.common.config.ConfigException
 import org.apache.kafka.common.errors.*
 import org.scalacheck.Prop.forAll
 import org.scalacheck.{Gen, Prop}
 
 import kui.kafka.KafkaErrorMapper.FailureClass
-import kui.kernel.error.{ApplicationError, ErrorCode, InfrastructureError, KuiError}
+import kui.kernel.error.{ApplicationError, DomainError, ErrorCode, InfrastructureError, KuiError}
 import kui.testkit.{KuiSuite, RedactionAssertions}
 
 /** The mapping table, asserted row by row, plus the three properties that make it trustworthy.
@@ -370,21 +371,59 @@ final class KafkaErrorMapperSuite extends KuiSuite {
   }
 
   test("anUnresolvableBootstrapAddressIsUnreachableAndNotAFabricatedHttpStatus") {
-    // What a typo in `bootstrapServers` actually produces. The Kafka client raises a
-    // `ConfigException` before it opens a socket, so this is not an `ApiException` and used to fall
-    // through to the catch-all, which reports `Upstream("kafka", 502)` — rendered to an operator as
-    // "kafka answered with status 502". Nothing answered, and 502 is a status no Kafka broker can
-    // return, so the one person who could fix the typo was sent looking for a proxy.
+    // What a typo in `bootstrapServers` actually produces. `Admin.create` does not let the
+    // `ConfigException` out: `KafkaAdminClient.createInternal` wraps it in
+    // `KafkaException("Failed to create new KafkaAdminClient", cause)`. A bare `ConfigException`
+    // still escapes the `AdminClientConfig` constructor, so both shapes are mapped. Either used to
+    // be able to fall through to the catch-all, which reports `Upstream("kafka", 502)` — rendered
+    // to an operator as "kafka answered with status 502". Nothing answered.
     val raised = new ConfigException("No resolvable bootstrap urls given in bootstrap.servers")
+    val wrapped = new KafkaException("Failed to create new KafkaAdminClient", raised)
 
-    KafkaErrorMapper.map("describeCluster", raised) match {
-      case InfrastructureError.Unreachable(upstream, message) =>
+    List(raised, wrapped).foreach { failure =>
+      KafkaErrorMapper.map("describeCluster", failure) match {
+        case InfrastructureError.Unreachable(upstream, message) =>
+          assertEquals(upstream, "kafka")
+          assert(
+            message.contains("bootstrap.servers"),
+            s"the client's own message names the setting to fix, and must survive: $message"
+          )
+        case other => fail(s"an unresolvable bootstrap address is unreachability, not $other")
+      }
+    }
+  }
+
+  test("a client that could not be built keeps the configuration error") {
+    // A bad inline keystore or a missing SASL login module is raised as
+    // `KafkaClientConfigurationFailure` so this mapper can still see the original code. Falling
+    // through to `Upstream("kafka", 502)` throws that code away and dims the capability.
+    val invalid = DomainError.InvariantViolation("the truststore is not valid base64")
+    val unsupported = ApplicationError.Unsupported("AWS_MSK_IAM")
+
+    assertEquals(
+      KafkaErrorMapper.map("describeCluster", KafkaClientConfigurationFailure(invalid)),
+      invalid
+    )
+    assertEquals(
+      KafkaErrorMapper.map("describeCluster", KafkaClientConfigurationFailure(unsupported)),
+      unsupported
+    )
+  }
+
+  test("a client construction failure that is not a config exception names its class") {
+    // An SSL store or JAAS failure from `Admin.create` arrives as a plain `KafkaException` whose
+    // cause is not itself a `ConfigException`. The catch-all called that "kafka answered with
+    // status 502" and the cluster log then had no class to look up.
+    val failure = new KafkaException(
+      "Failed to create new KafkaAdminClient",
+      new RuntimeException("keystore password was incorrect")
+    )
+
+    KafkaErrorMapper.map("describeCluster", failure) match {
+      case InfrastructureError.Unreachable(upstream, cause) =>
         assertEquals(upstream, "kafka")
-        assert(
-          message.contains("bootstrap.servers"),
-          s"the client's own message names the setting to fix, and must survive: $message"
-        )
-      case other => fail(s"an unresolvable bootstrap address is unreachability, not $other")
+        assertEquals(cause, "java.lang.RuntimeException")
+      case other => fail(s"a construction failure must be unreachable, not $other")
     }
   }
 }
