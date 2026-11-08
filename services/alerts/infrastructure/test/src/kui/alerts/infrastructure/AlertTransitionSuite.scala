@@ -123,7 +123,7 @@ final class AlertTransitionSuite extends KuiIOSuite {
             acknowledged <- store.acknowledge(cluster, first.opened.head.id, at.plusSeconds(30), "ada")
             _ <- store.record(cluster, delayed, at.plusSeconds(60))
             feed <- store.feed(cluster, reader, 10, None)
-          } yield assertEquals(feed.events, acknowledged.toOption.toList)
+          } yield assertEquals(feed.events, acknowledged.toOption.map(_.event).toList)
         }
       }
     }

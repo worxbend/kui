@@ -258,7 +258,7 @@ final class InMemoryAlertStoreSuite extends CatsEffectSuite {
         closed <- Ref.of[IO, Option[Boolean]](None)
         frames <- framesFor(held)(
           held.acknowledge(cluster, open.id, at.plusSeconds(30), "ada").flatMap { answer =>
-            closed.set(answer.map(_.isOpen).toOption)
+            closed.set(answer.map(_.event.isOpen).toOption)
           }
         )
         acknowledged <- closed.get
@@ -399,7 +399,7 @@ final class InMemoryAlertStoreSuite extends CatsEffectSuite {
         again <- held.acknowledge(cluster, open.id, at, "ada")
       } yield {
         assertEquals(missing.left.map(_.code), Left(kui.kernel.error.ErrorCode.InvalidState))
-        assertEquals(first.map(_.isOpen), Right(false))
+        assertEquals(first.map(_.event.isOpen), Right(false))
         assertEquals(again.left.map(_.code), Left(kui.kernel.error.ErrorCode.InvalidState))
       }
     }

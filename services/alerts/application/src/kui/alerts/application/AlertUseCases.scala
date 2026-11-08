@@ -94,16 +94,11 @@ object AlertUseCases {
         guard.guard(principal, cluster, event.value) {
           for {
             now <- Clock[F].realTimeInstant
+            // The count is the one in the projection this write committed, not a second read of the feed.
+            // That read also decodes the caller's user state, and raising from it recorded a committed
+            // acknowledgement as Failed.
             closed <- store.acknowledge(cluster, event, now, AuditPrincipal.render(principal))
-            answer <- closed.traverse(acknowledged =>
-              // Read back rather than decremented. The count this returns is the store's own answer after
-              // the write, so two acknowledgements racing on one event cannot both report the count they
-              // each expected to produce.
-              store
-                .feed(cluster, principal, 0, None)
-                .map(feed => AcknowledgedAlert(acknowledged, feed.openCount))
-            )
-          } yield answer
+          } yield closed
         }
     }
 }

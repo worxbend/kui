@@ -9,7 +9,7 @@ import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.Topic
 
-import kui.alerts.application.{AlertFeed, AlertStore}
+import kui.alerts.application.{AcknowledgedAlert, AlertFeed, AlertStore}
 import kui.alerts.domain.*
 import kui.cache.{BoundedCache, CacheMetrics}
 import kui.kernel.ClusterId
@@ -98,21 +98,22 @@ final class InMemoryAlertStore[F[_]: Async] private (
       event: AlertEventId,
       at: Instant,
       by: String
-  ): F[Either[KuiError, AlertEvent]] =
+  ): F[Either[KuiError, kui.alerts.application.AcknowledgedAlert]] =
     state
       .modify { clusters =>
         val held = clusters.getOrElse(cluster, ClusterAlerts.empty)
 
         held.events.indexWhere(_.id == event) match {
-          case -1 => (clusters, notOpen(event).asLeft[AlertEvent])
+          case -1 => (clusters, notOpen(event).asLeft[AcknowledgedAlert])
           case index if !held.events(index).isOpen =>
-            (clusters, alreadyClosed(event).asLeft[AlertEvent])
+            (clusters, alreadyClosed(event).asLeft[AcknowledgedAlert])
           case index =>
             val closed = held.events(index).resolvedBy(at, AlertResolutionKind.Acknowledged, Some(by))
+            val events = held.events.updated(index, closed)
 
             (
-              clusters.updated(cluster, held.copy(events = held.events.updated(index, closed))),
-              closed.asRight[KuiError]
+              clusters.updated(cluster, held.copy(events = events)),
+              AcknowledgedAlert(closed, events.count(_.isOpen)).asRight
             )
         }
       }

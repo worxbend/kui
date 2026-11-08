@@ -11,7 +11,7 @@ import io.circe.syntax.*
 import io.circe.{Codec, Decoder, DecodingFailure, Encoder, HCursor, Json}
 import org.typelevel.log4cats.StructuredLogger
 
-import kui.alerts.application.{AlertFeed, AlertStore}
+import kui.alerts.application.{AcknowledgedAlert, AlertFeed, AlertStore}
 import kui.alerts.domain.*
 import kui.config.store.*
 import kui.kernel.error.{ErrorCode, InfrastructureError, KuiError}
@@ -70,15 +70,15 @@ final class DurableAlertStore[F[_]: Async] private (
       event: AlertEventId,
       at: Instant,
       by: String
-  ): F[Either[KuiError, AlertEvent]] = {
-    def attempt(remaining: Int): F[Either[KuiError, AlertEvent]] =
+  ): F[Either[KuiError, AcknowledgedAlert]] = {
+    def attempt(remaining: Int): F[Either[KuiError, AcknowledgedAlert]] =
       readVersioned(cluster).flatMap {
-        case Left(error) => error.asLeft[AlertEvent].pure[F]
+        case Left(error) => error.asLeft[AcknowledgedAlert].pure[F]
         case Right((version, held)) =>
           held.events.indexWhere(_.id == event) match {
-            case -1 => InMemoryAlertStore.notOpen(event).asLeft[AlertEvent].pure[F]
+            case -1 => InMemoryAlertStore.notOpen(event).asLeft[AcknowledgedAlert].pure[F]
             case index if !held.events(index).isOpen =>
-              InMemoryAlertStore.alreadyClosed(event).asLeft[AlertEvent].pure[F]
+              InMemoryAlertStore.alreadyClosed(event).asLeft[AcknowledgedAlert].pure[F]
             case index =>
               val closed = held
                 .events(index)
@@ -90,10 +90,11 @@ final class DurableAlertStore[F[_]: Async] private (
               val next = held.copy(events = held.events.updated(index, closed))
 
               put(cluster, next, version).flatMap {
-                case Right(_) => closed.asRight[KuiError].pure[F]
+                case Right(_) =>
+                  AcknowledgedAlert(closed, next.events.count(_.isOpen)).asRight[KuiError].pure[F]
                 case Left(error) if error.code == ErrorCode.ConfigVersionConflict && remaining > 1 =>
                   attempt(remaining - 1)
-                case Left(error) => error.asLeft[AlertEvent].pure[F]
+                case Left(error) => error.asLeft[AcknowledgedAlert].pure[F]
               }
           }
       }

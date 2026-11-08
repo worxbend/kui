@@ -104,18 +104,28 @@ object AlertsRig {
         event: AlertEventId,
         when: Instant,
         by: String
-    ): IO[Either[KuiError, AlertEvent]] =
+    ): IO[Either[KuiError, AcknowledgedAlert]] =
       writes.update(_ + 1) >> state.modify { clusters =>
         val held = clusters.getOrElse(id, Nil)
 
         held.indexWhere(_.id == event) match {
           case -1 =>
-            (clusters, ApplicationError.Conflict(s"no open alert event '${event.value}'").asLeft[AlertEvent])
+            (
+              clusters,
+              ApplicationError.Conflict(s"no open alert event '${event.value}'").asLeft[AcknowledgedAlert]
+            )
           case index if !held(index).isOpen =>
-            (clusters, ApplicationError.Conflict(s"'${event.value}' is already closed").asLeft[AlertEvent])
+            (
+              clusters,
+              ApplicationError.Conflict(s"'${event.value}' is already closed").asLeft[AcknowledgedAlert]
+            )
           case index =>
             val closed = held(index).resolvedBy(when, AlertResolutionKind.Acknowledged, Some(by))
-            (clusters.updated(id, held.updated(index, closed)), closed.asRight[KuiError])
+            val events = held.updated(index, closed)
+            (
+              clusters.updated(id, events),
+              AcknowledgedAlert(closed, events.count(_.isOpen)).asRight[KuiError]
+            )
         }
       }
 

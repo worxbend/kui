@@ -86,16 +86,23 @@ object AlertsTestServer {
         event: AlertEventId,
         when: Instant,
         by: String
-    ): IO[Either[KuiError, AlertEvent]] =
+    ): IO[Either[KuiError, AcknowledgedAlert]] =
       attempts.update(_ :+ event) >> state.modify { events =>
         events.indexWhere(_.id == event) match {
           case -1 =>
-            (events, ApplicationError.Conflict(s"no open alert event '${event.value}'").asLeft[AlertEvent])
+            (
+              events,
+              ApplicationError.Conflict(s"no open alert event '${event.value}'").asLeft[AcknowledgedAlert]
+            )
           case index if !events(index).isOpen =>
-            (events, ApplicationError.Conflict(s"'${event.value}' is already closed").asLeft[AlertEvent])
+            (
+              events,
+              ApplicationError.Conflict(s"'${event.value}' is already closed").asLeft[AcknowledgedAlert]
+            )
           case index =>
             val closed = events(index).resolvedBy(when, AlertResolutionKind.Acknowledged, Some(by))
-            (events.updated(index, closed), closed.asRight[KuiError])
+            val next = events.updated(index, closed)
+            (next, AcknowledgedAlert(closed, next.count(_.isOpen)).asRight[KuiError])
         }
       }
 

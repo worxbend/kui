@@ -8,10 +8,12 @@ import cats.effect.{Deferred, IO, Ref}
 import fs2.Stream
 import io.circe.Json
 
+import kui.alerts.application.{AlertUseCases, ClusterProfileSource, ClusterProfileView, MutationGuard}
 import kui.alerts.domain.*
 import kui.config.store.*
 import kui.kernel.error.KuiError
 import kui.kernel.{ClusterId, UserName}
+import kui.observability.audit.LoggingAuditSink
 import kui.security.{Principal, PrincipalKind}
 import kui.testkit.KuiIOSuite
 import kui.testkit.fakes.FakeStructuredLogger
@@ -63,7 +65,7 @@ final class DurableAlertStoreSuite extends KuiIOSuite {
       first = DurableAlertStore[IO](metadata, 7.days, logger)
       _ <- first.record(cluster, opening(event), at)
       acknowledged <- first.acknowledge(cluster, event.id, at.plusSeconds(45), "ada")
-      _ = assert(acknowledged.exists(!_.isOpen), acknowledged)
+      _ = assert(acknowledged.exists(!_.event.isOpen), acknowledged)
       second = DurableAlertStore[IO](metadata, 7.days, logger)
       restored <- second.feed(cluster, reader, 100, None)
       resolution = restored.events.headOption.flatMap(_.resolution)
@@ -103,7 +105,7 @@ final class DurableAlertStoreSuite extends KuiIOSuite {
       _ <- resume.complete(())
       _ <- writer.joinWithNever
       feed <- store.feed(cluster, reader, 10, None)
-    } yield assertEquals(feed.events, acknowledged.toOption.toList)
+    } yield assertEquals(feed.events, acknowledged.toOption.map(_.event).toList)
   }
 
   test("a cleared condition can open a new unread event later") {
@@ -177,6 +179,47 @@ final class DurableAlertStoreSuite extends KuiIOSuite {
       _ = assertEquals(feed.evaluatedAt, Some(newer))
       _ = assertEquals(feed.events.headOption.map(_.lastSeenAt), Some(newer))
     } yield ()
+  }
+
+  test("a committed acknowledgement succeeds when the caller's user-state record will not decode") {
+    // The count used to be a second read of the feed, inside the mutation guard, and that read also
+    // decodes this principal's user state. A record the decoder refuses raised after the acknowledgement
+    // had already been written, so the caller got 500 and the audit line said Failed.
+    val profiles = new ClusterProfileSource[IO] {
+      def profileOf(id: ClusterId): IO[Either[KuiError, ClusterProfileView]] =
+        IO.pure(Right(ClusterProfileView(id, id.value, readOnly = false)))
+
+      def all: IO[List[ClusterProfileView]] = IO.pure(Nil)
+    }
+
+    for {
+      metadata <- TestConfigStore.create
+      logger <- FakeStructuredLogger[IO]
+      store = DurableAlertStore[IO](metadata, 7.days, logger)
+      _ <- store.record(cluster, opening(event), at)
+      _ <- metadata.put(
+        UserStateKey.of(cluster, reader),
+        Json.obj("formatVersion" -> Json.fromInt(999)),
+        None,
+        "test"
+      )
+      guard = MutationGuard.make[IO](profiles, LoggingAcknowledgementSink.make[IO](logger), logger)
+      alerts = AlertUseCases.make[IO](profiles, store, guard)
+      result <- alerts.acknowledge(reader, cluster, event.id)
+      entries <- logger.entries
+      stored <- metadata.get(StoreKey(StoreSection.Alerts, cluster.value))
+      kind = stored.flatMap(
+        _.payload.hcursor.downField("events").downArray.downField("resolution").get[String]("kind").toOption
+      )
+    } yield {
+      assertEquals(result.map(_.event.isOpen), Right(false))
+      assertEquals(result.map(_.openCount), Right(0))
+      assertEquals(
+        entries.flatMap(_.context.get(LoggingAuditSink.Field.Outcome)),
+        List("succeeded")
+      )
+      assertEquals(kind, Some("acknowledged"))
+    }
   }
 
   test("an unsupported durable projection fails closed instead of reopening alerts") {

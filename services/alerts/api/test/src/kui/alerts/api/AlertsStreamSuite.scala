@@ -7,7 +7,7 @@ import fs2.Stream
 import io.circe.parser.parse
 import munit.CatsEffectSuite
 
-import kui.alerts.application.{AlertFeed, AlertStore}
+import kui.alerts.application.{AcknowledgedAlert, AlertFeed, AlertStore}
 import kui.alerts.domain.*
 import kui.kernel.ClusterId
 import kui.kernel.error.KuiError
@@ -55,7 +55,8 @@ final class AlertsStreamSuite extends CatsEffectSuite {
         event: AlertEventId,
         when: Instant,
         by: String
-    ): IO[Either[KuiError, AlertEvent]] = IO.raiseError(new IllegalStateException("not under test"))
+    ): IO[Either[KuiError, AcknowledgedAlert]] =
+      IO.raiseError(new IllegalStateException("not under test"))
 
     def record(id: ClusterId, evaluation: Evaluation, when: Instant): IO[Unit] = IO.unit
 

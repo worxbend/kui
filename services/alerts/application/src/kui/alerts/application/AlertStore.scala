@@ -85,13 +85,16 @@ trait AlertStore[F[_]] {
     * The refusals are the store's and not the route's, because "this event is already closed" is a fact only
     * the store holds, and a route that checked it first would be checking it against a read that another
     * request can invalidate between the two calls.
+    *
+    * The open count is taken from the projection this write just committed. A later `feed` would also decode
+    * the caller's user state, and a failure there would report an acknowledgement that took effect as failed.
     */
   def acknowledge(
       cluster: ClusterId,
       event: AlertEventId,
       at: Instant,
       by: String
-  ): F[Either[KuiError, AlertEvent]]
+  ): F[Either[KuiError, AcknowledgedAlert]]
 
   /** Applies one pass: opens what fired, refreshes what is still firing, closes what cleared, and keeps the
     * rule state for the next pass.
