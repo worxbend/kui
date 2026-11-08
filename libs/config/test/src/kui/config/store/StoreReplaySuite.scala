@@ -5,7 +5,7 @@ import java.time.Instant
 import scala.concurrent.duration.*
 
 import cats.effect.testkit.TestControl
-import cats.effect.{Deferred, IO, Ref}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import fs2.Stream
 import fs2.concurrent.Topic
 import io.circe.Json
@@ -145,7 +145,9 @@ final class StoreReplaySuite extends KuiIOSuite {
       changes <- Topic[IO, StoreChange]
       log = (Stream.eval(started.complete(()).void).drain ++ Stream.never[IO])
         .onFinalize(released.update(_ + 1))
-      fiber <- KafkaConfigStore.follow[IO](fakeLog(0L, log), state, changes, crypto, None, logger).start
+      fiber <- KafkaConfigStore
+        .follow[IO](fakeLog(0L, log), state, changes, crypto, None, logger, _ => IO.unit)
+        .start
       _ <- started.get
       _ <- fiber.cancel
       outcome <- fiber.join
@@ -229,6 +231,96 @@ final class StoreReplaySuite extends KuiIOSuite {
       assertEquals(state.nextVersion(key), 1L)
     }
   }
+
+  test("aFollowerThatLosesTheBrokerBecomesHealthyAgainWhenItReads") {
+    // A SASL failure degrades the store. The follower retries on a new log, and once the broker accepts it
+    // again the store has to be Healthy: otherwise every write stays KUI-STORE-UNREACHABLE until restart.
+    val key = StoreKey(StoreSection.Cluster, "analytics")
+    val fresh = StoreKey(StoreSection.Cluster, "fresh")
+    val program = for {
+      state <- Ref.of[IO, StoreState](StoreState.empty)
+      changes <- Topic[IO, StoreChange]
+      waiter <- WriteWaiter.create[IO]
+      health <- StoreHealthRef.of[IO](StoreHealth.Healthy(-1L, at, Nil))
+      attempts <- Ref.of[IO, Int](0)
+      opened <- Ref.of[IO, Int](0)
+      sawDegraded <- Ref.of[IO, Boolean](false)
+      produced <- Deferred[IO, KafkaConfigStore.LogRecord]
+      log = new KafkaConfigStore.StoreLog[IO] {
+        def endOffset: IO[Long] = IO.pure(2L)
+        def records: Stream[IO, KafkaConfigStore.LogRecord] =
+          Stream.eval(attempts.updateAndGet(_ + 1)).flatMap { n =>
+            if n == 1 then
+              Stream.raiseError[IO](new org.apache.kafka.common.errors.SaslAuthenticationException("rotated"))
+            else Stream.emit(entry("analytics", 1L, 0L)) ++ Stream.eval(produced.get)
+          }
+      }
+      open = Resource.eval(opened.update(_ + 1)).map(_ => log)
+      sink = new KafkaConfigStore.RecordSink[IO] {
+        def produce(topic: String, key: String, value: Option[String]) =
+          produced.complete(KafkaConfigStore.LogRecord(key, value, 1L)).map(_ => Right(1L))
+      }
+      store = KafkaConfigStore.writable[IO](
+        state,
+        changes,
+        waiter,
+        health,
+        sink,
+        crypto,
+        "__kui_config",
+        5.seconds,
+        logger
+      )
+      fiber <- KafkaConfigStore
+        .followForever[IO](open, state, changes, crypto, waiter, health, "kafka:9092", logger)
+        .start
+      _ <- waitUntilServing(health, state, sawDegraded, key)
+      written <- store.put(fresh, Json.obj(), None, "test")
+      _ <- fiber.join
+      now <- health.get
+      degraded <- sawDegraded.get
+      opens <- opened.get
+      version <- state.get.map(_.get(key).map(_.version))
+      created <- state.get.map(_.get(fresh).map(_.version))
+    } yield (degraded, now, version, written, opens, created)
+    TestControl.executeEmbed(program).map { (degraded, now, version, written, opens, created) =>
+      assert(degraded, "the authentication failure must degrade the store")
+      assert(opens >= 2, s"each attempt needs its own log, opened $opens")
+      assertEquals(version, Some(1L))
+      now match {
+        case StoreHealth.Healthy(_, _, _) => ()
+        case other => fail(s"the follower resumed but the store stayed $other")
+      }
+      written match {
+        case Right(_) => ()
+        case Left(error) => fail(s"write refused after recovery: ${error.code.wire} ${error.message}")
+      }
+      assertEquals(created, Some(1L))
+    }
+  }
+
+  private def waitUntilServing(
+      health: StoreHealthRef[IO],
+      state: Ref[IO, StoreState],
+      sawDegraded: Ref[IO, Boolean],
+      key: StoreKey
+  ): IO[Unit] =
+    health.get.flatMap { reported =>
+      val mark = reported match {
+        case StoreHealth.Degraded(_, _, _, _) => sawDegraded.set(true)
+        case _ => IO.unit
+      }
+      mark.flatMap { _ =>
+        state.get.flatMap { current =>
+          val serving = reported match {
+            case StoreHealth.Healthy(_, _, _) => current.get(key).isDefined
+            case _ => false
+          }
+          if serving then IO.unit
+          else IO.sleep(5.millis).flatMap(_ => waitUntilServing(health, state, sawDegraded, key))
+        }
+      }
+    }
 
   test("aPhysicalTombstoneDeletesTheKey") {
     // KUI writes logical tombstones, but a compacted or hand-edited log contains null values, so they

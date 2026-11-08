@@ -65,12 +65,18 @@ final class WriteWaiter[F[_]: Async] private (state: Ref[F, WriteWaiter.State[F]
   /** Called when the follower dies, so writers fail fast instead of waiting out their timeout.
     *
     * The failure is sticky: a writer arriving after the follower is gone is told immediately rather than
-    * parked against a log nobody is reading any more.
+    * parked against a log nobody is reading any more. [[recover]] clears it once a later attempt is reading
+    * the log again — a retry that comes back must not keep refusing writes with the reason of an outage that
+    * is over.
     */
   def fail(reason: StoreError): F[Unit] =
     state
       .modify(current => (current.copy(failure = Some(reason), waiting = Nil), current.waiting.map(_._2)))
       .flatMap(_.traverse_(_.complete(Left(reason)).void))
+
+  /** Lets writers park again after the follower has resumed. */
+  def recover: F[Unit] =
+    state.update(_.copy(failure = None))
 
   /** How many writers are parked. For tests and for the health surface, never for a decision. */
   def pending: F[Int] = state.get.map(_.waiting.size)

@@ -92,14 +92,61 @@ object KafkaConfigStore {
       // cancels the fiber *before* the consumer resource above it is finalized. A consumer closed
       // underneath a running poll is how an orderly shutdown turns into a stack trace.
       _ <- Resource.eval(health.markHealthy(endOffset - 1L))
+      // The first attempt keeps the consumer replay positioned at the tip. A later attempt opens a new
+      // one: fs2-kafka does not survive a failed poll, and a retry on the dead actor would fail at once
+      // for the rest of the process.
+      restarted <- Resource.eval(Ref.of[F, Boolean](false))
       supervisor <- Supervisor[F]
       _ <- Resource.eval(
         supervisor.supervise(
-          followForever(log, state, changes, crypto, waiter, health, kafka.bootstrapServers.value, logger)
+          followForever(
+            openTail(consumer, kafka, clientId, topic, partition, state, restarted),
+            state,
+            changes,
+            crypto,
+            waiter,
+            health,
+            kafka.bootstrapServers.value,
+            logger
+          )
         )
       )
-    } yield writable(state, changes, waiter, health, producer, crypto, topic, config.writeTimeout, logger)
+    } yield writable(
+      state,
+      changes,
+      waiter,
+      health,
+      kafkaSink(producer),
+      crypto,
+      topic,
+      config.writeTimeout,
+      logger
+    )
   }
+
+  /** A follower attempt's log. The first one is the replay consumer; each retry builds a new consumer sought
+    * to the offset this replica has already folded.
+    */
+  private def openTail[F[_]: {Async, Files}](
+      consumer: KafkaConsumer[F, String, Option[String]],
+      kafka: StoreKafkaConfig,
+      clientId: String,
+      topic: String,
+      partition: TopicPartition,
+      state: Ref[F, StoreState],
+      restarted: Ref[F, Boolean]
+  ): Resource[F, StoreLog[F]] =
+    Resource.eval(restarted.getAndSet(true)).flatMap {
+      case false => Resource.pure(fromPosition(consumer, partition))
+      case true =>
+        StoreClients
+          .consumer[F](kafka, s"$clientId-tail")
+          .evalTap { fresh =>
+            fresh.assign(topic, NonEmptySet.one(partition.partition)) *>
+              state.get.flatMap(current => fresh.seek(partition, current.lastAppliedOffset + 1L))
+          }
+          .map(fresh => fromPosition(fresh, partition))
+    }
 
   /** Assign the single partition, rewind, and find out where the log ends.
     *
@@ -120,11 +167,31 @@ object KafkaConfigStore {
           offsets <- consumer.endOffsets(Set(partition))
         } yield offsets.getOrElse(partition, 0L)
 
-      def records: Stream[F, LogRecord] =
-        consumer.records.map(committable =>
-          LogRecord(committable.record.key, committable.record.value, committable.record.offset)
-        )
+      def records: Stream[F, LogRecord] = recordStream(consumer)
     }
+
+  /** A consumer that is already assigned, read from its current position.
+    *
+    * `endOffset` must not seek. Seeking here would rewind a consumer replay has already walked to the tip,
+    * and the follower would fold the log a second time.
+    */
+  private def fromPosition[F[_]: cats.Functor](
+      consumer: KafkaConsumer[F, String, Option[String]],
+      partition: TopicPartition
+  ): StoreLog[F] =
+    new StoreLog[F] {
+      def endOffset: F[Long] =
+        consumer.endOffsets(Set(partition)).map(_.getOrElse(partition, 0L))
+
+      def records: Stream[F, LogRecord] = recordStream(consumer)
+    }
+
+  private def recordStream[F[_]](
+      consumer: KafkaConsumer[F, String, Option[String]]
+  ): Stream[F, LogRecord] =
+    consumer.records.map(committable =>
+      LogRecord(committable.record.key, committable.record.value, committable.record.offset)
+    )
 
   private def prepare[F[_]: Async](
       log: StoreLog[F],
@@ -160,7 +227,7 @@ object KafkaConfigStore {
       for {
         started <- Clock[F].monotonic
         outcome <- log.records
-          .through(applyEach(state, changes, crypto, None, logger))
+          .through(applyEach(state, changes, crypto, None, logger, _ => Async[F].unit))
           .takeThrough(offset => offset < endOffset - 1L)
           .compile
           .drain
@@ -195,9 +262,10 @@ object KafkaConfigStore {
       changes: Topic[F, StoreChange],
       crypto: FieldCrypto[F],
       waiter: Option[WriteWaiter[F]],
-      logger: Logger[F]
+      logger: Logger[F],
+      onApplied: Long => F[Unit]
   ): F[Unit] =
-    log.records.through(applyEach(state, changes, crypto, waiter, logger)).compile.drain
+    log.records.through(applyEach(state, changes, crypto, waiter, logger, onApplied)).compile.drain
 
   /** The follower, restarted for ever with bounded backoff.
     *
@@ -207,11 +275,16 @@ object KafkaConfigStore {
     * rejected rather than queued — a queued write applied minutes later lands on top of somebody else's edit
     * — and every parked writer is freed at once instead of each waiting out its own timeout.
     *
+    * A failed attempt is not the end of the outage. The next one opens its own log (the Kafka consumer does
+    * not survive a failed poll) and becomes `Healthy` again once it is caught up or has folded a record.
+    * Until that happens writes stay rejected, and the waiter's failure from the outage stays sticky so a
+    * writer is not parked against a log nobody is reading.
+    *
     * Every step is cancellable, including the sleep: a shutdown must not have to wait out a thirty-second
     * backoff.
     */
-  private def followForever[F[_]: Async](
-      log: StoreLog[F],
+  private[store] def followForever[F[_]: Async](
+      open: Resource[F, StoreLog[F]],
       state: Ref[F, StoreState],
       changes: Topic[F, StoreChange],
       crypto: FieldCrypto[F],
@@ -221,21 +294,41 @@ object KafkaConfigStore {
       logger: Logger[F]
   ): F[Unit] = {
     def attempt(number: Int): F[Unit] =
-      follow(log, state, changes, crypto, Some(waiter), logger).attempt.flatMap {
-        case Right(_) =>
-          // The log ended, which for a live topic means the client was closed under us.
-          logger.info("store tail follower completed; the store is closing")
-        case Left(error) =>
-          val reason = StoreHealthRef.classify(error)
-          val pause = StoreRetryPolicy.Default.delay(number, scala.util.Random.nextDouble())
-          health.markDegraded(reason) *>
-            waiter.fail(StoreError.Unreachable(bootstrapServers, reason)) *>
-            logger.warn(
-              s"store tail follower failed: reason=$reason attempt=${number + 1} delayMs=${pause.toMillis}; " +
-                "reads continue from the last replayed state and writes are rejected until it recovers"
-            ) *>
-            Async[F].sleep(pause) *>
-            attempt(number + 1)
+      Ref.of[F, Boolean](false).flatMap { resumed =>
+        // One transition per attempt. Marking healthy on every record would move `since` forward for as
+        // long as the follower stayed degraded, and `since` answers "how long has this been fine".
+        def resume(offset: Long): F[Unit] =
+          resumed.get.flatMap {
+            case true => Async[F].unit
+            case false =>
+              resumed.set(true) *> health.markHealthy(offset) *> waiter.recover
+          }
+
+        open
+          .use { log =>
+            (log.endOffset, state.get).flatMapN { (end, current) =>
+              // A quiet topic produces nothing to fold. Caught up means the outage is over anyway.
+              if current.lastAppliedOffset >= end - 1L then resume(current.lastAppliedOffset)
+              else Async[F].unit
+            } *> follow(log, state, changes, crypto, Some(waiter), logger, resume)
+          }
+          .attempt
+          .flatMap {
+            case Right(_) =>
+              // The log ended, which for a live topic means the client was closed under us.
+              logger.info("store tail follower completed; the store is closing")
+            case Left(error) =>
+              val reason = StoreHealthRef.classify(error)
+              val pause = StoreRetryPolicy.Default.delay(number, scala.util.Random.nextDouble())
+              health.markDegraded(reason) *>
+                waiter.fail(StoreError.Unreachable(bootstrapServers, reason)) *>
+                logger.warn(
+                  s"store tail follower failed: reason=$reason attempt=${number + 1} delayMs=${pause.toMillis}; " +
+                    "reads continue from the last replayed state and writes are rejected until it recovers"
+                ) *>
+                Async[F].sleep(pause) *>
+                attempt(number + 1)
+          }
       }
 
     attempt(0)
@@ -252,7 +345,8 @@ object KafkaConfigStore {
       changes: Topic[F, StoreChange],
       crypto: FieldCrypto[F],
       waiter: Option[WriteWaiter[F]],
-      logger: Logger[F]
+      logger: Logger[F],
+      onApplied: Long => F[Unit]
   ): fs2.Pipe[F, LogRecord, Long] =
     _.evalMap { record =>
       val offset = record.offset
@@ -275,8 +369,9 @@ object KafkaConfigStore {
           }
         )
         // The waiter is advanced *after* the state has been updated, so a writer that is woken and then
-        // reads the state cannot see a moment in which its own record has not landed yet.
-        (folded *> waiter.traverse_(_.advance(offset))).as(offset)
+        // reads the state cannot see a moment in which its own record has not landed yet. Health recovers
+        // after that, so a writer let back in cannot observe a record the fold has not stored.
+        (folded *> waiter.traverse_(_.advance(offset)) *> onApplied(offset)).as(offset)
       }
     }
 
@@ -355,12 +450,34 @@ object KafkaConfigStore {
     * own record to come back around through that same follower, which is what makes "the write succeeded"
     * mean "I have read my record from the log" rather than "I hopefully changed a local map".
     */
-  private def writable[F[_]: Async](
+  /** What a write hands to the log. A test supplies one; production wraps the Kafka producer. */
+  private[store] trait RecordSink[F[_]] {
+    def produce(topic: String, key: String, value: Option[String]): F[Either[StoreError, Long]]
+  }
+
+  private def kafkaSink[F[_]: Async](
+      producer: KafkaProducer[F, String, Option[String]]
+  ): RecordSink[F] =
+    new RecordSink[F] {
+      def produce(topic: String, key: String, value: Option[String]): F[Either[StoreError, Long]] =
+        // The send and its acknowledgement are one step: a cancellation between them would leave a record
+        // on the log that nobody is waiting for and nobody knows about.
+        Async[F]
+          .uncancelable(_ => producer.produceOne_(topic, key, value).flatten.map(_.offset))
+          .attempt
+          .map {
+            case Right(offset) => Right(offset)
+            case Left(error) =>
+              Left(StoreError.Unreachable(topic, s"the producer failed with ${error.getClass.getSimpleName}"))
+          }
+    }
+
+  private[store] def writable[F[_]: Async](
       state: Ref[F, StoreState],
       changeTopic: Topic[F, StoreChange],
       waiter: WriteWaiter[F],
       healthRef: StoreHealthRef[F],
-      producer: KafkaProducer[F, String, Option[String]],
+      sink: RecordSink[F],
       crypto: FieldCrypto[F],
       topic: String,
       writeTimeout: FiniteDuration,
@@ -487,7 +604,7 @@ object KafkaConfigStore {
         * I produced", and the answer is a fact rather than an inference.
         */
       private def send(record: StoreRecord): F[Either[KuiError, Unit]] =
-        produce(record).flatMap {
+        sink.produce(topic, record.key.render, Some(record.asJson.noSpaces)).flatMap {
           case Left(error) => Async[F].pure(Left(toKuiError(error)))
           case Right(offset) =>
             waiter.await(offset, writeTimeout).flatMap {
@@ -519,23 +636,6 @@ object KafkaConfigStore {
             }
         }
 
-      /** The send and its acknowledgement are one step: a cancellation between them would leave a record on
-        * the log that nobody is waiting for and nobody knows about.
-        */
-      private def produce(record: StoreRecord): F[Either[StoreError, Long]] =
-        Async[F]
-          .uncancelable(_ =>
-            producer
-              .produceOne_(topic, record.key.render, Some(record.asJson.noSpaces))
-              .flatten
-              .map(metadata => metadata.offset)
-          )
-          .attempt
-          .map {
-            case Right(offset) => Right(offset)
-            case Left(error) =>
-              Left(StoreError.Unreachable(topic, s"the producer failed with ${error.getClass.getSimpleName}"))
-          }
     }
 
   /** The envelope's timestamp: whole seconds, because a millisecond difference between two replicas writing

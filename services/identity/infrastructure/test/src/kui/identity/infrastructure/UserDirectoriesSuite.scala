@@ -133,6 +133,27 @@ final class UserDirectoriesSuite extends KuiIOSuite {
     } yield assertEquals(found, None)
   }
 
+  test("sign-in works again once a degraded store is healthy") {
+    // Refusing every form account while the store is degraded is deliberate. Staying refused after the
+    // store is healthy again is not: the directory must follow the store, not latch the outage.
+    for {
+      logger <- FakeStructuredLogger[IO]
+      reported <- Ref.of[IO, StoreHealth](
+        StoreHealth.Degraded("authentication failed", Instant.EPOCH, 0L, Nil)
+      )
+      store = new StubStore {
+        override def health: IO[StoreHealth] = reported.get
+      }
+      directory = StoredUserDirectory.make[IO](configured, store, logger)
+      refused <- directory.find("admin")
+      _ <- reported.set(StoreHealth.Healthy(0L, Instant.EPOCH, Nil))
+      allowed <- directory.find("admin")
+    } yield {
+      assertEquals(refused, None)
+      assertEquals(allowed.map(_.hash), Some(hash))
+    }
+  }
+
   test("a disconnected store cannot authorize against its stale credential view") {
     for {
       logger <- FakeStructuredLogger[IO]

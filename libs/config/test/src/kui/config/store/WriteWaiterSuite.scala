@@ -101,6 +101,28 @@ final class WriteWaiterSuite extends KuiIOSuite {
     }
   }
 
+  test("recoverLetsTheNextWriterWaitAfterAFailure") {
+    // fail is sticky while the follower is down. A follower that retries and comes back has to clear it,
+    // or the next write is refused with the reason of an outage that is already over.
+    val reason = StoreError.Unreachable("kafka:9092", "authentication failed")
+    val test = for {
+      waiter <- WriteWaiter.create[IO]
+      _ <- waiter.fail(reason)
+      refused <- waiter.await(1L, 10.seconds)
+      _ <- waiter.recover
+      fiber <- waiter.await(2L, 10.seconds).start
+      _ <- IO.sleep(1.second)
+      pending <- waiter.pending
+      _ <- waiter.advance(2L)
+      resumed <- fiber.joinWithNever
+    } yield (refused, pending, resumed)
+    TestControl.executeEmbed(test).map { (refused, pending, resumed) =>
+      assertEquals(refused, Left(reason))
+      assertEquals(pending, 1)
+      assertEquals(resumed, Right(()))
+    }
+  }
+
   test("aCancelledWaiterDoesNotStayInTheMap") {
     // A waiter left behind after its fiber is gone is a slow leak that only appears under load, which is
     // the worst time to find one.
