@@ -6,10 +6,11 @@ import sttp.tapir.*
 import sttp.tapir.json.circe.jsonBody
 
 import kui.contracts.KernelSchemas.given
-import kui.contracts.rbac.EndpointAuthorization
+import kui.contracts.rbac.{EndpointAuthorization, ResourceRequirement}
 import kui.contracts.{ErrorEnvelope, KuiEndpoint}
 import kui.kernel.ClusterId
 import kui.security.SignedPrincipal
+import kui.security.rbac.{Action, Resource}
 
 /** What a finished track found (ET-001).
   *
@@ -83,6 +84,9 @@ object TrackEndpoints {
     */
   val TrackSegment: String = "track"
 
+  /** The body field that names the topics a track reads, which is what its permission is checked over. */
+  val TopicsField: String = "topics"
+
   private val base = "internal" / "v1" / ClustersSegment
 
   private val clusterIdPath: EndpointInput[ClusterId] =
@@ -94,16 +98,17 @@ object TrackEndpoints {
       .in(jsonBody[TrackQueryDto])
       .out(jsonBody[TrackResultDto])
       .name("message.track")
-      // Cluster-scoped only. The topics named in the body are NOT checked against the caller's per-topic
-      // permissions anywhere today — not here (the gateway cannot decode bodies, which is what
-      // `NameSource.RequestBody` exists to say out loud) and not in the message service, which reads
-      // `TrackQueryDto.topics` and scans every one of them without a permission check
-      // (`TrackRoutes`/`TrackUseCase` carry no principal to check against). A principal scoped to a single
-      // topic pattern can currently get hits from any topic via this endpoint. Fixing this needs either a
-      // `NameSource` that can point at a body list field, wired through to a real per-topic check in the
-      // message service, or an equivalent check added there directly — tracked as a gap rather than claimed
-      // as done.
-      .attribute(EndpointAuthorization.Key, EndpointAuthorization.clusterScoped("track"))
+      // A track reads the records of every topic its body names, so it needs what a browse of each of them
+      // needs. The names are in the body, which the gateway cannot decode: it only checks that the caller
+      // may read messages on *some* topic, and the message service — `TrackRoutes` hands the decoded
+      // `topics` to `SecuredRoutes.withBody` — refuses the whole track unless every topic is readable.
+      .attribute(
+        EndpointAuthorization.Key,
+        EndpointAuthorization.one(
+          "track",
+          ResourceRequirement.inBody(Resource.Topic, TopicsField, Action.TopicMessagesRead)
+        )
+      )
       .summary("Find a value across several topics inside a time window")
       .description(
         "Reads each named topic forwards from the start of the window and answers with the records that " +

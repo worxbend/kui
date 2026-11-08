@@ -52,6 +52,11 @@ object MessageMutationEndpoints {
     */
   val ResendSegment: String = "resend"
 
+  /** The body field that names the topic a resend copies into, which is what its produce permission is
+    * checked over.
+    */
+  val ResendDestinationField: String = "toTopic"
+
   /** The last path segment of a purge, and of the plan that precedes it. A verb in the path for the same
     * reason `resend` is one: `DELETE …/messages` would read as "delete these messages" and name no particular
     * ones, while a purge is one operation over the whole topic with a plan attached.
@@ -145,7 +150,7 @@ object MessageMutationEndpoints {
           "resend",
           List(
             ResourceRequirement.named(Resource.Topic, TopicNameParam, Action.TopicMessagesRead),
-            ResourceRequirement.inBody(Resource.Topic, "toTopic", Action.TopicMessagesProduce)
+            ResourceRequirement.inBody(Resource.Topic, ResendDestinationField, Action.TopicMessagesProduce)
           )
         )
       )

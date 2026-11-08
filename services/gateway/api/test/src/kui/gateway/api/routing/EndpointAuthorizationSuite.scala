@@ -90,6 +90,9 @@ final class EndpointAuthorizationSuite extends FunSuite {
         .flatten
     }
 
-    assertEquals(bodyNamed.sorted, List("message.resend.toTopic", "topic.create.name"))
+    assertEquals(
+      bodyNamed.sorted,
+      List("message.resend.toTopic", "message.track.topics", "topic.create.name")
+    )
   }
 }

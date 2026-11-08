@@ -239,4 +239,73 @@ final class RbacGuardSuite extends CatsEffectSuite {
         .map(_ => assertEquals(asked.get, List("frozen")))
     }
   }
+
+  // -- names that only the decoded body holds ------------------------------------------------------
+
+  /** A create that names its topic in the body, which is the shape the gateway can only check coarsely. */
+  private val bodyNamed: AnyEndpoint =
+    endpoint.post
+      .in("internal" / "v1" / "clusters" / path[String]("clusterId") / "topics")
+      .attribute(
+        EndpointAuthorization.Key,
+        EndpointAuthorization.one(
+          "createTopic",
+          ResourceRequirement.inBody(Resource.Topic, "name", Action.TopicCreate)
+        )
+      )
+
+  /** `reader` may create topics matching `payments\..*` and nothing else. */
+  private val scopedCreate: RbacPolicy =
+    RbacPolicy(
+      roles = List(
+        Role(
+          name = reader,
+          clusters = Set(Cluster),
+          subjects = Nil,
+          permissions = List(
+            RbacPolicy.permission(
+              Resource.Topic,
+              Some(ResourcePattern.compile("payments\\..*").getOrElse(fail("the pattern compiles"))),
+              Set(Action.TopicCreate)
+            )
+          )
+        )
+      ),
+      defaultRole = None
+    )
+
+  private def authorizeBody(
+      bodyNames: Map[String, List[String]]
+  ): IO[Either[kui.kernel.error.KuiError, Unit]] =
+    FakeStructuredLogger[IO].flatMap { logger =>
+      RbacGuard
+        .fromPolicy[IO](scopedCreate, _ => ClusterFlags.Writable, logger)
+        .authorize(principal(reader), bodyNamed, s"/internal/v1/clusters/${Cluster.value}/topics", bodyNames)
+    }
+
+  test("a name in the body outside the caller's pattern is refused, though some pattern grants the action") {
+    // What the gateway let through: `reader` may create *some* topic. The service has the name.
+    authorizeBody(Map("name" -> List("secrets"))).map { decision =>
+      assertEquals(decision.left.map(_.code.wire), Left("KUI-FORBIDDEN"))
+    }
+  }
+
+  test("a name in the body inside the caller's pattern is allowed") {
+    authorizeBody(Map("name" -> List("payments.new"))).map(decision => assertEquals(decision, Right(())))
+  }
+
+  test("a body-named endpoint whose route handed over no names is refused, and logged as a bug") {
+    // The route that forgot `namesOf` in `SecuredRoutes.withBody`. Allowing here would be the coarse
+    // gate again — exactly the check this one exists to tighten — so the guard refuses at error level.
+    FakeStructuredLogger[IO].flatMap { logger =>
+      RbacGuard
+        .fromPolicy[IO](scopedCreate, _ => ClusterFlags.Writable, logger)
+        .authorize(principal(reader), bodyNamed, s"/internal/v1/clusters/${Cluster.value}/topics")
+        .flatMap(decision => logger.entries.map(decision -> _))
+        .map { (decision, entries) =>
+          assertEquals(decision.left.map(_.code.wire), Left("KUI-FORBIDDEN"))
+          assertEquals(entries.map(_.level), List("error"))
+        }
+    }
+  }
 }

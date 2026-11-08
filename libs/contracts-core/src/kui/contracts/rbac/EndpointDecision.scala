@@ -29,6 +29,10 @@ object EndpointDecision {
     * into `Denied`: a denial is a fact about the caller and belongs in the audit trail as one, while this is
     * a fact about the code, belongs in the log at error level, and should wake somebody. Both refuse the
     * request; only one of them is a bug.
+    *
+    * @param bodyNames
+    *   the names in the decoded body, by [[NameSource.RequestBody]] field — given by the service, which has
+    *   decoded it, and absent at the edge, which has not. See `EndpointAuthorization.accessRequest`
     */
   def decide(
       policy: RbacPolicy,
@@ -36,9 +40,10 @@ object EndpointDecision {
       flags: ClusterFlags,
       endpoint: AnyEndpoint,
       cluster: Option[ClusterId],
-      requestSegments: List[String]
+      requestSegments: List[String],
+      bodyNames: Option[Map[String, List[String]]] = None
   ): Either[String, Decision] =
-    EndpointAuthorization.accessRequest(endpoint, cluster, requestSegments).map { request =>
+    EndpointAuthorization.accessRequest(endpoint, cluster, requestSegments, bodyNames).map { request =>
       Rbac.decide(policy, principal, flags, request) match {
         case denied: Decision.Denied => denied
         case Decision.Allowed => bodyNamedGate(policy, principal, flags, endpoint, cluster)
@@ -48,7 +53,7 @@ object EndpointDecision {
   /** The coarse half of the check for a resource whose name is only in the request body.
     *
     * `Rbac.decide` above has already applied the cluster gate, and the read-only gate over every requirement
-    * whose name this side of the hop can see. What it could not consider is a requirement named
+    * whose name this side of the hop can see. At the edge, what it could not consider is a requirement named
     * [[NameSource.RequestBody]] — a topic create names its topic in the body — so those are handled here, and
     * exactly two things are asserted about them:
     *
@@ -56,7 +61,8 @@ object EndpointDecision {
     *      whole point of the flag and does not depend on knowing the name.
     *   1. **the principal holds the action on *some* pattern of that resource.** Somebody with no topic
     *      permissions at all cannot reach the create endpoint. Somebody whose grant is `payments\..*` can,
-    *      and if they then ask to create `orders` the service refuses them with the name in hand.
+    *      and if they then ask to create `orders` the service refuses them with the name in hand: it passes
+    *      the body's names as `bodyNames`, and `Rbac.decide` above has then already checked each one exactly.
     *
     * This is stated as a deliberate weakening rather than hidden as an implementation detail, because a
     * reader has to be able to see where the exact check lives. The alternative — the gateway decoding every

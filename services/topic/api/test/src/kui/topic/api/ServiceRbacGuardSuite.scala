@@ -1,16 +1,21 @@
 package kui.topic.api
 
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 
 import cats.effect.IO
+import io.circe.syntax.*
 import munit.CatsEffectSuite
 import sttp.client4.*
 
 import kui.cache.Snapshot
-import kui.kernel.{ClusterId, RoleName, TopicName}
+import kui.contracts.{HttpHeaders, KuiEndpoint}
+import kui.kernel.{ClusterId, RoleName, TopicName, UserName}
 import kui.security.rbac.*
+import kui.security.{PrincipalClaims, PrincipalKind, RequestDigests}
 import kui.topic.application.Fresh
-import kui.topic.domain.{TopicDetail, TopicSnapshot, TopicSummary}
+import kui.topic.contract.dto.CreateTopicRequest
+import kui.topic.domain.{CreatedTopic, TopicDetail, TopicSnapshot, TopicSummary}
 
 /** The service refusing on its own account.
   *
@@ -163,6 +168,73 @@ final class ServiceRbacGuardSuite extends CatsEffectSuite {
       .use { server =>
         get(server, path("/topics/secrets"), Set.empty).map { response =>
           assertEquals(response.code.code, 200, response.body.fold(identity, identity))
+        }
+      }
+  }
+
+  /** A create, signed over its body the way the gateway signs it. */
+  private def create(server: TopicTestServer, name: String, roles: Set[RoleName]): IO[(Int, String)] = {
+    val at = path("/topics")
+    val body = CreateTopicRequest(TopicName.unsafe(name), Some(1), Some(1), Map.empty).asJson.noSpaces
+
+    IO.realTimeInstant
+      .flatMap(now =>
+        TopicTestServer.codec.sign(
+          PrincipalClaims(
+            subject = UserName.unsafe("alice"),
+            roles = roles,
+            kind = PrincipalKind.Session,
+            sessionRef = None,
+            issuedAt = now,
+            expiresAt = now.plusSeconds(60),
+            audience = TopicApi.Id,
+            requestDigest = RequestDigests.of("POST", at, body.getBytes(StandardCharsets.UTF_8))
+          )
+        )
+      )
+      .flatMap(token =>
+        basicRequest
+          .post(uri"${uri(at)}")
+          .header(KuiEndpoint.PrincipalHeader, token.value)
+          .header(HttpHeaders.Csrf, "test-csrf")
+          .contentType("application/json")
+          .body(body)
+          .response(asStringAlways)
+          .send(server.backend)
+      )
+      .map(response => (response.code.code, response.body))
+  }
+
+  private def created(name: String): CreatedTopic =
+    CreatedTopic(cluster, TopicName.unsafe(name), Some(1), Some(1))
+
+  test("a create naming a topic outside the caller's pattern is refused, though they may create others") {
+    // The name is in the body, so the gateway can only check that the caller may create *some* topic.
+    // This is the check that has the name.
+    TopicTestServer
+      .resource(
+        snapshot,
+        created = Right(created("secrets")),
+        rbac = policy("payments\\..*", Action.TopicCreate)
+      )
+      .use { server =>
+        create(server, "secrets", Set(reader)).map { (status, body) =>
+          assertEquals(status, 403, body)
+          assert(body.contains("KUI-FORBIDDEN"), body)
+        }
+      }
+  }
+
+  test("a create naming a topic inside the caller's pattern is served") {
+    TopicTestServer
+      .resource(
+        snapshot,
+        created = Right(created("payments.refunds")),
+        rbac = policy("payments\\..*", Action.TopicCreate)
+      )
+      .use { server =>
+        create(server, "payments.refunds", Set(reader)).map { (status, body) =>
+          assertEquals(status, 200, body)
         }
       }
   }

@@ -57,24 +57,27 @@ object TopicAdminRoutes {
       admin: TopicAdminUseCase[F],
       secured: TopicApi.Securing[F]
   ): ServerEndpoint[Any, F] =
-    secured.withBody(TopicAdminEndpoints.create)((_, _, request) => SecuredRoutes.bodyBytes(request)) {
-      principal => (_, cluster, request) =>
-        NewTopicSpec.of(request.name, request.partitions, request.replicationFactor, request.config) match {
-          case Left(error) => error.asLeft[CreatedTopicDto].pure[F]
-          case Right(spec) =>
-            admin
-              .create(principal, cluster, spec)
-              .map(
-                _.map(created =>
-                  CreatedTopicDto(
-                    created.cluster,
-                    created.topic,
-                    created.partitions,
-                    created.replicationFactor
-                  )
+    secured.withBody(TopicAdminEndpoints.create)(
+      (_, _, request) => SecuredRoutes.bodyBytes(request),
+      // The topic is named in the body, so this is the only place its name meets the caller's patterns.
+      (_, _, request) => Map(TopicAdminEndpoints.CreateNameField -> List(request.name.value))
+    ) { principal => (_, cluster, request) =>
+      NewTopicSpec.of(request.name, request.partitions, request.replicationFactor, request.config) match {
+        case Left(error) => error.asLeft[CreatedTopicDto].pure[F]
+        case Right(spec) =>
+          admin
+            .create(principal, cluster, spec)
+            .map(
+              _.map(created =>
+                CreatedTopicDto(
+                  created.cluster,
+                  created.topic,
+                  created.partitions,
+                  created.replicationFactor
                 )
               )
-        }
+            )
+      }
     }
 
   /** Set and reset entries of a topic's configuration, and answer with the configuration read back. */

@@ -146,28 +146,33 @@ object MessageMutationRoutes {
       resend: ResendUseCase[F],
       secured: MessageApi.Securing[F]
   ): ServerEndpoint[Any, F] =
-    secured.withBody(MessageMutationEndpoints.resend)((_, _, _, request) => SecuredRoutes.bodyBytes(request)) {
-      principal => (_, cluster, topic, request) =>
-        resendRequests(cluster, topic, request) match {
-          case Left(error) => error.asLeft[ResendResultDto].pure[F]
-          case Right(requests) =>
-            requests
-              .foldLeftM((ResendResultDto(request.toTopic, 0L, 0L), Option.empty[KuiError], false)) {
-                case ((sofar, firstError, completed), one) =>
-                  resend.resend(principal, one).map { result =>
-                    (
-                      resendOutcome(sofar, one, result),
-                      firstError.orElse(result.swap.toOption),
-                      completed || result.isRight
-                    )
-                  }
-              }
-              .map { (receipt, firstError, completed) =>
-                // A zero-written result still carries per-record failures or a completed empty range.
-                // Only all-Left requests have no receipt to lose; never decide this from written alone.
-                if completed then receipt.asRight[KuiError] else firstError.toLeft(receipt)
-              }
-        }
+    secured.withBody(MessageMutationEndpoints.resend)(
+      (_, _, _, request) => SecuredRoutes.bodyBytes(request),
+      // The destination is named in the body, so this is the only place its name meets the caller's
+      // patterns: holding produce on *some* topic is all the gateway could check.
+      (_, _, _, request) =>
+        Map(MessageMutationEndpoints.ResendDestinationField -> List(request.toTopic.value))
+    ) { principal => (_, cluster, topic, request) =>
+      resendRequests(cluster, topic, request) match {
+        case Left(error) => error.asLeft[ResendResultDto].pure[F]
+        case Right(requests) =>
+          requests
+            .foldLeftM((ResendResultDto(request.toTopic, 0L, 0L), Option.empty[KuiError], false)) {
+              case ((sofar, firstError, completed), one) =>
+                resend.resend(principal, one).map { result =>
+                  (
+                    resendOutcome(sofar, one, result),
+                    firstError.orElse(result.swap.toOption),
+                    completed || result.isRight
+                  )
+                }
+            }
+            .map { (receipt, firstError, completed) =>
+              // A zero-written result still carries per-record failures or a completed empty range.
+              // Only all-Left requests have no receipt to lose; never decide this from written alone.
+              if completed then receipt.asRight[KuiError] else firstError.toLeft(receipt)
+            }
+      }
     }
 
   // -----------------------------------------------------------------------------------------------

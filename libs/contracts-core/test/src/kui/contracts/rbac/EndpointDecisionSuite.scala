@@ -196,6 +196,66 @@ final class EndpointDecisionSuite extends FunSuite {
     )
   }
 
+  test("with the body's names in hand, a body-named create is decided over the exact name") {
+    // The service's half of the check. The coarse gate above lets `payments\..*` reach the endpoint;
+    // here, with the decoded body, `orders` is refused and `payments.new` is not.
+    val policy = policyGranting("payments\\..*", Action.TopicCreate)
+
+    def verdict(name: String): Either[String, Decision] =
+      EndpointDecision.decide(
+        policy,
+        principal("reader"),
+        ClusterFlags.Writable,
+        createTopic,
+        Some(cluster),
+        List("internal", "v1", "clusters", "local", "topics"),
+        Some(Map("name" -> List(name)))
+      )
+
+    assertEquals(verdict("payments.new"), Right(Decision.Allowed))
+    assertEquals(
+      verdict("orders"),
+      Right(
+        Decision.Denied(DenialReason.MissingActions(Resource.Topic, Some("orders"), Set(Action.TopicCreate)))
+      )
+    )
+  }
+
+  test("every name in a body field must be permitted, so one name outside the pattern refuses the call") {
+    val policy = policyGranting("payments\\..*", Action.TopicCreate)
+
+    assertEquals(
+      EndpointDecision.decide(
+        policy,
+        principal("reader"),
+        ClusterFlags.Writable,
+        createTopic,
+        Some(cluster),
+        List("internal", "v1", "clusters", "local", "topics"),
+        Some(Map("name" -> List("payments.a", "secrets", "payments.b")))
+      ),
+      Right(
+        Decision.Denied(DenialReason.MissingActions(Resource.Topic, Some("secrets"), Set(Action.TopicCreate)))
+      )
+    )
+  }
+
+  test("a body field whose names the service did not supply cannot be decided, even with RBAC off") {
+    // A route that forgot to hand over its body's names would otherwise be the coarse check again, which
+    // is the bypass this parameter exists to close. It is a fact about the code, so it is a `Left`.
+    val outcome = EndpointDecision.decide(
+      RbacPolicy.Disabled,
+      Principal.Anonymous,
+      ClusterFlags.Writable,
+      createTopic,
+      Some(cluster),
+      List("internal", "v1", "clusters", "local", "topics"),
+      Some(Map.empty)
+    )
+
+    assert(outcome.isLeft, s"an unsupplied body field must not be decidable, got $outcome")
+  }
+
   test("a read-only cluster refuses a body-named create even with every permission and no RBAC") {
     val outcome = EndpointDecision.decide(
       RbacPolicy.Disabled,

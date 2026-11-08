@@ -24,14 +24,16 @@ enum NameSource {
   /** The name is fixed by the endpoint itself, whatever the request says. */
   case Fixed(value: String)
 
-  /** The name is in the request body — the topic a create names, the destination a resend copies into — and
-    * so is not visible at the edge.
+  /** The name is in the request body — the topic a create names, the destination a resend copies into, the
+    * topics a track reads — and so is not visible at the edge.
     *
     * The gateway does not decode a service's request bodies; it proxies them, and `ContractRouting` works
     * over endpoints whose input types Tapir has erased. So a requirement named this way is **not** checked
     * against a pattern at the gateway. The cluster gate and the read-only gate still apply, which is what
     * stops an unauthorized caller reaching the service at all, and the owning service — which has the decoded
-    * body in hand — must run the exact check itself.
+    * body in hand — runs the exact check: its route hands the names in this field to
+    * `SecuredRoutes.withBody`, and [[EndpointAuthorization.accessRequest]] turns each into an access over
+    * that exact name. A route that hands over no names for the field is refused, never waved through.
     *
     * It is spelled out as its own case rather than left as `Unnamed` because the two mean opposite things: an
     * unnamed resource is one that genuinely has no name, and treating a body-named topic as unnamed would
@@ -40,7 +42,8 @@ enum NameSource {
     * half of their check.
     *
     * @param field
-    *   the body field the name is in, for the reader and for the service's own check
+    *   the body field the name is in, for the reader and for the service's own check. The field may hold one
+    *   name or a list of them; every name in it must be permitted
     */
   case RequestBody(field: String)
 }
@@ -176,14 +179,22 @@ object EndpointAuthorization {
   /** The authorization question this request asks, ready for `Rbac.decide`.
     *
     * `Left` carries the reason it could not be built, and every one of those reasons is a refusal rather than
-    * a pass: an endpoint that declared nothing, or a name that is not in the path where the declaration said
-    * it would be. Both mean the same thing operationally — this call cannot be authorized — and answering
-    * "allowed" because the question could not be formed is how authorization bypasses happen.
+    * a pass: an endpoint that declared nothing, a name that is not in the path where the declaration said it
+    * would be, or a body field whose names the service was not given. All three mean the same thing
+    * operationally — this call cannot be authorized — and answering "allowed" because the question could not
+    * be formed is how authorization bypasses happen.
+    *
+    * @param bodyNames
+    *   the names each [[NameSource.RequestBody]] field of the decoded body holds, keyed by field. `None` is
+    *   the edge, which has not decoded the body: those requirements are left to the coarse gate in
+    *   `EndpointDecision` and to the service. `Some` is the service, which has: every name becomes an access
+    *   over that exact name, and a body-named field missing from the map is a `Left`
     */
   def accessRequest(
       endpoint: AnyEndpoint,
       cluster: Option[ClusterId],
-      requestSegments: List[String]
+      requestSegments: List[String],
+      bodyNames: Option[Map[String, List[String]]] = None
   ): Either[String, AccessRequest] =
     of(endpoint) match {
       case None =>
@@ -194,30 +205,50 @@ object EndpointAuthorization {
 
       case Some(declared) =>
         declared.requirements
-          .traverse(requirement => access(endpoint, requirement, requestSegments))
+          .traverse(requirement => access(endpoint, requirement, requestSegments, bodyNames))
           .map(resources => AccessRequest(cluster, resources.flatten, OperationName(declared.operation)))
     }
 
   private def access(
       endpoint: AnyEndpoint,
       requirement: ResourceRequirement,
-      requestSegments: List[String]
-  ): Either[String, Option[ResourceAccess]] =
+      requestSegments: List[String],
+      bodyNames: Option[Map[String, List[String]]]
+  ): Either[String, List[ResourceAccess]] =
     requirement.name match {
       case NameSource.Unnamed =>
-        Right(Some(ResourceAccess(requirement.resource, None, requirement.actions, None)))
+        Right(List(ResourceAccess(requirement.resource, None, requirement.actions, None)))
 
       case NameSource.Fixed(value) =>
-        Right(Some(ResourceAccess(requirement.resource, Some(value), requirement.actions, None)))
+        Right(List(ResourceAccess(requirement.resource, Some(value), requirement.actions, None)))
 
-      // Not checkable here, by construction: the gateway has no decoded body. Dropping it from the request
-      // leaves the cluster and read-only gates in force and hands the name check to the service.
-      case NameSource.RequestBody(_) => Right(None)
+      case NameSource.RequestBody(field) =>
+        bodyNames match {
+          // The edge, by construction: the gateway has no decoded body. Dropping it from the request leaves
+          // the cluster and read-only gates in force and hands the name check to the service.
+          case None => Right(Nil)
+
+          // The service, which decoded the body: one access per name, each over that exact name.
+          case Some(names) =>
+            names.get(field) match {
+              case Some(values) =>
+                Right(
+                  values.map(value =>
+                    ResourceAccess(requirement.resource, Some(value), requirement.actions, None)
+                  )
+                )
+              case None =>
+                Left(
+                  s"${endpoint.info.name.getOrElse(endpoint.showShort)} names its resource with the body " +
+                    s"field '$field', whose names the route did not hand to the permission check"
+                )
+            }
+        }
 
       case NameSource.PathParam(param) =>
         pathValue(endpoint, param, requestSegments) match {
           case Some(value) =>
-            Right(Some(ResourceAccess(requirement.resource, Some(value), requirement.actions, None)))
+            Right(List(ResourceAccess(requirement.resource, Some(value), requirement.actions, None)))
           case None =>
             Left(
               s"${endpoint.info.name.getOrElse(endpoint.showShort)} names its resource with the path " +

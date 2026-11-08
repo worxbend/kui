@@ -29,20 +29,26 @@ import kui.security.rbac.{ClusterFlags, Decision, RbacPolicy}
   *
   * ==What it can check that the gateway cannot==
   *
-  * The cluster's name and the resource's name, from the same path — and, in due course, the names that are
-  * only in the request body, which the gateway does not decode. `SecuredRoutes.withBody` has the decoded
-  * input in hand and is where that check belongs; it is not implemented here yet, and the endpoints in that
-  * position are enumerated by the gateway's `EndpointAuthorizationSuite` rather than left to be discovered.
+  * The cluster's name and the resource's name, from the same path — and the names that are only in the
+  * request body, which the gateway does not decode and so checks only coarsely. `SecuredRoutes.withBody` has
+  * the decoded input in hand and passes those names here as `bodyNames`, so every one of them is checked
+  * against the caller's patterns exactly. The endpoints in that position are enumerated by the gateway's
+  * `EndpointAuthorizationSuite` rather than left to be discovered.
   */
 trait RbacGuard[F[_]] {
 
   /** @param requestPath
     *   the request's path as it arrived, `/internal/v1/clusters/local/topics/orders`
+    * @param bodyNames
+    *   the names the decoded request body holds, keyed by the field a `NameSource.RequestBody` requirement
+    *   declares. A body-named requirement whose field is not in this map cannot be decided and is refused, so
+    *   a route that forgets to hand its names over fails closed
     */
   def authorize(
       principal: Principal,
       endpoint: AnyEndpoint,
-      requestPath: String
+      requestPath: String,
+      bodyNames: Map[String, List[String]] = Map.empty
   ): F[Either[KuiError, Unit]]
 }
 
@@ -65,7 +71,8 @@ object RbacGuard {
       def authorize(
           principal: Principal,
           endpoint: AnyEndpoint,
-          requestPath: String
+          requestPath: String,
+          bodyNames: Map[String, List[String]]
       ): F[Either[KuiError, Unit]] = ().asRight[KuiError].pure[F]
     }
 
@@ -88,7 +95,8 @@ object RbacGuard {
       def authorize(
           principal: Principal,
           endpoint: AnyEndpoint,
-          requestPath: String
+          requestPath: String,
+          bodyNames: Map[String, List[String]]
       ): F[Either[KuiError, Unit]] = {
         val segments = requestPath.split('/').iterator.filter(_.nonEmpty).toList
 
@@ -98,7 +106,15 @@ object RbacGuard {
 
         val flags = cluster.fold(ClusterFlags.Writable)(flagsFor)
 
-        EndpointDecision.decide(policy, principal, flags, endpoint, cluster, segments) match {
+        EndpointDecision.decide(
+          policy,
+          principal,
+          flags,
+          endpoint,
+          cluster,
+          segments,
+          Some(bodyNames)
+        ) match {
           case Right(Decision.Allowed) => ().asRight[KuiError].pure[F]
 
           case Right(Decision.Denied(reason)) =>

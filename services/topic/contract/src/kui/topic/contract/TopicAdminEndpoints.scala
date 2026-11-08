@@ -62,6 +62,9 @@ object TopicAdminEndpoints {
   /** Where the confirmation travels on the one apply call that has no body. */
   val TokenParam: String = "token"
 
+  /** The body field that names the topic a create makes, which is what its permission is checked over. */
+  val CreateNameField: String = "name"
+
   /** The operation names, as they appear in the audit record and in the endpoint's marker.
     *
     * `val`s rather than literals at the use site because the same strings are
@@ -109,7 +112,10 @@ object TopicAdminEndpoints {
       .attribute(
         EndpointAuthorization.Key,
         EndpointAuthorization
-          .one("topic.create", ResourceRequirement.inBody(Resource.Topic, "name", Action.TopicCreate))
+          .one(
+            "topic.create",
+            ResourceRequirement.inBody(Resource.Topic, CreateNameField, Action.TopicCreate)
+          )
       )
       .summary("Create a topic")
       .description(

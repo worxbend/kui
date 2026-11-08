@@ -170,7 +170,8 @@ object AlertsWiring {
         def authorize(
             principal: kui.security.Principal,
             endpoint: sttp.tapir.AnyEndpoint,
-            requestPath: String
+            requestPath: String,
+            bodyNames: Map[String, List[String]]
         ): F[Either[kui.kernel.error.KuiError, Unit]] =
           currentClusters.flatMap(current =>
             RbacGuard
@@ -179,7 +180,7 @@ object AlertsWiring {
                 cluster => ClusterFlags(current.find(_.id == cluster).forall(_.readOnly)),
                 logger
               )
-              .authorize(principal, endpoint, requestPath)
+              .authorize(principal, endpoint, requestPath, bodyNames)
           )
       }
     } yield AlertsServer(

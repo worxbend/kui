@@ -152,9 +152,16 @@ final class SecuredRoutes[F[_]: Async](
     *   the decoded input as the bytes the gateway signed. It is nearly always [[SecuredRoutes.bodyBytes]]
     *   over the field of the input tuple that the endpoint declared as `jsonBody`; it is a parameter rather
     *   than a `given` because only the route knows which field of a wide input tuple the body is.
+    * @param namesOf
+    *   the resource names the decoded body holds, keyed by the field each `NameSource.RequestBody`
+    *   requirement on the endpoint declares — the topic a create names, the topics a track reads. The gateway
+    *   cannot check these names against a pattern, so this is the only place they are checked exactly. An
+    *   endpoint with no body-named requirement leaves it out; one that has such a requirement and leaves it
+    *   out is refused on every call, which is the failure a forgotten check should have.
     */
   def withBody[I, O](endpoint: Endpoint[SignedPrincipal, I, ErrorEnvelope, O, Any])(
-      bodyOf: I => Array[Byte]
+      bodyOf: I => Array[Byte],
+      namesOf: I => Map[String, List[String]] = (_: I) => Map.empty[String, List[String]]
   )(logic: Principal => I => F[Either[KuiError, O]]): ServerEndpoint[Any, F] =
     endpoint
       .securityIn(SecuredRoutes.requestContext)
@@ -174,7 +181,7 @@ final class SecuredRoutes[F[_]: Async](
           PrincipalVerification.verify[F](principals, service, logger, rejections)(token, bound).flatMap {
             case Left(error) => SecuredRoutes.failure[F](error, bound).map(_.asLeft[O])
             case Right(principal) =>
-              authorized(endpoint, principal, bound) {
+              authorized(endpoint, principal, bound, namesOf(input)) {
                 logic(principal)(input)
               }.flatMap {
                 case Right(value) => value.asRight[Failure].pure[F]
@@ -188,10 +195,15 @@ final class SecuredRoutes[F[_]: Async](
     * It short-circuits: the endpoint's logic is a by-name parameter and is never evaluated for a refused
     * call, so a denied request costs this service exactly one decision over data it already had.
     */
-  private def authorized[O](endpoint: Endpoint[?, ?, ?, ?, ?], principal: Principal, ctx: RequestContext)(
+  private def authorized[O](
+      endpoint: Endpoint[?, ?, ?, ?, ?],
+      principal: Principal,
+      ctx: RequestContext,
+      bodyNames: Map[String, List[String]] = Map.empty
+  )(
       logic: => F[Either[KuiError, O]]
   ): F[Either[KuiError, O]] =
-    guard.authorize(principal, endpoint, ctx.digest.path).flatMap {
+    guard.authorize(principal, endpoint, ctx.digest.path, bodyNames).flatMap {
       case Right(_) => logic
       case Left(refusal) => refusal.asLeft[O].pure[F]
     }

@@ -46,17 +46,21 @@ object TrackRoutes {
       budget: PollBudget = DefaultBudget
   ): List[ServerEndpoint[Any, F]] =
     List(
-      secured.withBody(TrackEndpoints.track)((_, request) => SecuredRoutes.bodyBytes(request)) {
-        _ => (cluster, request) =>
-          queryFor(cluster, request) match {
-            case Left(error) => error.asLeft[TrackResultDto].pure[F]
-            case Right(query) =>
-              track
-                .track(query, budget)
-                .compile
-                .toList
-                .map(collect)
-          }
+      secured.withBody(TrackEndpoints.track)(
+        (_, request) => SecuredRoutes.bodyBytes(request),
+        // Every topic the scan would read, checked before any of them is: one the caller may not read
+        // refuses the whole track rather than quietly dropping out of the hits.
+        (_, request) => Map(TrackEndpoints.TopicsField -> request.topics.map(_.value))
+      ) { _ => (cluster, request) =>
+        queryFor(cluster, request) match {
+          case Left(error) => error.asLeft[TrackResultDto].pure[F]
+          case Right(query) =>
+            track
+              .track(query, budget)
+              .compile
+              .toList
+              .map(collect)
+        }
       }
     )
 
