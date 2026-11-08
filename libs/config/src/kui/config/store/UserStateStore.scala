@@ -232,6 +232,20 @@ final class UserStateStore[F[_]: Monad] private (store: ConfigStore[F]) {
   }
 
   private def getAt(key: StoreKey): F[Either[KuiError, (Option[Long], UserState)]] =
+    store.health.flatMap { health =>
+      if health.unreadableKeys.contains(key) then
+        // Absent is not the same as unreadable. An empty state here would reset settings and the alert
+        // watermark, and the next write would replace a record this replica could not read.
+        StoreError
+          .toKuiError(
+            StoreError.MalformedRecord(key.render, "the stored record could not be read")
+          )
+          .asLeft[(Option[Long], UserState)]
+          .pure[F]
+      else readAt(key)
+    }
+
+  private def readAt(key: StoreKey): F[Either[KuiError, (Option[Long], UserState)]] =
     store.get(key).map {
       case None => Right(None -> UserState.empty)
       case Some(record) =>

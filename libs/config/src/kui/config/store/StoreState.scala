@@ -26,7 +26,8 @@ final case class StoreState(
     records: Map[StoreKey, StoreRecord],
     lastAppliedOffset: Long,
     unreadable: Map[StoreKey, String],
-    outcomes: Vector[(Long, StoreApplied)]
+    outcomes: Vector[(Long, StoreApplied)],
+    ignoredGaps: Int = 0
 ) {
 
   /** What the follower did with the record at one offset.
@@ -83,7 +84,22 @@ final case class StoreState(
     val advanced = copy(lastAppliedOffset = math.max(lastAppliedOffset, offset))
     if !isNext(record.key, record.version) then {
       val ignored = StoreApplied.Ignored(record.key, record.version, expected)
-      (advanced.withOutcome(offset, ignored), ignored)
+      // A version ahead of the one this replica holds is a gap: records were lost, or the log was edited.
+      // A stale version is only a lost race, and the key is still the record that won. A gap is not. Leaving
+      // it out of `unreadable` makes the key look absent, and a reader that treats absent as empty revives a
+      // configured password or reopens an alert feed while health still says Healthy.
+      val ahead = records.get(record.key).exists(_.version + 1L < record.version)
+      val marked =
+        if ahead then
+          advanced.copy(
+            unreadable = advanced.unreadable.updated(
+              record.key,
+              s"version gap: log has v${record.version}, expected v$expected"
+            ),
+            ignoredGaps = advanced.ignoredGaps + 1
+          )
+        else advanced
+      (marked.withOutcome(offset, ignored), ignored)
     } else {
       val change =
         if record.deleted then StoreChange.Deleted(record.key, record.version, record.updatedAt)

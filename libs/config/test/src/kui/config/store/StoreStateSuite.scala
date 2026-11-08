@@ -57,7 +57,14 @@ final class StoreStateSuite extends KuiSuite {
     // A gap means records were lost or the log was edited by hand. Accepting it would let a writer skip
     // the conflict check entirely by inventing a large version number.
     val state = fold(StoreState.empty, List(record(key, 1L) -> 0L, record(key, 2L) -> 1L))
-    assertEquals(state.apply(record(key, 9L), 2L)._2, StoreApplied.Ignored(key, 9L, 3L))
+    val (after, applied) = state.apply(record(key, 9L), 2L)
+    assertEquals(applied, StoreApplied.Ignored(key, 9L, 3L))
+    // The key must not then read as absent. Health names it, so a reader can refuse instead of reviving
+    // whatever it last held — or, for a password, the configured hash.
+    assertEquals(after.unreadableKeys, List(key))
+    assert(after.unreadable(key).contains("version gap"), after.unreadable(key))
+    // A lost race is not a gap: the key stays readable at the version that won.
+    assertEquals(state.apply(record(key, 2L, "replica-b"), 3L)._1.unreadableKeys, Nil)
   }
 
   test("aKeyFirstSeenPastVersionOneIsAcceptedAtThatVersion") {

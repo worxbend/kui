@@ -174,6 +174,20 @@ final class DurableAlertStore[F[_]: Async] private (
       cluster: ClusterId
   ): F[Either[KuiError, (Option[Long], AlertProjection)]] = {
     val key = keyOf(cluster)
+    store.health.flatMap { health =>
+      if health.unreadableKeys.contains(key) then
+        // An empty projection would reopen every continuing condition and then write a fresh version over
+        // the record nobody could read.
+        malformed(key, "the stored projection could not be read")
+          .asLeft[(Option[Long], AlertProjection)]
+          .pure[F]
+      else readProjection(key)
+    }
+  }
+
+  private def readProjection(
+      key: StoreKey
+  ): F[Either[KuiError, (Option[Long], AlertProjection)]] =
     store.get(key).map {
       case None => Right(None -> AlertProjection.empty)
       case Some(record) =>
@@ -183,7 +197,6 @@ final class DurableAlertStore[F[_]: Async] private (
           .map(failure => malformed(key, failure.message))
           .map(projection => Some(record.version) -> projection)
     }
-  }
 
   private def put(
       cluster: ClusterId,

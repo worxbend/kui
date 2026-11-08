@@ -106,6 +106,33 @@ final class DurableAlertStoreSuite extends KuiIOSuite {
     } yield assertEquals(feed.events, acknowledged.toOption.toList)
   }
 
+  test("a projection the store could not read is never treated as an empty feed") {
+    // The store names alerts/prod-eu as unreadable. An empty projection here would reopen every continuing
+    // condition as a new unread event and write a fresh version over the record nobody could read.
+    for {
+      metadata <- TestConfigStore.create
+      logger <- FakeStructuredLogger[IO]
+      unreadable = new ConfigStore[IO] {
+        def get(key: StoreKey) = metadata.get(key)
+        def list(section: StoreSection) = metadata.list(section)
+        def health =
+          IO.pure(StoreHealth.Healthy(3L, TestConfigStore.At, List(StoreKey(StoreSection.Alerts, "prod-eu"))))
+        def changes = metadata.changes
+        def delete(key: StoreKey, version: Long, by: String) = metadata.delete(key, version, by)
+        def put(key: StoreKey, payload: Json, baseVersion: Option[Long], updatedBy: String) =
+          metadata.put(key, payload, baseVersion, updatedBy)
+      }
+      store = DurableAlertStore[IO](unreadable, 7.days, logger)
+      recorded <- store.record(cluster, opening(event), at).attempt
+      read <- store.feed(cluster, reader, 100, None).attempt
+      written <- metadata.get(StoreKey(StoreSection.Alerts, "prod-eu"))
+    } yield {
+      assert(recorded.isLeft, "an evaluation must not be recorded over an unreadable projection")
+      assert(read.isLeft, "an unreadable projection must not be served as an empty feed")
+      assertEquals(written, None)
+    }
+  }
+
   test("a cleared condition can open a new unread event later") {
     val clearedAt = at.plusSeconds(60)
     val reopened = AlertEvent.open(event.key, event.severity, at.plusSeconds(120), event.title, event.detail)

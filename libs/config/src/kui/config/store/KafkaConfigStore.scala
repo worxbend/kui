@@ -239,7 +239,8 @@ object KafkaConfigStore {
           case Right(_) =>
             logger.info(
               s"store replay complete: topic=$topic reached=${current.lastAppliedOffset} " +
-                s"endOffset=$endOffset unreadable=${current.unreadable.size} elapsedMs=${elapsed.toMillis}"
+                s"endOffset=$endOffset unreadable=${current.unreadable.size} " +
+                s"ignoredGaps=${current.ignoredGaps} elapsedMs=${elapsed.toMillis}"
             )
           case Left(_: java.util.concurrent.TimeoutException) =>
             val error =

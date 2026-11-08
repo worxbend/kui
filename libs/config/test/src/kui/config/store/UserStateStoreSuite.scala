@@ -81,6 +81,29 @@ final class UserStateStoreSuite extends KuiIOSuite {
     } yield ()
   }
 
+  test("a record the store could not read is an error rather than a principal with no state") {
+    // The store names the key as unreadable and so cannot serve it. Reading that as "no state" resets the
+    // principal's settings and alert watermark, and the next write would replace the record for good.
+    val key = UserStateKey.of(cluster, alice)
+    val unreadable = new ConfigStore[IO] {
+      def get(k: StoreKey): IO[Option[StoreRecord]] = IO.pure(None)
+      def list(section: StoreSection): IO[List[StoreRecord]] = IO.pure(Nil)
+      def put(k: StoreKey, payload: Json, baseVersion: Option[Long], by: String) =
+        IO.raiseError(new AssertionError(s"wrote $k over a record nobody could read"))
+      def delete(k: StoreKey, baseVersion: Long, by: String) = IO.pure(Right(()))
+      def changes: Stream[IO, StoreChange] = Stream.never
+      def health: IO[StoreHealth] = IO.pure(StoreHealth.Healthy(3L, RefStore.At, List(key)))
+    }
+    val state = UserStateStore[IO](unreadable)
+    for {
+      read <- state.get(cluster, alice)
+      marked <- state.markAlertsRead(cluster, alice, readAt)
+    } yield {
+      assertEquals(read.left.toOption.map(_.code.wire), Some("KUI-STORE-ENVELOPE"))
+      assertEquals(marked.left.toOption.map(_.code.wire), Some("KUI-STORE-ENVELOPE"))
+    }
+  }
+
   test("unknown appearance values make the stored state unreadable rather than silently defaulting") {
     for {
       config <- RefStore.create
