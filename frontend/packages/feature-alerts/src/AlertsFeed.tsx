@@ -71,8 +71,11 @@ export interface AlertsFeedProps {
   readonly onAcknowledge?: ((event: AlertEvent) => void) | undefined;
   /** Why acknowledgement is unavailable to this principal or on this cluster. */
   readonly acknowledgeRefusal?: string | undefined;
-  /** The id of the event whose acknowledgement is in flight, so its control cannot fire twice. */
-  readonly acknowledging?: string | undefined;
+  /**
+   * Ids whose acknowledgement is in flight. A set, not one id: two rows can be outstanding at
+   * once, and a single slot let the second click clear the first row's busy mark.
+   */
+  readonly acknowledging?: ReadonlySet<string> | undefined;
   /** A refused acknowledgement, said above the rows and beside nothing else. */
   readonly acknowledgeFailure?:
     | { readonly message: string; readonly code?: string | undefined }
@@ -210,7 +213,7 @@ export function AlertsFeed(props: AlertsFeedProps): JSX.Element {
                 now={now()}
                 onAcknowledge={props.onAcknowledge}
                 acknowledgeRefusal={props.acknowledgeRefusal}
-                busy={props.acknowledging === event.id}
+                busy={props.acknowledging?.has(event.id) === true}
               />
             )}
           </For>

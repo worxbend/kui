@@ -565,6 +565,40 @@ describe("the alerts route", () => {
     dispose();
   });
 
+  /**
+   * Two open events, two acknowledgements. The first stays in flight.
+   *
+   * One shared mutation refuses the second `run` as `running` and never posts it, and the `.then`
+   * on that refusal clears the single pending id, so the first row's spinner disappears while its
+   * request is still out. The second click has to be sent, or the row has to say why it was not.
+   */
+  it("keeps the first acknowledgement busy when a second event is acknowledged", async () => {
+    const client = stub({ hold: true });
+    const { container, dispose } = open("two-acks-cluster", client.api);
+    await settle();
+
+    acknowledgeButton(container, "evt-1")?.click();
+    await settle();
+    expect(acknowledgeButton(container, "evt-1")?.getAttribute("aria-busy")).toBe("true");
+
+    acknowledgeButton(container, "evt-3")?.click();
+    await settle();
+
+    expect(acknowledgeButton(container, "evt-1")?.getAttribute("aria-busy")).toBe("true");
+    const posts = client.calls
+      .filter((call) => call.method === "post")
+      .map((call) => call.params["eventId"]);
+    const second = acknowledgeButton(container, "evt-3");
+    const sent = posts.includes("evt-3");
+    const refused =
+      second?.getAttribute("aria-disabled") === "true" ||
+      (container.querySelector('[data-testid="alerts-ack-failed"]')?.textContent ?? "").trim() !==
+        "";
+    expect(sent || refused).toBe(true);
+    expect(posts).toContain("evt-1");
+    dispose();
+  });
+
   it("carries a not-configured feed to the screen as hidden, and not as a failure", async () => {
     const client = stub();
     client.answerWith(notConfiguredDocument);

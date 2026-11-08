@@ -147,28 +147,92 @@ export function AlertsScreen(props: AlertsScreenProps): JSX.Element {
     }),
   );
 
-  const [pending, setPending] = createSignal<string | undefined>(undefined);
-  const acknowledgement = createMutation((eventId: string) =>
-    acknowledge(kui.api, props.clusterId, eventId),
-  );
+  /*
+   * One mutation per event, and a set of the ids still in flight.
+   *
+   * `createMutation`'s guard is per call, not per event. One shared mutation therefore reported an
+   * acknowledgement of event B, started while event A's was still out, as `running` and dropped
+   * the POST — and the `.then` on that refusal cleared the single pending id, so A's busy mark
+   * vanished while A's request was still outstanding. Keying the guard by event id lets the two
+   * proceed; a second click on the *same* event is still refused by that event's own guard.
+   */
+  const [pending, setPending] = createSignal<ReadonlySet<string>>(new Set());
+  const [failures, setFailures] = createSignal<
+    ReadonlyMap<string, { readonly message: string; readonly code?: string | undefined }>
+  >(new Map());
+  const mutations = new Map<string, ReturnType<typeof createMutation<[string], void>>>();
+
+  const mutationFor = (eventId: string): ReturnType<typeof createMutation<[string], void>> => {
+    const existing = mutations.get(eventId);
+    if (existing !== undefined) return existing;
+    const created = createMutation((id: string) => acknowledge(kui.api, props.clusterId, id));
+    mutations.set(eventId, created);
+    return created;
+  };
 
   const onAcknowledge = (event: AlertEvent): void => {
     if (refusal() !== undefined) return;
-    setPending(event.id);
-    void acknowledgement.run(event.id).then((outcome) => {
-      setPending(undefined);
-      // Only a success re-reads the feed. A refusal leaves the row exactly as it was and says why
-      // above the list: refetching after a refusal would replace the reason with a spinner and then
-      // with the same unacknowledged row, which reads as though nothing had been clicked.
-      if (outcome.kind === "done") alerts.refresh();
+    const id = event.id;
+    setPending((current) => {
+      if (current.has(id)) return current;
+      const next = new Set(current);
+      next.add(id);
+      return next;
     });
+    // A fresh attempt retires only this event's refusal. Another row's banner is a different fact.
+    setFailures((current) => {
+      if (!current.has(id)) return current;
+      const next = new Map(current);
+      next.delete(id);
+      return next;
+    });
+    void mutationFor(id)
+      .run(id)
+      .then((outcome) => {
+        // This run did not start. The in-flight one still owns the busy mark; clearing the id here
+        // is what made the first row look finished while its acknowledgement was still out.
+        if (outcome.kind === "running") return;
+        setPending((current) => {
+          if (!current.has(id)) return current;
+          const next = new Set(current);
+          next.delete(id);
+          return next;
+        });
+        if (outcome.kind === "done") {
+          setFailures((current) => {
+            if (!current.has(id)) return current;
+            const next = new Map(current);
+            next.delete(id);
+            return next;
+          });
+          // Only a success re-reads the feed. A refusal leaves the row exactly as it was and says
+          // why above the list: refetching after a refusal would replace the reason with a spinner
+          // and then with the same unacknowledged row, which reads as though nothing had been
+          // clicked.
+          alerts.refresh();
+          return;
+        }
+        if (outcome.kind !== "failed" && outcome.kind !== "forbidden") return;
+        const entry =
+          outcome.kind === "failed"
+            ? { message: outcome.message, code: outcome.code }
+            : { message: outcome.message };
+        setFailures((current) => {
+          const next = new Map(current);
+          next.delete(id);
+          next.set(id, entry);
+          return next;
+        });
+      });
   };
 
+  /* One banner, the latest refusal still on screen. A later event's success does not wipe it. */
   const failure = createMemo(() => {
-    const state = acknowledgement.state();
-    if (state.kind === "failed") return { message: state.message, code: state.code };
-    if (state.kind === "forbidden") return { message: state.message };
-    return undefined;
+    let latest:
+      | { readonly message: string; readonly code?: string | undefined }
+      | undefined;
+    for (const one of failures().values()) latest = one;
+    return latest;
   });
 
   const page = (): AlertsFeedPage | undefined => valueIn(alerts.feed());
