@@ -257,68 +257,92 @@ object KafkaConfigStore {
     _.evalMap { record =>
       val offset = record.offset
       decode(record.key, record.value, crypto).flatMap { decoded =>
-        val folded = decoded match {
-          case Right(store) =>
-            // Uncancelable: the state update and the change publication are one observable step. A
-            // cancellation between them would leave a subscriber never told about a record that reads
-            // can already see.
-            Async[F].uncancelable(_ =>
-              state.modify(_.apply(store, offset)).flatMap {
-                case StoreApplied.Accepted(change) =>
-                  logger.info(
-                    s"store change applied: key=${store.key.render} version=${store.version} offset=$offset"
-                  ) *>
-                    changes.publish1(change).void
-                case ignored @ StoreApplied.Ignored(key, recordVersion, expectedVersion) =>
-                  logger.warn(
-                    s"store record ignored: key=${key.render} recordVersion=$recordVersion " +
-                      s"expectedVersion=$expectedVersion offset=$offset"
-                  ) *> Async[F].pure(ignored).void
-                case _ => Async[F].unit
-              }
-            )
-          case Left((key, reason)) =>
-            Async[F].uncancelable(_ =>
-              state.modify(_.markUnreadable(key, offset, reason)) *>
-                logger.warn(s"store record unreadable: key=${key.render} offset=$offset reason=$reason")
-            )
-        }
+        // Uncancelable: the state update and the change publication are one observable step. A
+        // cancellation between them would leave a subscriber never told about a record that reads can
+        // already see.
+        val folded = Async[F].uncancelable(_ =>
+          decoded match {
+            case Decoded.Readable(store) =>
+              state
+                .modify(_.apply(store, offset))
+                .flatMap(outcome => report(outcome, offset, changes, logger))
+            case Decoded.Erased(key) =>
+              state.modify(_.erase(key, offset)).flatMap(outcome => report(outcome, offset, changes, logger))
+            case Decoded.Unreadable(key, reason) =>
+              state
+                .modify(_.markUnreadable(key, offset, reason))
+                .flatMap(outcome => report(outcome, offset, changes, logger))
+          }
+        )
         // The waiter is advanced *after* the state has been updated, so a writer that is woken and then
         // reads the state cannot see a moment in which its own record has not landed yet.
         (folded *> waiter.traverse_(_.advance(offset))).as(offset)
       }
     }
 
+  /** Logs what folding one record did, and tells subscribers when it changed what a read returns. */
+  private def report[F[_]: Async](
+      outcome: StoreApplied,
+      offset: Long,
+      changes: Topic[F, StoreChange],
+      logger: Logger[F]
+  ): F[Unit] =
+    outcome match {
+      case StoreApplied.Accepted(change) =>
+        val described = change match {
+          case StoreChange.Upserted(record) => s"key=${record.key.render} version=${record.version}"
+          case StoreChange.Deleted(key, version, _) => s"key=${key.render} version=$version deleted"
+          case StoreChange.Desynchronized(missed) => s"desynchronized missed=$missed"
+        }
+        logger.info(s"store change applied: $described offset=$offset") *> changes.publish1(change).void
+      case StoreApplied.Ignored(key, recordVersion, expectedVersion) =>
+        logger.warn(
+          s"store record ignored: key=${key.render} recordVersion=$recordVersion " +
+            s"expectedVersion=$expectedVersion offset=$offset"
+        )
+      case StoreApplied.Unreadable(key, reason) =>
+        logger.warn(s"store record unreadable: key=${key.render} offset=$offset reason=$reason")
+    }
+
+  /** One Kafka record, as far as this KUI could read it. */
+  private enum Decoded {
+    case Readable(record: StoreRecord)
+
+    /** A `null` value: a physical tombstone. */
+    case Erased(key: StoreKey)
+    case Unreadable(key: StoreKey, reason: String)
+  }
+
   /** Turns one Kafka record into a decrypted `StoreRecord`, or names the key and why it could not.
     *
     * A `null` value is a physical tombstone. KUI writes logical ones — a `null` carries no timestamp and no
-    * author, so it cannot answer "who deleted this cluster" — but a compacted log or a hand-edited topic will
-    * contain them, so they are honoured: the key is deleted at whatever version it is now at.
+    * author, so it cannot answer "who deleted this cluster" — but a hand-edited topic, or another tool, may
+    * contain them, so they are honoured: the key is forgotten, as compaction will eventually forget it.
     */
   private def decode[F[_]: Async](
       rawKey: String,
       rawValue: Option[String],
       crypto: FieldCrypto[F]
-  ): F[Either[(StoreKey, String), StoreRecord]] =
+  ): F[Decoded] =
     StoreKey.parse(rawKey) match {
       case Left(error) =>
         // A key that will not parse cannot be named, so it is reported under a placeholder rather than
         // dropped in silence.
-        Async[F].pure(Left((StoreKey(StoreSection.Other("unparseable"), "key"), error.message)))
+        Async[F].pure(Decoded.Unreadable(StoreKey(StoreSection.Other("unparseable"), "key"), error.message))
       case Right(key) =>
         rawValue match {
-          case None =>
-            Async[F].pure(Right(StoreRecord.tombstone(key, 0L, "compaction", java.time.Instant.EPOCH)))
+          case None => Async[F].pure(Decoded.Erased(key))
           case Some(text) =>
             parse(text) match {
-              case Left(failure) => Async[F].pure(Left((key, s"it is not valid JSON (${failure.message})")))
+              case Left(failure) =>
+                Async[F].pure(Decoded.Unreadable(key, s"it is not valid JSON (${failure.message})"))
               case Right(json) =>
                 StoreRecord.fromJsonWithKey(rawKey, json) match {
-                  case Left(error) => Async[F].pure(Left((key, error.message)))
+                  case Left(error) => Async[F].pure(Decoded.Unreadable(key, error.message))
                   case Right(record) =>
                     crypto.decryptPayload(key, record.payload).map {
-                      case Right(payload) => Right(record.copy(payload = payload))
-                      case Left(error) => Left((key, error.message))
+                      case Right(payload) => Decoded.Readable(record.copy(payload = payload))
+                      case Left(error) => Decoded.Unreadable(key, error.message)
                     }
                 }
             }

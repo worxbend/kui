@@ -194,6 +194,42 @@ final class StoreReplaySuite extends KuiIOSuite {
     }
   }
 
+  test("aCompactedLogKeepsEveryKeyAtTheVersionThatSurvived") {
+    // What `__kui_config` looks like once the cleaner has run: only the newest record of each key, at its
+    // original offset. Every one of them is a key the store holds, and none is ignored for not being v1.
+    val gone = StoreKey(StoreSection.Cluster, "gone")
+    val deleted = StoreRecord.tombstone(gone, 2L, "test", at)
+    val log = Stream.emits(
+      List(
+        entry("analytics", 3L, 4L),
+        entry("fresh", 1L, 7L),
+        KafkaConfigStore.LogRecord(gone.render, Some(deleted.asJson.noSpaces), 9L)
+      )
+    )
+    TestControl.executeEmbed(run(10L, log)).map { (outcome, state) =>
+      assert(outcome.isRight, outcome.toString)
+      assertEquals(state.get(StoreKey(StoreSection.Cluster, "analytics")).map(_.version), Some(3L))
+      assertEquals(state.get(StoreKey(StoreSection.Cluster, "fresh")).map(_.version), Some(1L))
+      assertEquals(state.get(gone), None)
+      assertEquals(state.nextVersion(gone), 3L)
+      assertEquals(state.outcomes.count(_._2.isInstanceOf[StoreApplied.Ignored]), 0)
+    }
+  }
+
+  test("aPhysicalTombstoneDeletesAKeyThatExists") {
+    // The key exists when the `null` arrives. It must be gone afterwards, and it must be gone the same way a
+    // replica that replays after compaction sees it gone: not there at all, so a re-create is version 1.
+    val key = StoreKey(StoreSection.Cluster, "x")
+    val log = Stream.emits(
+      List(entry("x", 1L, 0L), entry("x", 2L, 1L), KafkaConfigStore.LogRecord(key.render, None, 2L))
+    )
+    TestControl.executeEmbed(run(3L, log)).map { (outcome, state) =>
+      assert(outcome.isRight, outcome.toString)
+      assertEquals(state.get(key), None)
+      assertEquals(state.nextVersion(key), 1L)
+    }
+  }
+
   test("aPhysicalTombstoneDeletesTheKey") {
     // KUI writes logical tombstones, but a compacted or hand-edited log contains null values, so they
     // are honoured rather than skipped.

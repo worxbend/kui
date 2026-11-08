@@ -9,7 +9,8 @@ import kui.testkit.KuiSuite
 
 /** Where the store's design is actually tested.
   *
-  * The version rule — a record is applied only when its version is exactly the next one for its key — is what
+  * The version rule — a record is applied only when its version is exactly the next one for a key the state
+  * already holds, and a key the state has never seen is taken at the version compaction left behind — is what
   * makes concurrent writes from several KUI replicas safe with no lock anywhere. Every replica folds the same
   * ordered partition through this same function, so every replica reaches the same answer about who won a
   * race without any of them talking to each other. The integration suite proves that end to end against a
@@ -57,6 +58,71 @@ final class StoreStateSuite extends KuiSuite {
     // the conflict check entirely by inventing a large version number.
     val state = fold(StoreState.empty, List(record(key, 1L) -> 0L, record(key, 2L) -> 1L))
     assertEquals(state.apply(record(key, 9L), 2L)._2, StoreApplied.Ignored(key, 9L, 3L))
+  }
+
+  test("aKeyFirstSeenPastVersionOneIsAcceptedAtThatVersion") {
+    // `__kui_config` is compacted: once the cleaner has run, a key edited twice survives only as its
+    // version-3 record. A replica replaying that log must hold the key at version 3, as every replica that
+    // watched versions 1 and 2 go by does, or the key vanishes and the replicas stop agreeing on versions.
+    val state = fold(StoreState.empty, List(record(key, 3L) -> 10L))
+    assertEquals(state.get(key).map(_.version), Some(3L))
+    assertEquals(state.nextVersion(key), 4L)
+    assert(state.apply(record(key, 4L), 11L)._2.isInstanceOf[StoreApplied.Accepted])
+    // The exact-next rule still holds for a key the state already has.
+    assertEquals(state.apply(record(key, 3L, "replica-b"), 12L)._2, StoreApplied.Ignored(key, 3L, 4L))
+  }
+
+  test("aCompactedTombstoneKeepsTheVersionCounting") {
+    val state = fold(StoreState.empty, List(record(key, 4L, deleted = true) -> 0L))
+    assertEquals(state.get(key), None)
+    assertEquals(state.nextVersion(key), 5L)
+  }
+
+  test("aVersionBelowOneIsNeverABaseline") {
+    assertEquals(StoreState.empty.apply(record(key, 0L), 0L)._2, StoreApplied.Ignored(key, 0L, 1L))
+  }
+
+  property("aCompactedLogFoldsToTheSameStateAsTheWholeLog") {
+    // Compaction keeps the newest record of each key, at its original offset. However much of the log the
+    // cleaner has reached, a replica replaying what is left must hold every key at the version a replica
+    // that read the whole log holds it at. The writes here are the ones KUI makes: each the next version of
+    // its key, some of them logical deletes.
+    val keys = List(key, other, StoreKey(StoreSection.Settings, "global"))
+    val writes: Gen[List[(StoreKey, Boolean)]] =
+      Gen.listOf(Gen.zip(Gen.oneOf(keys), Gen.frequency(4 -> false, 1 -> true)))
+    val logs: Gen[(List[(StoreRecord, Long)], Int)] = writes.flatMap { ops =>
+      val log = ops
+        .foldLeft((Map.empty[StoreKey, Long], Vector.empty[(StoreRecord, Long)])) {
+          case ((versions, acc), (k, deleted)) =>
+            val version = versions.getOrElse(k, 0L) + 1L
+            (versions.updated(k, version), acc :+ (record(k, version, deleted = deleted) -> acc.size.toLong))
+        }
+        ._2
+        .toList
+      Gen.choose(0, log.size).map(cleaned => (log, cleaned))
+    }
+    Prop.forAll(logs) { (log, cleaned) =>
+      val (head, tail) = log.splitAt(cleaned)
+      val survivors = head.filterNot((kept, offset) =>
+        log.exists((later, laterOffset) =>
+          later.key == kept.key && laterOffset > offset && laterOffset < cleaned
+        )
+      )
+      fold(StoreState.empty, survivors ++ tail).records == fold(StoreState.empty, log).records
+    }
+  }
+
+  test("aPhysicalTombstoneForgetsAKeyTheStateHolds") {
+    // A `null` value is what compaction later reduces to nothing at all, so a replica replaying the log after
+    // the cleaner has run never sees the key. Every replica has to reach that same state: forget the key, so
+    // that the next create is version 1 everywhere.
+    val state = fold(StoreState.empty, List(record(key, 1L) -> 0L, record(key, 2L) -> 1L))
+    val (after, applied) = state.erase(key, 2L)
+    assertEquals(applied, StoreApplied.Accepted(StoreChange.Deleted(key, 2L, Instant.EPOCH)))
+    assertEquals(after.get(key), None)
+    assertEquals(after.nextVersion(key), 1L)
+    assertEquals(after.lastAppliedOffset, 2L)
+    assert(after.apply(record(key, 1L), 3L)._2.isInstanceOf[StoreApplied.Accepted])
   }
 
   property("twoWritersOnOneKeyConvergeWhicheverOrderIsReplayed") {

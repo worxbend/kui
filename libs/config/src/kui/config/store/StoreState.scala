@@ -56,13 +56,22 @@ final case class StoreState(
 
   /** Folds one decoded record in.
     *
-    * **The version rule, which is the heart of the design.** A record is accepted only when its version is
-    * exactly the next one for its key. Anything else is ignored.
+    * **The version rule, which is the heart of the design.** For a key this state holds, a record is accepted
+    * only when its version is exactly the next one. Anything else is ignored.
     *
     * A *stale* version is a writer that lost a race: two replicas both read version 2, both produced version
     * 3, and the one whose record landed second in the partition lost. A *future* version is a gap, which
     * means records were lost or the log was edited by hand — and accepting it would let a writer skip the
     * conflict check entirely by inventing a large version number.
+    *
+    * **A key this state has never seen is accepted at whatever version it carries**, from 1 up. The topic is
+    * compacted, and compaction keeps only the newest record of each key: a cluster created and edited twice
+    * survives as its version-3 record alone. Demanding version 1 there would drop every key edited more than
+    * once from a replica that replays after the cleaner has run, and leave it counting versions from 1 while
+    * every replica that watched the edits go by counts from 4. Taking the first record seen as the baseline
+    * gives the replaying replica the state the others hold, because the record compaction kept is the one
+    * they accepted last — unless the key's last record was a writer that lost a race, which compaction keeps
+    * in place of the winner because it sits at the later offset.
     *
     * Every replica applies this rule to the same ordered log, so every replica agrees on who won without any
     * of them talking to each other. That is what makes "the partition, not a lock, is the serialization
@@ -72,7 +81,7 @@ final case class StoreState(
   def apply(record: StoreRecord, offset: Long): (StoreState, StoreApplied) = {
     val expected = nextVersion(record.key)
     val advanced = copy(lastAppliedOffset = math.max(lastAppliedOffset, offset))
-    if record.version != expected then {
+    if !isNext(record.key, record.version) then {
       val ignored = StoreApplied.Ignored(record.key, record.version, expected)
       (advanced.withOutcome(offset, ignored), ignored)
     } else {
@@ -90,6 +99,38 @@ final case class StoreState(
         applied
       )
     }
+  }
+
+  /** Whether a record at `version` is the next one for its key: exactly one past the record held, or — for a
+    * key not held at all, which is what a compacted log looks like — any real version.
+    */
+  private def isNext(key: StoreKey, version: Long): Boolean =
+    records.get(key) match {
+      case Some(held) => version == held.version + 1L
+      case None => version >= 1L
+    }
+
+  /** Folds a physical tombstone: a `null` value, which KUI never writes but an operator or another tool may.
+    *
+    * The key is forgotten, not deleted at a version, because forgetting it is what compaction does: the
+    * cleaner removes every earlier record of the key and, once `delete.retention.ms` has passed, the `null`
+    * itself. A replica that replays the log after that finds no trace of the key and starts it again at
+    * version 1, so every replica that saw the `null` go by has to reach the same state, or the next create is
+    * version 1 on one replica and an ignored record on another.
+    */
+  def erase(key: StoreKey, offset: Long): (StoreState, StoreApplied) = {
+    val applied =
+      StoreApplied.Accepted(
+        StoreChange.Deleted(key, records.get(key).fold(0L)(_.version), java.time.Instant.EPOCH)
+      )
+    (
+      copy(
+        records = records - key,
+        lastAppliedOffset = math.max(lastAppliedOffset, offset),
+        unreadable = unreadable - key
+      ).withOutcome(offset, applied),
+      applied
+    )
   }
 
   /** Records that one entry of the log could not be read.
