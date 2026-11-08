@@ -31,8 +31,9 @@ services:
     container_name: kui-storybook
     ports:
       # 6006 is Storybook's own convention, so the URL is the one everybody already expects. The
-      # container serves on 8081 because nginx runs unprivileged.
-      - "${KUI_STORYBOOK_PORT:-6006}:8081"
+      # container serves on 8081 because nginx runs unprivileged. The host side binds loopback
+      # unless KUI_BIND_ADDRESS is set.
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_STORYBOOK_PORT:-6006}:8081"
     read_only: true
     # The unprivileged nginx keeps its pid, its scratch files and every temporary path under `/tmp`,
     # so one writable mount is all it needs. Stock nginx would also want `/var/cache/nginx` and

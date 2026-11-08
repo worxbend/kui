@@ -29,8 +29,8 @@ kui:
     devInsecureCookies: true
 
   auth:
-    # The only value the current release accepts. Real authentication arrives with the identity
-    # service in M6; anything else here fails the load with a message saying so.
+    # Disabled for this demonstration. `form` and `oidc` also load; they do not fail startup.
+    # See docs/operations/deployment.md.
     type: disabled
 
   topics:

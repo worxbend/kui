@@ -2,7 +2,8 @@
 # interface, which is its own image in every shape of this product (ADR-048).
 #
 # THIS IS A DEVELOPMENT ENVIRONMENT, NOT A PRODUCTION DEPLOYMENT. There is no TLS and the session
-# cookie is served without `Secure` so that plain HTTP on localhost works.
+# cookie is served without `Secure` so that plain HTTP on localhost works. Published host ports
+# bind 127.0.0.1 unless KUI_BIND_ADDRESS is set.
 #
 # This is the fastest way to see KUI running: two containers, one of which is a static file server.
 #
@@ -29,7 +30,7 @@ services:
     container_name: kui-allinone
     command: ["--config", "/etc/kui/kui-allinone.yaml"]
     ports:
-      - "${KUI_PORT:-8080}:8080"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_PORT:-8080}:8080"
     environment:
       # Local demo only: allow integrations registered on the private Docker network.
       KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
@@ -68,7 +69,7 @@ services:
       dockerfile: deployment/frontend/Dockerfile
     container_name: kui-allinone-frontend
     ports:
-      - "${KUI_FRONTEND_PORT:-8090}:8082"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_FRONTEND_PORT:-8090}:8082"
     environment:
       KUI_GATEWAY_URL: http://kui:8080
       KUI_BASE_PATH: ${KUI_BASE_PATH:-}

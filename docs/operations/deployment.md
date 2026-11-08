@@ -64,7 +64,7 @@ Check all five topologies and the alerts/metrics mounts without starting contain
 loading a local `.env` file:
 
 ```bash
-python3 scripts/test-deployment.py DemoTopologyPolicy QuickstartBindings ToolPins
+python3 scripts/test-deployment.py DemoTopologyPolicy QuickstartBindings DemoBindings ToolPins
 ```
 
 ## Build one release
@@ -217,11 +217,13 @@ browse cursor, and its URL also carries a route, deployment prefix, and other qu
 The shipped nginx and backend use a 16 KiB limit; an 8 KiB proxy default rejects otherwise valid
 continuations with HTTP 414.
 
-The quickstart and its frontend overlay publish only on `127.0.0.1` by default. For an explicitly
-network-accessible disposable demo, set `KUI_QUICKSTART_BIND_ADDRESS` to the desired host interface
-(or `0.0.0.0` for all IPv4 interfaces). This exposes unauthenticated demo services; do not use it
-as a production configuration. Kafka's advertised external address must also be reachable by
-remote clients if they connect directly to the demo broker.
+Every shipped Compose file publishes ports on `127.0.0.1` by default. The quickstart and its
+frontend overlay use `KUI_QUICKSTART_BIND_ADDRESS`. The distributed, all-in-one, multi-cluster
+demo, secured demo, and Storybook files use `KUI_BIND_ADDRESS`. Set either variable to a host
+interface, or to `0.0.0.0` for all IPv4 interfaces, only for an explicitly network-accessible
+disposable demo. That exposes unauthenticated demo services and, where the file publishes them,
+plaintext brokers. Do not use it as a production configuration. Kafka's advertised external
+address must also be reachable by remote clients if they connect directly to the demo broker.
 
 Preserve KUI's response security headers, forward the public host and scheme, and keep CORS disabled
 for the normal same-origin deployment. If another origin must call the API, list exact origins under

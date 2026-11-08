@@ -142,9 +142,8 @@ kui:
     refreshInterval: 30s
 
   auth:
-    # The only value KUI accepts today. Real authentication arrives with the identity service in
-    # M6. Anything else here fails the load with a message saying so, rather than being ignored --
-    # so a file that asks for authentication can never start a deployment that has none.
+    # Disabled for this local fixture. `form` and `oidc` also load; they do not fail startup.
+    # See docs/operations/deployment.md.
     type: disabled
 
   telemetry:

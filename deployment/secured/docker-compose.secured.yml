@@ -6,6 +6,7 @@
 # configuration file to a rendered screen. The first run of this file found a defect in the loader
 # that made every documented secured cluster permanently unreachable, so the file stays, and the
 # next person changing anything under `kui.clusters[].security` can run it in about a minute.
+# Published host ports bind 127.0.0.1 unless KUI_BIND_ADDRESS is set. The port numbers stay fixed.
 #
 # HOW TO RUN IT
 #
@@ -112,7 +113,7 @@ services:
     container_name: kui-secured-kui
     command: ["--config", "/etc/kui/kui.yaml"]
     ports:
-      - "18081:8080"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:18081:8080"
     environment:
       # Local demo only: allow private-network integrations; TLS verification is unchanged.
       KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
@@ -158,9 +159,9 @@ services:
       dockerfile: deployment/frontend/Dockerfile
     container_name: kui-secured-frontend
     ports:
-      # 18091, beside KUI's 18081. Neither is a variable in this file, which is deliberate: this
+      # 18091, beside KUI's 18081. The port numbers are not variables, which is deliberate: this
       # stack is run by hand, once, by somebody changing `kui.clusters[].security`.
-      - "18091:8082"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:18091:8082"
     environment:
       KUI_GATEWAY_URL: http://kui:8080
       KUI_BUILD_VERSION: 0.1.0

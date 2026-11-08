@@ -25,7 +25,8 @@ kui:
     devInsecureCookies: true
 
   auth:
-    # The only value M0 accepts. Real authentication arrives with the identity service in M6.
+    # Disabled for this local stack. `form` and `oidc` also load in this all-in-one process.
+    # See docs/operations/deployment.md.
     type: disabled
 
   telemetry:

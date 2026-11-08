@@ -143,8 +143,9 @@ kui:
       origins: []
 
   auth:
-    # The only value M0 accepts. Real authentication arrives with the identity service in M6, and
-    # anything else here fails the load with a message saying so, rather than being ignored.
+    # Disabled for this local stack. `form` and `oidc` also load; they do not fail startup. This
+    # distributed file configures no identity service, so leave `disabled` here. See
+    # docs/operations/deployment.md.
     type: disabled
 
   telemetry:

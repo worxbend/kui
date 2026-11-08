@@ -4,7 +4,7 @@
 Requires Docker/Compose. Starts only isolated, disposable proxy containers: no
 Kafka, host-published ports, credentials, or running application stack is used.
 For config-only checks (no containers), run:
-    python3 scripts/test-deployment.py DemoTopologyPolicy QuickstartBindings ToolPins
+    python3 scripts/test-deployment.py DemoTopologyPolicy QuickstartBindings DemoBindings ToolPins
 """
 
 import json
@@ -189,6 +189,28 @@ class QuickstartBindings(unittest.TestCase):
         bindings = self.bindings(KUI_QUICKSTART_BIND_ADDRESS="0.0.0.0")
         self.assertTrue(bindings)
         self.assertTrue(all(address == "0.0.0.0" for _, address in bindings), bindings)
+
+
+class DemoBindings(unittest.TestCase):
+    def published(self, *files):
+        services = compose_config(*files)["services"]
+        return [(name, port.get("host_ip"))
+                for name, service in services.items()
+                for port in service.get("ports", [])]
+
+    def test_every_topology_publishes_on_loopback(self):
+        # The observability file is an overlay. Compose rejects it alone, so it is
+        # merged the way its header runs it.
+        topologies = [(file,) for file in DemoTopologyPolicy.TOPOLOGIES]
+        topologies.append(("compose/docker-compose.yml",
+                           "compose/docker-compose.observability.yml"))
+        topologies.append(("storybook/docker-compose.storybook.yml",))
+        for files in topologies:
+            with self.subTest(topology=files):
+                bindings = self.published(*files)
+                self.assertTrue(bindings, files)
+                self.assertTrue(all(address == "127.0.0.1" for _, address in bindings),
+                                bindings)
 
 
 class FrontendProxy(unittest.TestCase):

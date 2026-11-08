@@ -18,10 +18,9 @@
 # take the whole console down.
 
 kui:
-  # Authentication is disabled, and `disabled` is the only value KUI accepts today. Real
-  # authentication arrives with the identity service in M6. This line is not strictly required --
-  # `disabled` is also the default -- but writing it down makes the security posture of the file
-  # explicit rather than implied, which matters for the one setting nobody should have to guess.
+  # Authentication is disabled. `disabled` is the default, not the only accepted value: `form`
+  # and `oidc` load in the all-in-one shape. This line is not strictly required, but writing it
+  # down makes the posture explicit. See docs/operations/deployment.md.
   auth:
     type: disabled
 

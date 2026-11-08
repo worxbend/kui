@@ -8,7 +8,8 @@
 # THIS IS A DEVELOPMENT AND TEST ENVIRONMENT, NOT A PRODUCTION DEPLOYMENT. The signing key comes
 # from an environment variable with a default in this file, there is no TLS, and the session cookie
 # is served without `Secure` so that plain HTTP on localhost works. Every one of those is wrong for
-# a deployment anyone else can reach.
+# a deployment anyone else can reach. Published host ports bind 127.0.0.1 unless KUI_BIND_ADDRESS
+# is set.
 #
 # What it is for is the thing the all-in-one shape cannot demonstrate: real process isolation.
 # `docker compose stop kui-cluster` kills an actual process, and the gateway has to keep serving the
@@ -57,7 +58,7 @@ services:
       dockerfile: deployment/frontend/Dockerfile
     container_name: kui-frontend
     ports:
-      - "${KUI_FRONTEND_PORT:-8090}:8082"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_FRONTEND_PORT:-8090}:8082"
     environment:
       # A service name on this network, not a published port. The gateway does not have to be
       # reachable from the host at all for the interface to work; it is published below only so a
@@ -102,7 +103,7 @@ services:
     container_name: kui-gateway
     command: ["--config", "/etc/kui/kui.yaml"]
     ports:
-      - "${KUI_PORT:-8080}:8080"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_PORT:-8080}:8080"
     environment:
       # Local demo only: Docker DNS resolves to private addresses checked at connection time.
       KUI_ALLOW_PRIVATE_UPSTREAMS: "true"

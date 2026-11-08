@@ -4,7 +4,8 @@
 # THIS IS A DEMONSTRATION ENVIRONMENT, NOT A PRODUCTION DEPLOYMENT. Two of the three brokers speak
 # plain text with no authentication and no encryption, the third's credentials are written in this
 # file in plain sight, and KUI serves its session cookie without `Secure` so that plain HTTP on
-# localhost works at all. Every one of those is wrong anywhere a network can reach it.
+# localhost works at all. Every one of those is wrong anywhere a network can reach it. Published
+# host ports bind 127.0.0.1 unless KUI_BIND_ADDRESS is set.
 #
 # Do not run this file by hand -- run `deployment/demo/demo.sh`, which builds the KUI image if it is
 # missing, generates the demonstration certificate authority if it is missing, checks the ports, and
@@ -66,7 +67,7 @@ services:
     ports:
       # For YOUR tools -- kcat, an IDE, a console consumer. KUI does not use this route; it reaches
       # the broker across the private network below, by container name.
-      - "${KUI_DEMO_DEV_PORT:-19092}:29092"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_DEMO_DEV_PORT:-19092}:29092"
     environment:
       <<: *kafka-common-env
       # A fixed cluster id rather than a generated one, so the broker formats its storage the same
@@ -165,7 +166,7 @@ services:
     ports:
       # For YOUR tools -- `curl http://localhost:18081/subjects`. KUI does not use this route; it
       # reaches the registry across the private network below, by container name.
-      - "${KUI_DEMO_REGISTRY_PORT:-18081}:8081"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_DEMO_REGISTRY_PORT:-18081}:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry-dev
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka-dev:9092
@@ -219,7 +220,7 @@ services:
     <<: *kafka-common
     container_name: kui-demo-kafka-prod-1
     ports:
-      - "${KUI_DEMO_PROD_PORT_1:-19093}:29092"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_DEMO_PROD_PORT_1:-19093}:29092"
     environment:
       <<: *kafka-common-env
       # All three brokers share this id. It identifies the CLUSTER, not the node -- brokers that
@@ -249,7 +250,7 @@ services:
     <<: *kafka-common
     container_name: kui-demo-kafka-prod-2
     ports:
-      - "${KUI_DEMO_PROD_PORT_2:-19094}:29092"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_DEMO_PROD_PORT_2:-19094}:29092"
     environment:
       <<: *kafka-common-env
       CLUSTER_ID: kui-demo-prod-0000001
@@ -275,7 +276,7 @@ services:
     <<: *kafka-common
     container_name: kui-demo-kafka-prod-3
     ports:
-      - "${KUI_DEMO_PROD_PORT_3:-19095}:29092"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_DEMO_PROD_PORT_3:-19095}:29092"
     environment:
       <<: *kafka-common-env
       CLUSTER_ID: kui-demo-prod-0000001
@@ -481,7 +482,7 @@ services:
     container_name: kui-demo-kui
     command: ["--config", "/etc/kui/kui-demo.yaml"]
     ports:
-      - "${KUI_PORT:-18080}:8080"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_PORT:-18080}:8080"
     environment:
       # Local demo only: the schema registry resolves to a private Docker address.
       KUI_ALLOW_PRIVATE_UPSTREAMS: "true"
@@ -554,7 +555,7 @@ services:
     ports:
       # 18090 rather than 8090, for the same reason KUI is on 18080 here: the quickstart owns the
       # low numbers, and somebody who wants to see both at once should not have to think about it.
-      - "${KUI_DEMO_FRONTEND_PORT:-18090}:8082"
+      - "${KUI_BIND_ADDRESS:-127.0.0.1}:${KUI_DEMO_FRONTEND_PORT:-18090}:8082"
     environment:
       # A service name on this network. KUI's own port is published above only so a `curl` against
       # the API is possible; the browser never uses it.
