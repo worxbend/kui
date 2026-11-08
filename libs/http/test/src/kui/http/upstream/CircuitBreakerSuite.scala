@@ -6,8 +6,8 @@ import cats.effect.IO
 import cats.effect.kernel.{Deferred, Ref, Resource}
 import cats.effect.testkit.TestControl
 import cats.syntax.all.*
-import fs2.{Pipe, Stream}
 import fs2.concurrent.Topic
+import fs2.{Pipe, Stream}
 import munit.CatsEffectSuite
 import sttp.capabilities.StreamMaxLengthExceededException
 
