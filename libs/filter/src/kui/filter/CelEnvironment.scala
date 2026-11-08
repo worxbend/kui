@@ -38,28 +38,36 @@ import io.circe.{parser, Json}
   *
   * ## The limits
   *
-  * | Limit                  | Default                     | Why                                                                                                     |
-  * |:-----------------------|:----------------------------|:--------------------------------------------------------------------------------------------------------|
-  * | source length          | 8 KiB                       | a CEL predicate longer than that is a program, not a filter                                             |
-  * | AST nodes              | 1 000                       | the cheap half of ADR-017's complexity limit, checked after parsing and before caching                  |
-  * | per-record deadline    | 10 ms                       | at 20 000 records a page it bounds the worst case to 200 s, which the browse deadline then cuts to 60 s |
-  * | JSON value text        | 1 048 576 UTF-16 chars      | refuses oversized decoded payloads before the JSON parser allocates their trees                         |
-  * | JSON value nodes       | 50 000                      | bounds conversion of parsed `record.key`/`record.value`, since the deadline above cannot (see below)    |
-  * | compiled-program cache | 10 000 entries, 1 hour      | ADR-017                                                                                                 |
-  * | regex engine           | re2j, through CEL's default | linear time, so a regex filter cannot backtrack the service to a halt                                   |
+  * | Limit                    | Default                     | Why                                                                                                  |
+  * |:-------------------------|:----------------------------|:-----------------------------------------------------------------------------------------------------|
+  * | source length            | 8 KiB                       | a CEL predicate longer than that is a program, not a filter                                          |
+  * | AST nodes                | 1 000                       | the cheap half of ADR-017's complexity limit, checked after parsing and before caching               |
+  * | per-record deadline      | 10 ms                       | bounds an evaluation that checks interruption; it does not stop a CEL comprehension                  |
+  * | comprehension iterations | 10 000                      | nested `exists`/`all`/`map`/`filter` stop here and become a runtime error; the deadline cannot       |
+  * | JSON value text          | 1 048 576 UTF-16 chars      | refuses oversized decoded payloads before the JSON parser allocates their trees                      |
+  * | JSON value nodes         | 50 000                      | bounds conversion of parsed `record.key`/`record.value`, since the deadline above cannot (see below) |
+  * | compiled-program cache   | 10 000 entries, 1 hour      | ADR-017                                                                                              |
+  * | regex engine             | re2j, through CEL's default | linear time, so a regex filter cannot backtrack the service to a halt                                |
   *
-  * All six are `kui.message.filter.*` configuration keys with these defaults.
+  * Every row except comprehension iterations is a `kui.message.filter.*` default. The comprehension
+  * budget is a `FilterLimits` field (`maxComprehensionIterations`), not another key: `MessageWiring`
+  * builds `FilterLimits.default`, and those keys are not read from configuration.
   *
   * The per-record deadline is enforced by `Sync[F].interruptible` around the whole evaluation, JSON parsing
   * included (`CelFilterEngine`'s `program.test`). `interruptible` only requests `Thread.interrupt()`; it
-  * cannot stop code that never checks for it, and neither `io.circe`'s parser nor [[toJava]]'s walk of the
-  * parsed tree does. A producer controls the bytes of `record.value`, so without a budget of its own, one
-  * pathological record — a very large or very deeply nested JSON value — spends CPU on its thread for as long
-  * as the walk takes regardless of the ten-millisecond deadline, and a burst of such records from concurrent
-  * browses can occupy the whole interruptible pool while every deadline it reports is a fiction. The JSON
-  * text limit bounds what reaches the parser, and the node limit bounds the conversion walk, independently of
-  * whether the interrupt is honored; [[toJava]] also caps recursion depth, since a narrow, very deep
-  * structure can exhaust the JVM stack long before it exhausts the node budget.
+  * cannot stop code that never checks for it. Neither `io.circe`'s parser, [[toJava]]'s walk of the parsed
+  * tree, nor CEL's own interpreter does. A producer controls the bytes of `record.value`, so without a budget
+  * of its own, one pathological record — a very large or very deeply nested JSON value — spends CPU on its
+  * thread for as long as the walk takes regardless of the ten-millisecond deadline, and a burst of such
+  * records from concurrent browses can occupy the whole interruptible pool while every deadline it reports is
+  * a fiction. The JSON text limit bounds what reaches the parser, and the node limit bounds the conversion
+  * walk, independently of whether the interrupt is honored; [[toJava]] also caps recursion depth, since a
+  * narrow, very deep structure can exhaust the JVM stack long before it exhausts the node budget. A nested
+  * comprehension is the same shape of failure on the CEL side: `exists` short-circuits only when the
+  * predicate is true, the source and AST limits still admit an expression of about a kilobyte that iterates
+  * tens of billions of times, and the deadline cannot cut it short. [[runtime]] sets CEL's
+  * `comprehensionMaxIterations` from `FilterLimits.maxComprehensionIterations`, and crossing it is a runtime
+  * error rather than a completed `false`.
   */
 object CelEnvironment {
 
@@ -106,7 +114,17 @@ object CelEnvironment {
       .addVar(RecordVariable, RecordType)
       .build()
 
-  def runtime: CelRuntime = CelRuntimeFactory.standardCelRuntimeBuilder().setOptions(options).build()
+  /** A runtime whose comprehensions stop after `maxComprehensionIterations`.
+    *
+    * The compiler stays on [[options]] alone: the iteration cap is an evaluation option, and a negative value
+    * (CEL's default) disables the check. Building the runtime from `FilterLimits` is what makes the cap per
+    * engine rather than a process-wide constant a caller can forget.
+    */
+  def runtime(maxComprehensionIterations: Int): CelRuntime =
+    CelRuntimeFactory
+      .standardCelRuntimeBuilder()
+      .setOptions(options.toBuilder.comprehensionMaxIterations(maxComprehensionIterations).build())
+      .build()
 
   /** The activation a program is evaluated against: one entry, `record`, holding [[recordFields]].
     *

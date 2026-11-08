@@ -76,10 +76,18 @@ final case class FilterLimits(
     /** Refuses producer-controlled decoded JSON before Circe parses it. The node limit above only applies
       * after parsing and therefore cannot bound the parser's initial allocation by itself.
       */
-    maxJsonValueChars: Int
+    maxJsonValueChars: Int,
+    /** Total iterations a comprehension may perform, nested loops included. CEL does not observe the
+      * interrupt `evaluationDeadline` requests, and `exists` short-circuits only on true, so this is the
+      * bound on a filter whose predicate never matches. A negative value disables the check.
+      */
+    maxComprehensionIterations: Int = FilterLimits.DefaultMaxComprehensionIterations
 )
 
 object FilterLimits {
+
+  /** CEL's comprehension counter, shared across every nested `exists`/`all`/`map`/`filter`. */
+  val DefaultMaxComprehensionIterations: Int = 10_000
 
   /** The defaults of the M3 plan's limits table, and of `kui.message.filter.*`. */
   val default: FilterLimits = FilterLimits(
@@ -90,7 +98,8 @@ object FilterLimits {
     cacheTtl = scala.concurrent.duration.DurationInt(1).hour,
     consecutiveTimeoutLimit = 100,
     maxJsonValueNodes = CelEnvironment.DefaultMaxJsonNodes,
-    maxJsonValueChars = CelEnvironment.DefaultMaxJsonChars
+    maxJsonValueChars = CelEnvironment.DefaultMaxJsonChars,
+    maxComprehensionIterations = DefaultMaxComprehensionIterations
   )
 
   given CanEqual[FilterLimits, FilterLimits] = CanEqual.derived
@@ -149,7 +158,9 @@ object CelFilterEngine {
       // The compiler and the runtime are built once. Both are documented as thread-safe and immutable once
       // built, and building a compiler per request would put the standard environment's construction —
       // which is not cheap — on the path of every record.
-      runtime <- Resource.eval(Sync[F].delay(CelEnvironment.runtime))
+      runtime <- Resource.eval(
+        Sync[F].delay(CelEnvironment.runtime(limits.maxComprehensionIterations))
+      )
       compiler <- Resource.eval(Sync[F].delay(CelEnvironment.compiler))
       // Warmed once, at startup, and this is not a micro-optimisation. CEL's first compile and first
       // evaluation in a JVM initialise the standard function dispatcher and load a good deal of class
@@ -350,9 +361,11 @@ object CelFilterEngine {
             //
             // `interruptible` only requests `Thread.interrupt()`; it is best-effort, not a wall-clock
             // guarantee, because CEL's own evaluation and the JSON conversion inside `activation` are not
-            // obligated to check for it. `maxJsonValueNodes` is what actually bounds the JSON half of this
-            // call regardless (see `CelEnvironment`'s `## The limits`); nothing bounds the CEL half beyond
-            // the AST node limit already applied at compile time.
+            // obligated to check for it. `maxJsonValueNodes` bounds the JSON half of this call, and
+            // `maxComprehensionIterations` bounds the CEL half (see `CelEnvironment`'s `## The limits`).
+            // The AST node limit does not: a nested `exists` of a few hundred bytes is still millions of
+            // iterations. Crossing the iteration budget throws, and `handleError` below reports it as
+            // `FilterError.Runtime`.
             prepared.map(
               _.eval(
                 CelEnvironment.activation(

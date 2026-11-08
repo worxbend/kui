@@ -33,7 +33,9 @@ object FilterableRecord {
   */
 enum FilterError {
 
-  /** The program ran and did not produce a boolean: a missing field, a type error, a non-boolean result. */
+  /** The program ran and did not produce a boolean: a missing field, a type error, a non-boolean result, or a
+    * comprehension that crossed `FilterLimits.maxComprehensionIterations`.
+    */
   case Runtime(message: String)
 
   /** The program did not finish inside its per-record deadline. */

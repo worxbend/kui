@@ -404,6 +404,49 @@ final class CelFilterEngineSuite extends KuiIOSuite {
     def updated[V1 >: String](key: String, value: V1): Map[String, V1] = Map(key -> value)
   }
 
+  test("a comprehension under the iteration budget still returns its answer") {
+    evaluate("[1, 2, 3].exists(x, x == 2)").assertEquals(Right(true))
+  }
+
+  test("a nested comprehension is a filter error within half a second, not a multi-second false") {
+    // Four nested `exists(_, false)` over an explicit `[0,1,…,59]` is 60^4 iterations and still under
+    // the 8 KiB / 1000-node compile limits. `exists` short-circuits only on true. With no iteration
+    // budget this returns Right(false) after several seconds: the deadline only interrupts, and CEL
+    // never looks at that flag.
+    val source = CelFilterEngineSuite.nestedExists(depth = 4, inclusiveEnd = 59)
+    for {
+      before <- IO.monotonic
+      result <- evaluate(source)
+      after <- IO.monotonic
+    } yield {
+      val took = after - before
+      assert(took < 500.millis, s"evaluation took $took and returned $result")
+      assert(
+        result.left.exists(_.isInstanceOf[FilterError.Runtime]),
+        s"the comprehension ran to completion or only timed out: $result"
+      )
+    }
+  }
+
+  test("the kilobyte nested comprehension is a runtime error, not a multi-minute run") {
+    // Depth 5 over an explicit `[0,1,…,99]` is about 1.5 KB and 100^5 iterations when nothing counts
+    // them. The same budget that stops the smaller expression has to stop this one: the deadline cannot.
+    val source = CelFilterEngineSuite.nestedExists(depth = 5, inclusiveEnd = 99)
+    assert(source.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 1400)
+    for {
+      before <- IO.monotonic
+      result <- evaluate(source)
+      after <- IO.monotonic
+    } yield {
+      val took = after - before
+      assert(took < 500.millis, s"evaluation took $took and returned $result")
+      assert(
+        result.left.exists(_.isInstanceOf[FilterError.Runtime]),
+        s"the comprehension ran to completion or only timed out: $result"
+      )
+    }
+  }
+
   // ------------------------------------------------------------------ identity and caching
 
   test("ids are a pure function of the source, so two engines agree") {
@@ -479,5 +522,23 @@ final class CelFilterEngineSuite extends KuiIOSuite {
     engine().use(_.test("record.partition ==", record)).map { result =>
       assertEquals(result.swap.toOption.map(_.code), Some(ErrorCode.FilterCompile))
     }
+  }
+}
+
+object CelFilterEngineSuite {
+
+  /** `[0,1,…,n].exists(a, [0,1,…,n].exists(b, … false))`. `exists` short-circuits only on true, so a body of
+    * `false` walks every element. An inclusive end of 59 at depth 4 is 60^4 iterations and about 741 bytes,
+    * under both compile limits; the same shape at depth 5 and 99 is the ~1.5 KB expression that runs for tens
+    * of minutes when the runtime has no iteration budget.
+    */
+  def nestedExists(depth: Int, inclusiveEnd: Int): String = {
+    val list = (0 to inclusiveEnd).mkString("[", ",", "]")
+    def nest(remaining: Int, index: Int): String = {
+      val variable = ('a' + index).toChar
+      val body = if remaining == 1 then "false" else nest(remaining - 1, index + 1)
+      s"$list.exists($variable, $body)"
+    }
+    nest(depth, 0)
   }
 }
