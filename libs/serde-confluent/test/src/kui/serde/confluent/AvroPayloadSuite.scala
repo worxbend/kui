@@ -124,4 +124,57 @@ final class AvroPayloadSuite extends FunSuite {
       case Right(encoded) => assert(encoded.left.exists(_.contains("256 levels")), encoded.map(_.length))
     }
   }
+
+  // -------------------------------------------------------------------------------------------
+  // Schemas that dictate allocation. Review R2 finding h-serde-untrusted-decode-2: Avro sizes a `fixed` from
+  // the schema before it reads the record, and an array of a zero-byte type is bounded only by a fraction of
+  // the heap. Both are fatal under `-XX:+ExitOnOutOfMemoryError`.
+  // -------------------------------------------------------------------------------------------
+
+  /** A zig-zag varint, as Avro writes a `long`, here an array's item count. */
+  private def zigZag(value: Long): Array[Byte] = {
+    val out = new java.io.ByteArrayOutputStream()
+    var remaining = (value << 1) ^ (value >> 63)
+    while (remaining & ~0x7fL) != 0L do {
+      out.write(((remaining & 0x7fL) | 0x80L).toInt)
+      remaining = remaining >>> 7
+    }
+    out.write(remaining.toInt)
+    out.toByteArray
+  }
+
+  test("a fixed larger than the record is refused before Avro allocates it") {
+    // Avro allocates a fixed's array from the schema's size and only then reads into it, so three bytes of
+    // record against `size: 2000000000` asked for 2 GB. A quarter of a gigabyte shows the same thing without
+    // asking a shared test machine for the full amount.
+    val huge = parsed("""{"type":"fixed","name":"F","size":268435456}""")
+    val (decoded, allocated) = Isolated.allocating(AvroPayload.decode(huge, Array[Byte](1, 2, 3)))
+    assert(allocated < 16L * 1024L * 1024L, s"decoding a 3-byte record allocated $allocated bytes")
+    assert(decoded.left.exists(_.contains("268435456 bytes")), decoded)
+  }
+
+  test("a fixed that fits the record still decodes") {
+    val small = parsed("""{"type":"fixed","name":"F","size":3}""")
+    assertEquals(AvroPayload.decode(small, Array[Byte](65, 66, 67)), Right("\"ABC\""))
+  }
+
+  test("an array of a zero-byte type cannot turn five bytes into millions of values") {
+    val nulls = parsed("""{"type":"array","items":"null"}""")
+    val body = zigZag(5000000L) :+ 0.toByte
+    val decoded = AvroPayload.decode(nulls, body)
+    assert(decoded.isLeft, decoded.map(_.length))
+    assert(decoded.left.exists(_.contains("values")), decoded.map(_.length))
+    val few = zigZag(1000L) :+ 0.toByte
+    assertEquals(AvroPayload.decode(nulls, few).map(_.count(_ == 'n')), Right(1000))
+  }
+
+  test("a schema whose field names dwarf the record cannot multiply its size into the output") {
+    val name = "n" * 10000
+    val wide = parsed(
+      s"""{"type":"array","items":{"type":"record","name":"R","fields":[{"name":"$name","type":"null"}]}}"""
+    )
+    val decoded = AvroPayload.decode(wide, zigZag(2000L) :+ 0.toByte)
+    assert(decoded.isLeft, decoded.map(_.length))
+    assert(decoded.left.exists(_.contains("bytes of JSON")), decoded.map(_.length))
+  }
 }
