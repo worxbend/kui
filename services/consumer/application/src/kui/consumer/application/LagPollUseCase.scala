@@ -131,10 +131,17 @@ object LagPollUseCase {
               hint <- degradedHint
               current = snapshot.value.getOrElse(GroupSnapshot.empty(java.time.Instant.EPOCH))
               parsed = since.flatMap(LagToken.parse)
+              // `previous` is written before the cell publishes (`GroupSnapshots.load`). A poll can
+              // therefore see the new previous beside the snapshot that is still current, and those
+              // two are the same version. Diffing a snapshot against itself answers `changed = []`,
+              // and the client treats that as "nothing moved" forever. The token is usable only when
+              // previous really is the pass before the one on screen; otherwise answer in full.
+              aligned = previous.exists(_.version == current.version - 1L)
               // A token from another cluster, or one more than a pass old, is answered in full: the
               // one previous snapshot is all that is kept, and a client that has been away longer is
               // better served by everything than by a delta computed against a gap.
-              usable = parsed.exists((id, version) => id == cluster && version == current.version - 1L)
+              usable =
+                aligned && parsed.exists((id, version) => id == cluster && version == current.version - 1L)
               caughtUp = parsed.exists((id, version) => id == cluster && version == current.version)
               (changed, gone) =
                 if caughtUp then (Nil, Nil)
