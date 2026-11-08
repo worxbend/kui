@@ -24,6 +24,11 @@ final class KsqlCapabilitiesSuite extends CatsEffectSuite {
 
   final private class StubClient(answer: Either[KuiError, KsqlObjects]) extends KsqlClient[IO] {
     def objects: IO[Either[KuiError, KsqlObjects]] = IO.pure(answer)
+    def destructiveTarget(name: String, kind: KsqlObjectKind): IO[Either[KuiError, Option[KsqlObject]]] =
+      objects.map(_.map(_.items.filter(item => item.name == name && item.kind == kind) match {
+        case item :: Nil => Some(item)
+        case _ => None
+      }))
     def execute(statement: KsqlStatement): IO[Either[KuiError, StatementOutcome]] =
       IO.pure(Right(StatementOutcome.Status("done", None)))
     def rows(statement: KsqlStatement): fs2.Stream[IO, Either[KuiError, QueryFrame]] = fs2.Stream.empty
@@ -32,6 +37,8 @@ final class KsqlCapabilitiesSuite extends CatsEffectSuite {
   /** A client that throws, which the port promises never to do. The report has to survive it anyway. */
   private val throwing: KsqlClient[IO] = new KsqlClient[IO] {
     def objects: IO[Either[KuiError, KsqlObjects]] = IO.raiseError(new RuntimeException("boom"))
+    def destructiveTarget(name: String, kind: KsqlObjectKind): IO[Either[KuiError, Option[KsqlObject]]] =
+      IO.raiseError(new RuntimeException("boom"))
     def execute(statement: KsqlStatement): IO[Either[KuiError, StatementOutcome]] =
       IO.pure(Right(StatementOutcome.Status("done", None)))
     def rows(statement: KsqlStatement): fs2.Stream[IO, Either[KuiError, QueryFrame]] = fs2.Stream.empty

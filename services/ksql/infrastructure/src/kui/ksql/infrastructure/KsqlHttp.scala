@@ -74,6 +74,30 @@ final class KsqlHttp[F[_]: Async](
   def objects: F[Either[KuiError, KsqlObjects]] =
     statement(ListingStatements).map(_.flatMap(entities => Right(objectsFrom(entities))))
 
+  def destructiveTarget(name: String, kind: KsqlObjectKind): F[Either[KuiError, Option[KsqlObject]]] =
+    kind match {
+      case KsqlObjectKind.Stream => lookupListed("SHOW STREAMS;", name, kind)
+      case KsqlObjectKind.Table => lookupListed("SHOW TABLES;", name, kind)
+      case KsqlObjectKind.Query | KsqlObjectKind.Topic => none[KsqlObject].asRight[KuiError].pure[F]
+    }
+
+  /** One `SHOW STREAMS` or `SHOW TABLES`, read in full.
+    *
+    * Not [[objectsFrom]]: that applies [[KsqlObjects.MaxObjects]] for the pane. A stream or table past the
+    * cap is still a real object, and `DROP … DELETE TOPIC` has to be able to name it.
+    */
+  private def lookupListed(
+      show: String,
+      name: String,
+      kind: KsqlObjectKind
+  ): F[Either[KuiError, Option[KsqlObject]]] =
+    statement(show).map(_.map { entities =>
+      listed(entities).filter(item => item.kind == kind && item.name == name) match {
+        case item :: Nil => Some(item)
+        case _ => None
+      }
+    })
+
   def execute(statement: KsqlStatement): F[Either[KuiError, StatementOutcome]] =
     if statement.push then
       // The port's contract says a push query never reaches here. If one does it is a defect in the
@@ -350,6 +374,10 @@ object KsqlHttp {
       unreadable = read.collect { case Left(name) => name }
     )
   }
+
+  /** Every readable object in a `SHOW` answer, with no display cap. */
+  private def listed(entities: List[Json]): List[KsqlObject] =
+    entities.flatMap(entityOf).collect { case Right(item) => item }
 
   private def entityOf(entity: Json): List[Either[String, KsqlObject]] = {
     val cursor = entity.hcursor

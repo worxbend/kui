@@ -278,8 +278,10 @@ object KsqlUseCases {
       /** The plan's warnings, and the one figure it goes and looks up.
         *
         * A destructive statement's whole content is *which topic disappears*, so the object it names is
-        * looked up in the cluster's own listing and the topic behind it is quoted. Failed or ambiguous
-        * lookups cannot authorize deletion. The same identity is re-read and checked before execution.
+        * looked up on the server and the topic behind it is quoted. That lookup is not the objects pane: the
+        * pane is capped for display, and an object past the cap would otherwise be undeletable no matter how
+        * often the operator refreshed. Failed or ambiguous lookups cannot authorize deletion. The same
+        * identity is re-read and checked before execution.
         */
       private def describe(
           cluster: ClusterId,
@@ -291,41 +293,37 @@ object KsqlUseCases {
           profiles.client(cluster).flatMap {
             case None => notWired(cluster).asLeft[(List[String], Option[String])].pure[F]
             case Some(client) =>
-              client.objects.map(_.flatMap { objects =>
-                val matches = objects.items.filter(item =>
-                  statement.target.contains(item.name) && statement.targetKind.contains(item.kind)
-                )
-                val identified = matches match {
-                  case (item @ KsqlObject.Stream(_, topic, format)) :: Nil =>
-                    Some((item, topic, format.toList))
-                  case (item @ KsqlObject.Table(_, topic, format, windowed)) :: Nil =>
-                    Some((item, topic, windowed.toString :: format.toList))
-                  case _ => None
-                }
-                identified
-                  .toRight(
-                    ApplicationError.Invalid(
-                      "KUI cannot identify the exact ksqlDB object and Kafka topic to delete; refresh the objects and plan again",
-                      Nil
-                    ): KuiError
-                  )
-                  .map { case (item, topic, properties) =>
-                    val fields = List(
-                      "ksql-delete-v2",
-                      statement.canonical,
-                      item.kind.wire,
-                      item.name,
-                      topic
-                    ) ++ properties
-                    val binding = fields.map(value => s"${value.length}:$value").mkString
-                    (
-                      List(
-                        s"This deletes the Kafka topic '$topic' and every record in it. Nothing in KUI can undo it."
-                      ),
-                      Some(binding)
-                    )
-                  }
-              })
+              (statement.target, statement.targetKind) match {
+                case (Some(name), Some(kind)) =>
+                  client
+                    .destructiveTarget(name, kind)
+                    .map(_.flatMap { found =>
+                      val identified = found match {
+                        case Some(item @ KsqlObject.Stream(_, topic, format)) =>
+                          Some((item: KsqlObject, topic, format.toList))
+                        case Some(item @ KsqlObject.Table(_, topic, format, windowed)) =>
+                          Some((item: KsqlObject, topic, windowed.toString :: format.toList))
+                        case _ => None
+                      }
+                      identified.toRight(unidentified).map { case (item, topic, properties) =>
+                        val fields = List(
+                          "ksql-delete-v2",
+                          statement.canonical,
+                          item.kind.wire,
+                          item.name,
+                          topic
+                        ) ++ properties
+                        val binding = fields.map(value => s"${value.length}:$value").mkString
+                        (
+                          List(
+                            s"This deletes the Kafka topic '$topic' and every record in it. Nothing in KUI can undo it."
+                          ),
+                          Some(binding)
+                        )
+                      }
+                    })
+                case _ => unidentified.asLeft[(List[String], Option[String])].pure[F]
+              }
           }
 
       /** The confirmation, checked only for the statements that need one.
@@ -367,6 +365,12 @@ object KsqlUseCases {
 
   private def invalid(problem: StatementProblem): KuiError =
     ApplicationError.Invalid(problem.message, Nil)
+
+  private def unidentified: KuiError =
+    ApplicationError.Invalid(
+      "KUI cannot identify the exact ksqlDB object and Kafka topic to delete; refresh the objects and plan again",
+      Nil
+    )
 
   /** A cluster that configured no ksqlDB, asked to do something with one.
     *

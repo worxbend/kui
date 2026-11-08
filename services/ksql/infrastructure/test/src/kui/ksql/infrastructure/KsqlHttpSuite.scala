@@ -198,6 +198,69 @@ final class KsqlHttpSuite extends KuiIOSuite {
     }
   }
 
+  test("a stream past the display cap is still found for DROP ... DELETE TOPIC") {
+    // `objects` keeps MaxObjects and drops S500. The deletion lookup must not, or that stream can
+    // never be planned.
+    val rows = (0 to KsqlObjects.MaxObjects)
+      .map { index =>
+        val name = f"S$index%03d"
+        s"""{"name":"$name","topic":"t-$name","valueFormat":"JSON"}"""
+      }
+      .mkString(",")
+    val body = s"""[{"@type":"streams","streams":[$rows]}]"""
+    val http = server { case "/ksql" => (StatusCode.Ok, body) }
+
+    for {
+      listed <- http.objects
+      found <- http.destructiveTarget(f"S${KsqlObjects.MaxObjects}%03d", KsqlObjectKind.Stream)
+    } yield {
+      assertEquals(
+        listed.toOption.map(_.items.exists(_.name == f"S${KsqlObjects.MaxObjects}%03d")),
+        Some(false)
+      )
+      assertEquals(
+        found,
+        Right(
+          Some(
+            KsqlObject.Stream(
+              f"S${KsqlObjects.MaxObjects}%03d",
+              f"t-S${KsqlObjects.MaxObjects}%03d",
+              Some("JSON")
+            )
+          )
+        )
+      )
+    }
+  }
+
+  test("a table past the display cap is found by its own SHOW, not the capped pane") {
+    val rows = (0 to KsqlObjects.MaxObjects)
+      .map { index =>
+        val name = f"T$index%03d"
+        s"""{"name":"$name","topic":"t-$name","valueFormat":"AVRO","isWindowed":false}"""
+      }
+      .mkString(",")
+    val body = s"""[{"@type":"tables","tables":[$rows]}]"""
+
+    server { case "/ksql" => (StatusCode.Ok, body) }
+      .destructiveTarget(f"T${KsqlObjects.MaxObjects}%03d", KsqlObjectKind.Table)
+      .map(found =>
+        assertEquals(
+          found,
+          Right(
+            Some(
+              KsqlObject.Table(
+                f"T${KsqlObjects.MaxObjects}%03d",
+                f"t-T${KsqlObjects.MaxObjects}%03d",
+                Some("AVRO"),
+                windowed = false
+              )
+            )
+          )
+        )
+      )
+  }
+
   test("an entity kind this build has never seen is ignored rather than counted as unreadable") {
     // A future ksqlDB adding a listing to its answer must not put a permanent false row on the screen of
     // every deployment that upgraded.

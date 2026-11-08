@@ -43,6 +43,12 @@ object KsqlRig {
 
   val listing: KsqlObjects = KsqlObjects.of(List(orders, users), Nil)
 
+  private def only(items: List[KsqlObject], name: String, kind: KsqlObjectKind): Option[KsqlObject] =
+    items.filter(item => item.name == name && item.kind == kind) match {
+      case item :: Nil => Some(item)
+      case _ => None
+    }
+
   val created: StatementOutcome = StatementOutcome.Status("Stream created and running", None)
 
   /** A ksqlDB that answers what it was told to and records every call it was asked to make. */
@@ -52,10 +58,20 @@ object KsqlRig {
       val executed: Ref[IO, List[String]],
       val reads: Ref[IO, Int],
       val opened: Ref[IO, List[String]],
-      frames: List[Either[KuiError, QueryFrame]]
+      frames: List[Either[KuiError, QueryFrame]],
+      catalog: Option[List[KsqlObject]]
   ) extends KsqlClient[IO] {
 
-    def objects: IO[Either[KuiError, KsqlObjects]] = reads.update(_ + 1).as(objectsAnswer)
+    def objects: IO[Either[KuiError, KsqlObjects]] =
+      reads.update(_ + 1).as(catalog.fold(objectsAnswer)(items => Right(KsqlObjects.of(items, Nil))))
+
+    def destructiveTarget(name: String, kind: KsqlObjectKind): IO[Either[KuiError, Option[KsqlObject]]] = {
+      val found = catalog match {
+        case Some(items) => Right(only(items, name, kind))
+        case None => objectsAnswer.map(objects => only(objects.items, name, kind))
+      }
+      IO.pure(found)
+    }
 
     def execute(statement: KsqlStatement): IO[Either[KuiError, StatementOutcome]] =
       executed.update(_ :+ statement.canonical).as(executeAnswer)
@@ -116,7 +132,8 @@ object KsqlRig {
         Right(QueryFrame.Header(List("ID"))),
         Right(QueryFrame.Row(QueryRow(List(Some("17")))))
       ),
-      onEveryCluster: Boolean = true
+      onEveryCluster: Boolean = true,
+      catalog: Option[List[KsqlObject]] = None
   ): IO[Rig] =
     for {
       executed <- Ref.of[IO, List[String]](Nil)
@@ -124,7 +141,7 @@ object KsqlRig {
       opened <- Ref.of[IO, List[String]](Nil)
       entries <- Ref.of[IO, List[KsqlStatementRecord]](Nil)
       logger <- kui.testkit.fakes.FakeStructuredLogger[IO]
-      server = new CountingServer(objectsAnswer, executeAnswer, executed, reads, opened, frames)
+      server = new CountingServer(objectsAnswer, executeAnswer, executed, reads, opened, frames, catalog)
       clients =
         if onEveryCluster then Map(cluster -> (server: KsqlClient[IO]), readOnly -> (server: KsqlClient[IO]))
         else Map(cluster -> (server: KsqlClient[IO]))

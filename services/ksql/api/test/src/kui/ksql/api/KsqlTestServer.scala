@@ -72,6 +72,12 @@ object KsqlTestServer {
 
     def objects: IO[Either[KuiError, KsqlObjects]] = reads.update(_ + 1).as(Right(listing))
 
+    def destructiveTarget(name: String, kind: KsqlObjectKind): IO[Either[KuiError, Option[KsqlObject]]] =
+      IO.pure(Right(listing.items.filter(item => item.name == name && item.kind == kind) match {
+        case item :: Nil => Some(item)
+        case _ => None
+      }))
+
     def execute(statement: KsqlStatement): IO[Either[KuiError, StatementOutcome]] =
       executed
         .update(_ :+ statement.canonical)

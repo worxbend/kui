@@ -94,6 +94,34 @@ final class KsqlUseCasesSuite extends CatsEffectSuite {
     )
   }
 
+  test("DROP ... DELETE TOPIC can name a stream the display listing has already cut") {
+    // 501 streams. `KsqlObjects.of` keeps 500, and `S500` sorts last, so a lookup that reads the
+    // pane's list can never see it. Refreshing does not help: the cut is the same every time.
+    val streams = (0 to 500).toList.map { index =>
+      val name = f"S$index%03d"
+      KsqlObject.Stream(name, s"topic-$name", Some("JSON"))
+    }
+    val statement = "DROP STREAM S500 DELETE TOPIC;"
+
+    // `catalog` is the uncapped SHOW the deletion lookup reads. `objects` still answers
+    // `KsqlObjects.of`, which drops S500, so this does not pass by uncapping the pane.
+    rig(catalog = Some(streams)).flatMap { rig =>
+      for {
+        shown <- rig.server.objects
+        planned <- rig.useCases.plan(alice, cluster, statement)
+        token = planned.toOption.flatMap(_.token)
+        accepted <- rig.useCases.execute(alice, cluster, statement, token)
+        sent <- rig.server.executed.get
+      } yield {
+        assertEquals(shown.toOption.map(_.items.exists(_.name == "S500")), Some(false))
+        assert(planned.toOption.flatMap(_.token).isDefined, clue = planned)
+        assert(clue(planned.toOption.toList.flatMap(_.warnings).mkString).contains("'topic-S500'"))
+        assert(accepted.isRight, clue = accepted)
+        assertEquals(sent, List(statement))
+      }
+    }
+  }
+
   test("a plan that cannot identify the target cannot authorize deletion") {
     // The product's central promise applied to a warning. The object is not in this cluster's listing, so
     // the sentence says KUI cannot say which topic — it does not guess from the object's name.

@@ -31,6 +31,14 @@ trait KsqlServerPort[F[_]] {
     */
   def objects: F[Either[KuiError, KsqlObjects]]
 
+  /** The stream or table a `DROP … DELETE TOPIC` names, without the display cap on [[objects]].
+    *
+    * [[KsqlObjects.MaxObjects]] keeps the pane readable. A deletion that looked the target up in that capped
+    * list could never plan an object past it, and refreshing would not help. `None` means there is no single
+    * object of this kind and name. Query and topic are not deletion targets and answer `None`.
+    */
+  def destructiveTarget(name: String, kind: KsqlObjectKind): F[Either[KuiError, Option[KsqlObject]]]
+
   /** Run one statement that finishes, and answer what it produced.
     *
     * The statement has already been classified — that is what having a [[KsqlStatement]] rather than a
