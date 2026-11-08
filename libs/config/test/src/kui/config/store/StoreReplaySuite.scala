@@ -13,6 +13,7 @@ import io.circe.syntax.*
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.noop.NoOpFactory
 
+import kui.kernel.error.ErrorCode
 import kui.testkit.KuiIOSuite
 
 /** That replay terminates, that it fails by name when it cannot, and that cancelling it leaves nothing
@@ -44,6 +45,22 @@ final class StoreReplaySuite extends KuiIOSuite {
       )
       .fold(e => sys.error(e.message), identity)
   )
+
+  private def undecryptable(id: String, version: Long, offset: Long): KafkaConfigStore.LogRecord = {
+    val key = StoreKey(StoreSection.Cluster, id)
+    val payload = Json.obj(
+      "password" -> Json.obj(
+        SecretJson.CipherField -> Json.obj(
+          "alg" -> Json.fromString("AES-256-GCM"),
+          "keyId" -> Json.fromString("gone"),
+          "iv" -> Json.fromString("AAAAAAAAAAAAAAAA"),
+          "ct" -> Json.fromString("AAAAAAAAAAAAAAAAAAAAAA==")
+        )
+      )
+    )
+    val record = StoreRecord(1, key, version, at, "test", deleted = false, payload)
+    KafkaConfigStore.LogRecord(key.render, Some(record.asJson.noSpaces), offset)
+  }
 
   private def entry(id: String, version: Long, offset: Long): KafkaConfigStore.LogRecord = {
     val key = StoreKey(StoreSection.Cluster, id)
@@ -193,6 +210,67 @@ final class StoreReplaySuite extends KuiIOSuite {
       assertEquals(state.get(key), None)
       assertEquals(state.unreadableKeys.map(_.render), List("cluster/rotated"))
       assertEquals(state.get(StoreKey(StoreSection.Cluster, "fine")).map(_.version), Some(1L))
+    }
+  }
+
+  test("anUndecryptableEnvelopeKeepsItsVersionSoTheNextRecordApplies") {
+    // The envelope parsed, so its version is known, even though the payload was encrypted under a key
+    // this replica does not have. Dropping that version keeps serving v1 and then ignores the readable
+    // v3 every other replica accepts.
+    val key = StoreKey(StoreSection.Cluster, "prod")
+    val log = Stream.emits(List(entry("prod", 1L, 0L), undecryptable("prod", 2L, 1L), entry("prod", 3L, 2L)))
+    TestControl.executeEmbed(run(3L, log)).map { (outcome, state) =>
+      assert(outcome.isRight, outcome.toString)
+      assertEquals(state.get(key).map(_.version), Some(3L))
+      assertEquals(state.unreadableKeys, Nil)
+      assertEquals(state.nextVersion(key), 4L)
+    }
+  }
+
+  test("aWriteBasedOnTheRecordAnUndecryptableEnvelopeSupersededConflicts") {
+    // Replica B still holds v1, cannot read v2, and lets an edit through against v1. That write is
+    // version 2 locally and version-ignored by every replica that already applied v2.
+    val key = StoreKey(StoreSection.Cluster, "prod")
+    val program = for {
+      state <- Ref.of[IO, StoreState](StoreState.empty)
+      changes <- Topic[IO, StoreChange]
+      _ <- KafkaConfigStore.replay[IO](
+        fakeLog(2L, Stream.emits(List(entry("prod", 1L, 0L), undecryptable("prod", 2L, 1L)))),
+        state,
+        changes,
+        crypto,
+        "__kui_config",
+        2L,
+        30.seconds,
+        logger
+      )
+      waiter <- WriteWaiter.create[IO]
+      health <- StoreHealthRef.of[IO](StoreHealth.Healthy(1L, at, Nil))
+      sink = new KafkaConfigStore.RecordSink[IO] {
+        def produce(topic: String, key: String, value: Option[String]) =
+          IO.raiseError(new AssertionError(s"produced a write for $key based on a superseded record"))
+      }
+      store = KafkaConfigStore.writable[IO](
+        state,
+        changes,
+        waiter,
+        health,
+        sink,
+        crypto,
+        "__kui_config",
+        5.seconds,
+        logger
+      )
+      written <- store.put(key, Json.obj("displayName" -> Json.fromString("edited")), Some(1L), "replica-b")
+      after <- state.get
+    } yield (written, after)
+    TestControl.executeEmbed(program).map { (written, after) =>
+      assertEquals(after.get(key), None)
+      assertEquals(after.nextVersion(key), 3L)
+      written match {
+        case Left(error) => assertEquals(error.code, ErrorCode.ConfigVersionConflict)
+        case Right(record) => fail(s"the stale edit was saved at version ${record.version}")
+      }
     }
   }
 

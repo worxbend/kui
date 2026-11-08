@@ -363,9 +363,9 @@ object KafkaConfigStore {
                 .flatMap(outcome => report(outcome, offset, changes, logger))
             case Decoded.Erased(key) =>
               state.modify(_.erase(key, offset)).flatMap(outcome => report(outcome, offset, changes, logger))
-            case Decoded.Unreadable(key, reason) =>
+            case Decoded.Unreadable(key, reason, knownVersion) =>
               state
-                .modify(_.markUnreadable(key, offset, reason))
+                .modify(_.markUnreadable(key, offset, reason, knownVersion))
                 .flatMap(outcome => report(outcome, offset, changes, logger))
           }
         )
@@ -406,7 +406,11 @@ object KafkaConfigStore {
 
     /** A `null` value: a physical tombstone. */
     case Erased(key: StoreKey)
-    case Unreadable(key: StoreKey, reason: String)
+
+    /** `knownVersion` is set only once the envelope has parsed. A decrypt failure knows its version; a record
+      * that is not JSON does not.
+      */
+    case Unreadable(key: StoreKey, reason: String, knownVersion: Option[Long])
   }
 
   /** Turns one Kafka record into a decrypted `StoreRecord`, or names the key and why it could not.
@@ -424,21 +428,23 @@ object KafkaConfigStore {
       case Left(error) =>
         // A key that will not parse cannot be named, so it is reported under a placeholder rather than
         // dropped in silence.
-        Async[F].pure(Decoded.Unreadable(StoreKey(StoreSection.Other("unparseable"), "key"), error.message))
+        Async[F].pure(
+          Decoded.Unreadable(StoreKey(StoreSection.Other("unparseable"), "key"), error.message, None)
+        )
       case Right(key) =>
         rawValue match {
           case None => Async[F].pure(Decoded.Erased(key))
           case Some(text) =>
             parse(text) match {
               case Left(failure) =>
-                Async[F].pure(Decoded.Unreadable(key, s"it is not valid JSON (${failure.message})"))
+                Async[F].pure(Decoded.Unreadable(key, s"it is not valid JSON (${failure.message})", None))
               case Right(json) =>
                 StoreRecord.fromJsonWithKey(rawKey, json) match {
-                  case Left(error) => Async[F].pure(Decoded.Unreadable(key, error.message))
+                  case Left(error) => Async[F].pure(Decoded.Unreadable(key, error.message, None))
                   case Right(record) =>
                     crypto.decryptPayload(key, record.payload).map {
                       case Right(payload) => Decoded.Readable(record.copy(payload = payload))
-                      case Left(error) => Decoded.Unreadable(key, error.message)
+                      case Left(error) => Decoded.Unreadable(key, error.message, Some(record.version))
                     }
                 }
             }
@@ -525,7 +531,9 @@ object KafkaConfigStore {
           updatedBy: String
       ): F[Either[KuiError, StoreRecord]] =
         state.get.flatMap { current =>
-          val actual = current.get(key).map(_.version)
+          // A concealed envelope is not readable, but it is the version the log is at. Comparing only
+          // against `get` would see "absent" and let a write based on the superseded record through.
+          val actual = current.get(key).map(_.version).orElse(current.concealedVersion(key))
           if actual != baseVersion then
             logger.warn(
               s"store write conflict: key=${key.render} baseVersion=${baseVersion.fold("none")(_.toString)} " +
@@ -582,8 +590,21 @@ object KafkaConfigStore {
         state.get.flatMap { current =>
           current.get(key) match {
             // Deleting a key that is already gone is a success: the caller's intent — "this key must not
-            // be there" — already holds, and no caller can act on the difference.
-            case None => Async[F].pure(Right(()))
+            // be there" — already holds, and no caller can act on the difference. A concealed envelope is
+            // not gone: the log still has it, at the version the envelope carried.
+            case None =>
+              current.concealedVersion(key) match {
+                case Some(held) if held != baseVersion =>
+                  logger.warn(
+                    s"store write conflict: key=${key.render} baseVersion=$baseVersion " +
+                      s"currentVersion=$held stage=precheck"
+                  ) *> Async[F].pure(Left(conflict(key, Some(baseVersion), Some(held))))
+                case Some(_) =>
+                  now[F].flatMap(at =>
+                    send(StoreRecord.tombstone(key, current.nextVersion(key), updatedBy, at)).map(_.void)
+                  )
+                case None => Async[F].pure(Right(()))
+              }
             case Some(existing) if existing.version != baseVersion =>
               logger.warn(
                 s"store write conflict: key=${key.render} baseVersion=$baseVersion " +

@@ -108,6 +108,31 @@ final class ClusterConfigStoreAdapterSuite extends KuiIOSuite {
     }
   }
 
+  test("aKeyTheStoreCouldNotDecryptIsNotAbsent") {
+    // Decryption failure hides the record. Answering "no such cluster" sends the caller to create a
+    // duplicate over a key the log still holds.
+    adapter { (a, store) =>
+      val key = ClusterConfigStoreAdapter.keyFor(ClusterId.unsafe("prod")).toOption.get
+      for {
+        _ <- store.setHealth(ConfigHealth.Healthy(4L, StubConfigStore.At, List(key)))
+        result <- a.get(ClusterId.unsafe("prod"))
+      } yield assertEquals(result.left.map(_.code), Left(ErrorCode.Validation))
+    }
+  }
+
+  test("anUnreadableKeyIsLeftOutOfTheListAndTheOthersStillLoad") {
+    adapter { (a, store) =>
+      val prod = TestProfiles.profile(id = "prod")
+      val key = ClusterConfigStoreAdapter.keyFor(prod.id).toOption.get
+      for {
+        _ <- store.hold(recordFor(prod, 3L))
+        _ <- store.hold(recordFor(TestProfiles.profile(id = "staging"), 1L))
+        _ <- store.setHealth(ConfigHealth.Healthy(4L, StubConfigStore.At, List(key)))
+        listed <- a.list
+      } yield assertEquals(listed.map(_.map(_.id.value)), Right(List("staging")))
+    }
+  }
+
   test("aCreateWritesWithNoBaseVersionAndAnUpdateWritesWithTheOneItRead") {
     // `ProfileVersion.Static` is zero and means "never stored". The store spells that as "this key must not
     // exist yet"; asking it to match version 0 instead would make every create look like a conflict.

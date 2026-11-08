@@ -8,7 +8,9 @@ enum StoreApplied {
   /** A writer whose base version was stale. Normal, and worth seeing in a log. */
   case Ignored(key: StoreKey, recordVersion: Long, expectedVersion: Long)
 
-  /** A record that could not be decoded or decrypted. That key is missing; everything else works. */
+  /** A record whose payload could not be decoded or decrypted. That payload is not served; every other key
+    * is.
+    */
   case Unreadable(key: StoreKey, reason: String)
 }
 
@@ -27,7 +29,9 @@ final case class StoreState(
     lastAppliedOffset: Long,
     unreadable: Map[StoreKey, String],
     outcomes: Vector[(Long, StoreApplied)],
-    ignoredGaps: Int = 0
+    ignoredGaps: Int = 0,
+    // Envelope versions whose payload could not be decrypted. Reads skip them; the version still counts.
+    concealed: Map[StoreKey, Long] = Map.empty
 ) {
 
   /** What the follower did with the record at one offset.
@@ -52,8 +56,21 @@ final case class StoreState(
       .sortBy((key, _) => key.render)
       .map(_._2)
 
-  /** The version the next accepted write to this key must carry. */
-  def nextVersion(key: StoreKey): Long = records.get(key).fold(1L)(_.version + 1L)
+  /** The version the next accepted write to this key must carry.
+    *
+    * A concealed envelope counts. Its payload is hidden, but the version in that envelope is the one the log
+    * established, and a write that pretends otherwise is a lost race on every replica that could read it.
+    */
+  def nextVersion(key: StoreKey): Long = versionHeld(key).fold(1L)(_ + 1L)
+
+  /** The version of an envelope whose payload this replica could not decrypt, if that is all it holds. */
+  def concealedVersion(key: StoreKey): Option[Long] = concealed.get(key)
+
+  /** The version established for this key: a stored record, or a concealed envelope when the payload is not
+    * readable. A tombstone is a stored record, so deletion keeps the version too.
+    */
+  private def versionHeld(key: StoreKey): Option[Long] =
+    records.get(key).map(_.version).orElse(concealed.get(key))
 
   /** Folds one decoded record in.
     *
@@ -88,7 +105,7 @@ final case class StoreState(
       // A stale version is only a lost race, and the key is still the record that won. A gap is not. Leaving
       // it out of `unreadable` makes the key look absent, and a reader that treats absent as empty revives a
       // configured password or reopens an alert feed while health still says Healthy.
-      val ahead = records.get(record.key).exists(_.version + 1L < record.version)
+      val ahead = versionHeld(record.key).exists(_ + 1L < record.version)
       val marked =
         if ahead then
           advanced.copy(
@@ -109,7 +126,8 @@ final case class StoreState(
         advanced
           .copy(
             records = advanced.records.updated(record.key, record),
-            unreadable = advanced.unreadable - record.key
+            unreadable = advanced.unreadable - record.key,
+            concealed = advanced.concealed - record.key
           )
           .withOutcome(offset, applied),
         applied
@@ -121,8 +139,8 @@ final case class StoreState(
     * key not held at all, which is what a compacted log looks like — any real version.
     */
   private def isNext(key: StoreKey, version: Long): Boolean =
-    records.get(key) match {
-      case Some(held) => version == held.version + 1L
+    versionHeld(key) match {
+      case Some(held) => version == held + 1L
       case None => version >= 1L
     }
 
@@ -137,11 +155,12 @@ final case class StoreState(
   def erase(key: StoreKey, offset: Long): (StoreState, StoreApplied) = {
     val applied =
       StoreApplied.Accepted(
-        StoreChange.Deleted(key, records.get(key).fold(0L)(_.version), java.time.Instant.EPOCH)
+        StoreChange.Deleted(key, versionHeld(key).getOrElse(0L), java.time.Instant.EPOCH)
       )
     (
       copy(
         records = records - key,
+        concealed = concealed - key,
         lastAppliedOffset = math.max(lastAppliedOffset, offset),
         unreadable = unreadable - key
       ).withOutcome(offset, applied),
@@ -151,19 +170,39 @@ final case class StoreState(
 
   /** Records that one entry of the log could not be read.
     *
-    * The version is deliberately not advanced. An unreadable record is one this KUI cannot interpret, so it
-    * cannot know what version the key is at, and guessing would make the next legitimate write look like a
-    * lost race.
+    * When the envelope parsed, `knownVersion` is the version it carried. The payload stays hidden — `get` and
+    * `list` must not keep serving the record this one superseded — and the version counts, so the next
+    * readable record applies and a write based on the old version conflicts. Guessing a version that was not
+    * in the envelope would make the next legitimate write look like a lost race, so a record that did not
+    * parse leaves the version where it was.
+    *
+    * An envelope older than the version already held is a lost race, not a new fact. It does not rewind the
+    * key and it does not hide the newer record.
     */
-  def markUnreadable(key: StoreKey, offset: Long, reason: String): (StoreState, StoreApplied) = {
-    val applied = StoreApplied.Unreadable(key, reason)
-    (
-      copy(
-        lastAppliedOffset = math.max(lastAppliedOffset, offset),
-        unreadable = unreadable.updated(key, reason)
-      ).withOutcome(offset, applied),
-      applied
-    )
+  def markUnreadable(
+      key: StoreKey,
+      offset: Long,
+      reason: String,
+      knownVersion: Option[Long] = None
+  ): (StoreState, StoreApplied) = {
+    val advanced = copy(lastAppliedOffset = math.max(lastAppliedOffset, offset))
+    knownVersion match {
+      case Some(version) if versionHeld(key).exists(_ >= version) =>
+        val ignored = StoreApplied.Ignored(key, version, nextVersion(key))
+        (advanced.withOutcome(offset, ignored), ignored)
+      case Some(version) =>
+        val applied = StoreApplied.Unreadable(key, reason)
+        val hidden = advanced.copy(
+          records = records - key,
+          concealed = concealed.updated(key, version),
+          unreadable = unreadable.updated(key, reason)
+        )
+        (hidden.withOutcome(offset, applied), applied)
+      case None =>
+        val applied = StoreApplied.Unreadable(key, reason)
+        val marked = advanced.copy(unreadable = unreadable.updated(key, reason))
+        (marked.withOutcome(offset, applied), applied)
+    }
   }
 
   def unreadableKeys: List[StoreKey] = unreadable.keys.toList.sortBy(_.render)

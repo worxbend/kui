@@ -170,15 +170,37 @@ final class StoreStateSuite extends KuiSuite {
   }
 
   test("unreadableRecordDoesNotAdvanceTheVersion") {
-    // KUI cannot know what version an unreadable record put the key at, and guessing would make the next
-    // legitimate write look like a lost race.
+    // The envelope did not parse, so the version is not known. Guessing one would make the next legitimate
+    // write look like a lost race. A decrypt failure is different: that envelope did parse, and its version
+    // is kept by `anUndecryptableEnvelopeHidesTheRecordItSupersedes`.
     val state = fold(StoreState.empty, List(record(key, 1L) -> 0L))
-    val (after, applied) = state.markUnreadable(key, 1L, "the field 'password' could not be decrypted")
-    assertEquals(applied, StoreApplied.Unreadable(key, "the field 'password' could not be decrypted"))
+    val (after, applied) = state.markUnreadable(key, 1L, "it is not valid JSON")
+    assertEquals(applied, StoreApplied.Unreadable(key, "it is not valid JSON"))
     assertEquals(after.nextVersion(key), 2L)
+    assertEquals(after.get(key).map(_.version), Some(1L))
     assertEquals(after.unreadableKeys, List(key))
     // A later readable record for the same key clears the mark.
     assertEquals(after.apply(record(key, 2L), 2L)._1.unreadableKeys, Nil)
+  }
+
+  test("anUndecryptableEnvelopeHidesTheRecordItSupersedes") {
+    val state = fold(StoreState.empty, List(record(key, 1L) -> 0L))
+    val (hidden, applied) = state.markUnreadable(key, 1L, "could not be decrypted", Some(2L))
+    assertEquals(applied, StoreApplied.Unreadable(key, "could not be decrypted"))
+    assertEquals(hidden.get(key), None)
+    assertEquals(hidden.concealedVersion(key), Some(2L))
+    assertEquals(hidden.nextVersion(key), 3L)
+    assertEquals(hidden.unreadableKeys, List(key))
+    val (restored, next) = hidden.apply(record(key, 3L), 2L)
+    assert(next.isInstanceOf[StoreApplied.Accepted])
+    assertEquals(restored.get(key).map(_.version), Some(3L))
+    assertEquals(restored.unreadableKeys, Nil)
+    assertEquals(restored.concealedVersion(key), None)
+    // An older undecryptable envelope does not rewind a newer readable record.
+    val (kept, stale) = restored.markUnreadable(key, 3L, "could not be decrypted", Some(2L))
+    assertEquals(stale, StoreApplied.Ignored(key, 2L, 4L))
+    assertEquals(kept.get(key).map(_.version), Some(3L))
+    assertEquals(kept.unreadableKeys, Nil)
   }
 
   property("lastAppliedOffsetIsMonotonic") {

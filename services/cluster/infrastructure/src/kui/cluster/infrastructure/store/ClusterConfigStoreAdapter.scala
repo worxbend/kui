@@ -32,26 +32,46 @@ final class ClusterConfigStoreAdapter[F[_]: Async] private (
 ) extends ClusterConfigStore[F] {
 
   def list: F[Either[KuiError, List[ClusterProfile]]] =
-    store
-      .list(StoreSection.Cluster)
-      .flatMap(_.traverse(decoded))
-      // An empty store is `Right(Nil)`: a normal first start, and not something to report as a failure.
-      .map(profiles => Right(profiles.flatten))
+    store.health.flatMap { health =>
+      val hidden = health.unreadableKeys.filter(_.section == StoreSection.Cluster).toSet
+      store.list(StoreSection.Cluster).flatMap { records =>
+        // One unreadable key is not an outage: the other clusters still load. The key itself is not
+        // returned as a profile, because the payload could not be read and the previous one is stale.
+        val (blocked, readable) = records.partition(record => hidden.contains(record.key))
+        val absent = (hidden -- records.iterator.map(_.key).toSet).toList
+        (blocked.map(_.key) ++ absent).distinct
+          .traverse_(key =>
+            logger.error(s"skipping the stored cluster '${key.render}': the stored record could not be read")
+          ) *> readable
+          .traverse(decoded)
+          // An empty store is `Right(Nil)`: a normal first start, and not something to report as a failure.
+          .map(profiles => Right(profiles.flatten))
+      }
+    }
 
   def get(id: ClusterId): F[Either[KuiError, Option[ClusterProfile]]] =
     ClusterConfigStoreAdapter.keyFor(id) match {
       case Left(error) => Async[F].pure(Left(error))
       case Right(key) =>
-        store.get(key).map {
-          case None => Right(None)
-          // A single `get` names one record the caller asked for by id, so a decode failure is a `Left`
-          // here even though it is a skip inside `list`. The caller asked about *this* record, and
-          // answering "there is no such cluster" would send them to create a duplicate.
-          case Some(record) =>
-            decodeRecord(record).bimap(
-              why => StoreErrorMapping.undecodable(record.key.render, why),
-              Some.apply
+        store.health.flatMap { health =>
+          if health.unreadableKeys.contains(key) then
+            // The record may also be absent from `get`: a decrypt failure hides it. Answering "there is
+            // no such cluster" would send the caller to create a duplicate over a key the log still holds.
+            Async[F].pure(
+              Left(StoreErrorMapping.undecodable(key.render, "the stored record could not be read"))
             )
+          else
+            store.get(key).map {
+              case None => Right(None)
+              // A single `get` names one record the caller asked for by id, so a decode failure is a `Left`
+              // here even though it is a skip inside `list`. The caller asked about *this* record, and
+              // answering "there is no such cluster" would send them to create a duplicate.
+              case Some(record) =>
+                decodeRecord(record).bimap(
+                  why => StoreErrorMapping.undecodable(record.key.render, why),
+                  Some.apply
+                )
+            }
         }
     }
 
