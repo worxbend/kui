@@ -4,6 +4,7 @@ import {
   PLAINTEXT,
   SASL_SSL,
   SSL,
+  formFor,
   isSasl,
   isTls,
   suggestId,
@@ -124,6 +125,34 @@ describe("the cluster form", () => {
     expect(suggestId("  Production!  ")).toBe("production");
     // Never a trailing hyphen, which the server's pattern refuses.
     expect(suggestId("orders --")).toBe("orders");
+  });
+
+  it("keeps a stored decision not to verify the broker hostname", () => {
+    /*
+     * formFor used to spread EMPTY_CLUSTER_FORM, so verifyHostname was always true. An SSL cluster
+     * saved with the box unticked came back ticked, and the next save turned verification on.
+     */
+    const form = formFor({
+      id: "orders-prod",
+      name: "Orders Prod",
+      bootstrapServers: "b:9092",
+      readOnly: false,
+      security: { protocol: SSL, mechanism: null, verifyHostname: false },
+    });
+    expect(form.verifyHostname).toBe(false);
+  });
+
+  it("does not turn hostname verification off when the read model omitted it", () => {
+    // Absent is not a stored `false`. Treating it as one would disable verification on every
+    // cluster the public read model describes, which is all of them today.
+    const form = formFor({
+      id: "orders-prod",
+      name: "Orders Prod",
+      bootstrapServers: "b:9092",
+      readOnly: false,
+      security: { protocol: SSL, mechanism: null },
+    });
+    expect(form.verifyHostname).toBe(true);
   });
 
   it("defaults the admin numbers rather than leaving them blank", () => {

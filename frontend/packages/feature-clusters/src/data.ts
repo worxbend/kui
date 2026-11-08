@@ -517,7 +517,20 @@ export interface ManagedClusterRow {
    * was never read.
    */
   readonly version: number | undefined;
-  readonly security: { readonly protocol: string; readonly mechanism: string | null };
+  readonly security: {
+    readonly protocol: string;
+    readonly mechanism: string | null;
+    /** From the read model. Absent or false means this screen did not see a configured store. */
+    readonly truststoreConfigured?: boolean;
+    readonly keystoreConfigured?: boolean;
+    /**
+     * The stored hostname-verification choice, when the response carried one.
+     *
+     * The public read model does not send it today. Absent is not `false`: the edit form shows the
+     * default and says so, rather than pretending the box is the record.
+     */
+    readonly verifyHostname?: boolean;
+  };
 }
 
 /** The three origins the cluster registry distinguishes, plus what an unknown word becomes. */
@@ -567,7 +580,13 @@ interface ManagedRowPayload {
   readonly readOnly: boolean;
   readonly origin?: string | null;
   readonly version?: number | null;
-  readonly security?: { readonly protocol?: string; readonly mechanism?: string | null };
+  readonly security?: {
+    readonly protocol?: string;
+    readonly mechanism?: string | null;
+    readonly truststoreConfigured?: boolean;
+    readonly keystoreConfigured?: boolean;
+    readonly verifyHostname?: boolean;
+  };
 }
 
 export async function fetchManagedClusters(
@@ -598,6 +617,13 @@ export async function fetchManagedClusters(
         security: {
           protocol: row.security?.protocol ?? "PLAINTEXT",
           mechanism: row.security?.mechanism ?? null,
+          truststoreConfigured: row.security?.truststoreConfigured === true,
+          keystoreConfigured: row.security?.keystoreConfigured === true,
+          // Kept when a response carries it. The public read model does not, yet; dropping it here
+          // would put the checkbox back to the default the moment the field is added.
+          ...(typeof row.security?.verifyHostname === "boolean"
+            ? { verifyHostname: row.security.verifyHostname }
+            : {}),
         },
       })),
   );

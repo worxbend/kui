@@ -3,11 +3,15 @@
  *
  * ## What this form deliberately cannot do
  *
- * It cannot supply a truststore or a keystore. Those are configuration-file only, and that is a real
- * gap named here rather than papered over: a textarea for a base64 keystore is not a usable way to
- * give KUI a certificate, and the file upload that would be is a piece of work in its own right.
- * `SSL` and `SASL_SSL` against a cluster whose certificate the JVM's default trust store already
- * accepts — which is every managed service — work from this form today.
+ * It cannot supply a truststore or a keystore. Those are configuration-file or API only, and that
+ * is a real gap named here rather than papered over: a textarea for a base64 keystore is not a
+ * usable way to give KUI a certificate, and the file upload that would be is a piece of work in
+ * its own right. `SSL` and `SASL_SSL` against a cluster whose certificate the JVM's default trust
+ * store already accepts — which is every managed service — work from this form today. A record
+ * that already has a store must not be saved from here: a `PUT` replaces the profile, and this
+ * form would send neither store. Client properties and, unless the row carried it, hostname
+ * verification are the same kind of gap — the screen says so instead of pretending the defaults
+ * are what is stored.
  *
  * ## Every reason, not the first one
  *
@@ -236,7 +240,34 @@ export const PASSWORD_WARNING =
 /** And what it says about the three admin numbers, for the same reason. */
 export const TUNING_WARNING =
   "The admin timeouts are not on the read model, so these show the defaults rather than what is " +
-  "stored. Saving writes whatever is in these boxes.";
+  "stored. Saving writes whatever is in these boxes. Hostname verification is the same when the " +
+  "row did not carry it: the checkbox starts at the default (on).";
+
+/**
+ * Shown beside the hostname checkbox when the row did not say what is stored.
+ *
+ * The public read model has no `verifyHostname`. Leaving the box pre-ticked with no sentence made
+ * an edit turn verification back on for brokers addressed by IP.
+ */
+export const HOSTNAME_WARNING =
+  "Hostname verification is not on the read model, so this box starts at the default (on) rather " +
+  "than what is stored. Saving writes whatever is ticked.";
+
+/**
+ * Shown on every edit. The read model does not say whether client properties exist, and a `PUT`
+ * replaces the map, so an empty object here removes any that were stored.
+ */
+export const PROPERTIES_WARNING =
+  "Client properties are not on the read model. Saving writes an empty property map and removes " +
+  "any that were stored.";
+
+/**
+ * Why Save is refused. The read model does say whether a truststore or a keystore is configured,
+ * and this form cannot send either back.
+ */
+export const STORES_WARNING =
+  "This cluster has a truststore or a client keystore configured. This form cannot supply either, " +
+  "and saving would remove them, so Save is disabled.";
 
 /** The form for an existing cluster: everything the read model carries, and defaults for the rest. */
 export function formFor(row: {
@@ -245,8 +276,15 @@ export function formFor(row: {
   readonly bootstrapServers: string;
   readonly readOnly: boolean;
   readonly security?:
-    { readonly protocol?: string; readonly mechanism?: string | null } | undefined;
+    | {
+        readonly protocol?: string;
+        readonly mechanism?: string | null;
+        /** Present only when the read model carried the stored choice. Absent is not `false`. */
+        readonly verifyHostname?: boolean;
+      }
+    | undefined;
 }): ClusterForm {
+  const verifyHostname = row.security?.verifyHostname;
   return {
     ...EMPTY_CLUSTER_FORM,
     id: row.id,
@@ -255,5 +293,7 @@ export function formFor(row: {
     readOnly: row.readOnly,
     protocol: row.security?.protocol ?? PLAINTEXT,
     mechanism: row.security?.mechanism ?? EMPTY_CLUSTER_FORM.mechanism,
+    // `false` is a stored choice. Missing is the default, and the screen says the box is not the record.
+    ...(typeof verifyHostname === "boolean" ? { verifyHostname } : {}),
   };
 }

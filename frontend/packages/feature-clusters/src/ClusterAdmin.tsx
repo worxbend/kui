@@ -38,8 +38,11 @@ import {
 } from "@kui/kernel";
 import {
   MECHANISMS,
+  HOSTNAME_WARNING,
   PASSWORD_WARNING,
+  PROPERTIES_WARNING,
   PROTOCOLS,
+  STORES_WARNING,
   TUNING_WARNING,
   isSasl,
   isTls,
@@ -59,7 +62,14 @@ export interface ManagedCluster {
   readonly origin: ClusterOrigin;
   /** The optimistic-concurrency version, sent back as `If-Match`. */
   readonly version: number | undefined;
-  readonly security: { readonly protocol: string; readonly mechanism: string | null };
+  readonly security: {
+    readonly protocol: string;
+    readonly mechanism: string | null;
+    readonly truststoreConfigured?: boolean;
+    readonly keystoreConfigured?: boolean;
+    /** Absent when the read model did not say. That is not the same as verification being off. */
+    readonly verifyHostname?: boolean;
+  };
 }
 
 /** What a connection test came back with. */
@@ -107,6 +117,42 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
     const answer = toRequest(current.form);
     return answer.ok ? [] : answer.problems;
   };
+
+  /** The record being edited, when this screen still has it. An add has no record. */
+  const editingRecord = () => {
+    const id = props.editing?.id;
+    if (id === undefined) return undefined;
+    return props.clusters.find((cluster) => cluster.id === id);
+  };
+
+  /**
+   * A `PUT` replaces the profile. This form never sends a truststore or a keystore, so saving a
+   * cluster that has one would remove it. The read model already reports the flags.
+   */
+  const storesAtRisk = (): boolean => {
+    const security = editingRecord()?.security;
+    return security?.truststoreConfigured === true || security?.keystoreConfigured === true;
+  };
+
+  const hostnameUnknown = (): boolean => {
+    const editing = props.editing;
+    if (editing === undefined || editing.id === undefined || !isTls(editing.form)) return false;
+    return typeof editingRecord()?.security.verifyHostname !== "boolean";
+  };
+
+  const cannotSave = (): boolean =>
+    props.disabledReason !== undefined ||
+    problems().length > 0 ||
+    storesAtRisk() ||
+    props.saveState.kind === "running";
+
+  const saveReason = (): string =>
+    props.disabledReason ??
+    (storesAtRisk()
+      ? STORES_WARNING
+      : props.saveState.kind === "running"
+        ? "The cluster is being saved."
+        : (problems()[0] ?? "This form is not complete."));
 
   const failure = (state: Mutation<unknown>) =>
     state.kind === "failed" || state.kind === "forbidden" ? state : undefined;
@@ -244,7 +290,10 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
               class="kui-cluster-admin__form"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (props.disabledReason === undefined && props.saveState.kind !== "running") props.onSave();
+                // Enter submits the form even when Save is only aria-disabled. The same guard as
+                // the button: an invalid form, a missing permission, or a store this form would
+                // delete.
+                if (!cannotSave()) props.onSave();
               }}
             >
               <TextField
@@ -347,13 +396,17 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
                     props.onFormChange({ ...current().form, verifyHostname })
                   }
                 />
+                <Show when={hostnameUnknown()}>
+                  <p class="kui-cluster-admin__help">{HOSTNAME_WARNING}</p>
+                </Show>
                 <p class="kui-cluster-admin__help">
                   {/* Named rather than left to be discovered at save time: this form cannot supply a
                       truststore or a keystore, and that is a real gap. A textarea for a base64
                       keystore is not a usable way to give KUI a certificate. */}
                   A certificate the JVM's default trust store already accepts — which is every
-                  managed service — works from this form. A private certificate authority has to be
-                  configured in the deployment's file.
+                  managed service — works from this form. This form cannot supply a truststore or a
+                  keystore. One already configured is not removed: Save is refused while the read
+                  model says one is there.
                 </p>
               </Show>
 
@@ -379,6 +432,13 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
                   onInput={(parallelism) => props.onFormChange({ ...current().form, parallelism })}
                 />
               </details>
+
+              <Show when={current().id !== undefined}>
+                <p class="kui-cluster-admin__help">{PROPERTIES_WARNING}</p>
+              </Show>
+              <Show when={storesAtRisk()}>
+                <Banner tone="warning" message={STORES_WARNING} />
+              </Show>
 
               {/* Every reason at once. Somebody who got three fields wrong should be told about all
                   three rather than discovering them one save at a time. */}
@@ -436,18 +496,14 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
                   </Button>
                 </Show>
                 <Show
-                  when={props.disabledReason === undefined && problems().length === 0 && props.saveState.kind !== "running"}
+                  when={!cannotSave()}
                   fallback={
                     <Button
                       variant="primary"
                       icon="check"
                       busy={props.saveState.kind === "running"}
                       disabled
-                      disabledReason={
-                        props.disabledReason ?? (props.saveState.kind === "running"
-                          ? "The cluster is being saved."
-                          : (problems()[0] ?? "This form is not complete."))
-                      }
+                      disabledReason={saveReason()}
                     >
                       Save
                     </Button>

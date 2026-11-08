@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { KuiApiClient } from "@kui/api";
-import { fetchBrokers, fetchClusterDisks, fetchClusters, healthOf } from "./data.js";
+import { fetchBrokers, fetchClusterDisks, fetchClusters, fetchManagedClusters, healthOf } from "./data.js";
 
 /**
  * The cluster feature's data layer.
@@ -168,6 +168,88 @@ describe("fetchClusters", () => {
     if (answer.kind === "ready") {
       expect(answer.value[0]?.observedAt).toBeNull();
     }
+  });
+});
+
+describe("fetchManagedClusters", () => {
+  it("keeps whether a truststore or a keystore is configured", async () => {
+    /*
+     * The read model already says so. Dropping the flags made an edit look like a cluster with no
+     * stores, and Save then replaced the profile without them.
+     */
+    const answer = await fetchManagedClusters(
+      client({
+        clusters: {
+          status: "ok",
+          fetchedAt: "2026-09-05T12:00:00Z",
+          data: [
+            {
+              cluster: {
+                id: "edge",
+                name: "Edge",
+                readOnly: false,
+                bootstrapServers: "10.0.0.8:9093",
+                origin: "stored",
+                version: 2,
+                security: {
+                  protocol: "SSL",
+                  mechanism: null,
+                  truststoreConfigured: true,
+                  keystoreConfigured: false,
+                },
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(answer.kind).toBe("ready");
+    if (answer.kind !== "ready") return;
+    expect(answer.value[0]?.security.truststoreConfigured).toBe(true);
+    expect(answer.value[0]?.security.keystoreConfigured).toBe(false);
+    // Not sent by the public read model. The mapper must not invent `false` for a field it did
+    // not see: that is a stored choice, and the form treats absent as "unknown".
+    expect(answer.value[0]?.security.verifyHostname).toBeUndefined();
+  });
+
+  it("keeps a hostname-verification choice when a response carries one", async () => {
+    /*
+     * `ClusterSecurityDto` does not include `verifyHostname` yet. The mapper still copies a
+     * boolean when one is present, so adding the field server-side does not come back as the
+     * default `true` on the next edit.
+     */
+    const answer = await fetchManagedClusters(
+      client({
+        clusters: {
+          status: "ok",
+          fetchedAt: "2026-09-05T12:00:00Z",
+          data: [
+            {
+              cluster: {
+                id: "edge",
+                name: "Edge",
+                readOnly: false,
+                bootstrapServers: "10.0.0.8:9093",
+                origin: "stored",
+                version: 2,
+                security: {
+                  protocol: "SSL",
+                  mechanism: null,
+                  truststoreConfigured: false,
+                  keystoreConfigured: false,
+                  verifyHostname: false,
+                },
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(answer.kind).toBe("ready");
+    if (answer.kind !== "ready") return;
+    expect(answer.value[0]?.security.verifyHostname).toBe(false);
   });
 });
 

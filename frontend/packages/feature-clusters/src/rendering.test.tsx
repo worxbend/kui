@@ -41,7 +41,7 @@ import { BrokersScreen } from "./BrokersScreen.jsx";
 import { ClusterList } from "./ClusterList.jsx";
 import { ClusterAdmin, type ManagedCluster } from "./ClusterAdmin.jsx";
 import Clusters from "./ClustersRoute.jsx";
-import { EMPTY_CLUSTER_FORM, suggestId } from "./clusterForm.js";
+import { EMPTY_CLUSTER_FORM, HOSTNAME_WARNING, PROPERTIES_WARNING, suggestId } from "./clusterForm.js";
 import { SAMPLE_BROKERS, SAMPLE_CLUSTERS, SAMPLE_CONFIGS, SAMPLE_LOG_DIRS } from "./fixtures.js";
 import type { Broker } from "./model.js";
 
@@ -549,6 +549,73 @@ describe("managing which clusters KUI knows about", () => {
     // And the id the mutation would have written, so the case cannot pass by the suggestion being
     // equal to what was there.
     expect(suggestId("Spare cluster")).toBe("spare-cluster");
+    dispose();
+  });
+
+  it("will not save over a cluster whose truststore this form cannot keep", async () => {
+    /*
+     * No confirmation has been given. The row already says a truststore is configured. Save used
+     * to be enabled and the request carried neither store, so the next PUT removed it.
+     */
+    const withStore: ManagedCluster = {
+      ...stored,
+      id: "edge",
+      name: "Edge",
+      security: { protocol: "SSL", mechanism: null, truststoreConfigured: true, keystoreConfigured: false },
+    };
+    const form = {
+      ...EMPTY_CLUSTER_FORM,
+      id: "edge",
+      name: "Edge",
+      bootstrapServers: "10.0.0.8:9093",
+      protocol: "SSL",
+    };
+    const { container, dispose } = admin([withStore], { id: "edge", form });
+    await flush();
+    expect(container.textContent).toMatch(/truststore/i);
+    const save = [...container.querySelectorAll("button")].find(
+      (one) => (one.textContent ?? "").trim() === "Save",
+    ) as HTMLButtonElement;
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonUnder(save)).toMatch(/truststore/i);
+    dispose();
+
+    // A keystore alone is the same refusal. The flags are independent on the read model.
+    const withKey: ManagedCluster = {
+      ...withStore,
+      security: { protocol: "SSL", mechanism: null, truststoreConfigured: false, keystoreConfigured: true },
+    };
+    const keyOnly = admin([withKey], { id: "edge", form });
+    await flush();
+    const keySave = [...keyOnly.container.querySelectorAll("button")].find(
+      (one) => (one.textContent ?? "").trim() === "Save",
+    ) as HTMLButtonElement;
+    expect(keySave.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonUnder(keySave)).toMatch(/keystore/i);
+    keyOnly.dispose();
+  });
+
+  it("says an edit is showing defaults for hostname verification and properties", async () => {
+    /*
+     * The public read model carries neither. The checkbox used to render pre-ticked with no
+     * sentence, and Save wrote `verifyHostname: true` and `properties: {}`.
+     */
+    const ssl: ManagedCluster = { ...stored, security: { protocol: "SSL", mechanism: null } };
+    const form = {
+      ...EMPTY_CLUSTER_FORM,
+      id: "spare",
+      name: "spare",
+      bootstrapServers: "spare:9092",
+      protocol: "SSL",
+    };
+    const { container, dispose } = admin([ssl], { id: "spare", form });
+    await flush();
+    expect(container.textContent).toContain(HOSTNAME_WARNING);
+    expect(container.textContent).toContain(PROPERTIES_WARNING);
+    const box = [...container.querySelectorAll("input")].find(
+      (one) => one.getAttribute("type") === "checkbox" && one.checked,
+    );
+    expect(box).toBeDefined();
     dispose();
   });
 
