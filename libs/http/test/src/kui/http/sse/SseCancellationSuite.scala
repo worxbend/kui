@@ -71,11 +71,14 @@ final class SseCancellationSuite extends CatsEffectSuite {
           // Read for a moment, then abandon the request. Cancelling the effect is what a browser
           // closing a tab does to the connection underneath.
           reading <- server.get("/stream").start
-          _ <- IO.sleep(500.milliseconds)
+          // An emission is the proof the request started streaming. A fixed sleep can expire
+          // before that, and the counts below then stay zero without a disconnect ever happening.
+          _ <- emitted.get.iterateUntil(_ > 0).timeout(5.seconds)
           _ <- reading.cancel
           // The source registers a finaliser; the flag flipping is the source itself being torn
-          // down, not merely the response being abandoned.
-          cancelled <- finalised.get.timeoutTo(1.second, IO.pure(())).attempt
+          // down, not merely the response being abandoned. `timeout` fails the wait, whereas a
+          // successful fallback would make the attempt succeed either way.
+          cancelled <- finalised.get.timeout(2.seconds).attempt
           _ <- IO.sleep(100.milliseconds)
           before <- emitted.get
           _ <- IO.sleep(300.milliseconds)
@@ -85,7 +88,10 @@ final class SseCancellationSuite extends CatsEffectSuite {
     } yield torn
 
     program.map { (cancelled, before, after) =>
-      assert(cancelled.isRight, "the source was never finalised after the client went away")
+      assert(
+        cancelled.isRight,
+        s"the source was never finalised after the client went away: $cancelled"
+      )
       assertEquals(after, before, "the source kept producing after the client had disconnected")
     }
   }
@@ -124,10 +130,12 @@ final class SseCancellationSuite extends CatsEffectSuite {
       }
       // The resource has closed, which stops the server. Any stream still open has to end with it
       // rather than hold the process open.
-      cancelled <- finalised.get.timeoutTo(2.seconds, IO.pure(())).attempt
+      cancelled <- finalised.get.timeout(2.seconds).attempt
     } yield cancelled
 
-    program.map(cancelled => assert(cancelled.isRight, "a stream outlived the server that served it"))
+    program.map { cancelled =>
+      assert(cancelled.isRight, s"a stream outlived the server that served it: $cancelled")
+    }
   }
 
   test("a terminating stream ends the response rather than hanging on a heartbeat") {
