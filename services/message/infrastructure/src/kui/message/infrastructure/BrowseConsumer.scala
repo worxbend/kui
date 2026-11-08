@@ -6,6 +6,18 @@ import kui.kernel.error.KuiError
 import kui.kernel.{PartitionId, TopicName}
 import kui.message.application.RawRecord
 
+/** One partition `partitionsFor` reported, and whether it currently has a leader.
+  *
+  * `leader` is false when the broker's `PartitionInfo.leader` is null or `Node.noNode` (`id < 0`).
+  * An offset call that includes such a partition retries metadata until `default.api.timeout.ms` —
+  * sixty seconds — and then fails the whole call, including partitions that already answered.
+  */
+final case class PartitionView(id: PartitionId, leader: Boolean)
+
+object PartitionView {
+  given CanEqual[PartitionView, PartitionView] = CanEqual.derived
+}
+
 /** The handful of consumer operations a browse actually uses, as an interface.
   *
   * ==Why this exists rather than a Kafka consumer passed around==
@@ -27,8 +39,10 @@ import kui.message.application.RawRecord
   */
 trait BrowseConsumer[F[_]] {
 
-  /** Every partition of the topic, in whatever order the broker reports them. */
-  def partitions(topic: TopicName): F[Either[KuiError, List[PartitionId]]]
+  /** Every partition of the topic, in whatever order the broker reports them, including ones with
+    * no leader. The caller drops the leaderless ones before any offset call.
+    */
+  def partitions(topic: TopicName): F[Either[KuiError, List[PartitionView]]]
 
   /** The oldest offset each partition still holds — not zero on a topic that retention or compaction has
     * trimmed, which is why it is asked for rather than assumed.

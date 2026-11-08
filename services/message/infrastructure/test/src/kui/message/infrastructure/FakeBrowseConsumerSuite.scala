@@ -83,7 +83,8 @@ final class FakeBrowseConsumerSuite extends KuiIOSuite {
       positions <- consumer.positions
       empty <- consumer.poll(1.milli)
     } yield {
-      assertEquals(ids.toOption.get, List(p0, p1))
+      assertEquals(ids.toOption.get.map(_.id), List(p0, p1))
+      assert(ids.toOption.get.forall(_.leader))
       assertEquals(begin.toOption.get, Map(p0 -> 5L, p1 -> 20L))
       assertEquals(end.toOption.get, Map(p0 -> 12L, p1 -> 25L))
       assertEquals(batch.toOption.get.map(_.offset.value), List(7L, 9L))

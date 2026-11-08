@@ -45,8 +45,13 @@ final class FakeBrowseConsumer(
       }
     )
 
-  def partitions(topic: TopicName): IO[Either[KuiError, List[PartitionId]]] =
-    log.get.map(current => (current.keySet ++ retainedBounds.keySet).toList.sortBy(_.value).asRight[KuiError])
+  def partitions(topic: TopicName): IO[Either[KuiError, List[PartitionView]]] =
+    log.get.map(current =>
+      (current.keySet ++ retainedBounds.keySet).toList
+        .sortBy(_.value)
+        .map(id => PartitionView(id, leader = true))
+        .asRight[KuiError]
+    )
 
   def beginningOffsets(
       topic: TopicName,

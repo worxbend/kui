@@ -9,7 +9,7 @@ import cats.effect.kernel.{Deferred, Ref, Resource}
 import cats.syntax.all.*
 
 import kui.kernel.browse.{Direction, PollBudget, SeekMode}
-import kui.kernel.error.KuiError
+import kui.kernel.error.{ErrorCode, KuiError}
 import kui.kernel.serde.{PayloadKind, SerdeName, SerdeUse, Target}
 import kui.kernel.{ClusterId, Offset, PartitionId, Secret, TopicName}
 import kui.message.application.cursor.CursorCodec
@@ -1009,6 +1009,92 @@ final class KafkaRecordSourceSuite extends KuiIOSuite {
       wasClosed <- closed.get
     } yield assert(wasClosed, "the consumer was still open after the tail was cancelled")
   }
+
+  test("a leaderless partition is left out of offset lookups") {
+    val offline = PartitionId.unsafe(1)
+    val log = Map(FakeBrowseConsumer.partition(0, 2), FakeBrowseConsumer.partition(1, 2))
+
+    for {
+      asked <- Ref.of[IO, List[PartitionId]](Nil)
+      underlying <- FakeBrowseConsumer.of(log)
+      consumer = offsetGate(underlying, asked, hangOn = Set(offline))
+      source = new KafkaRecordSource[IO](
+        (_, _) => Resource.pure(Right(consumer)),
+        BrowseTuning(pollTimeout = 1.milli, emptyPollsBeforeEnd = 0)
+      )
+      records <- source
+        .browse(request(SeekMode.Beginning, Direction.Forward, 10), budget)
+        .compile
+        .toList
+        .timeout(1.second)
+      lookedUp <- asked.get
+    } yield {
+      assertEquals(offsets(records), List((0, 0L), (0, 1L)))
+      assert(!lookedUp.contains(offline), clues(lookedUp))
+    }
+  }
+
+  test("an unknown explicit partition is rejected before any offset lookup") {
+    val log = Map(FakeBrowseConsumer.partition(0, 2), FakeBrowseConsumer.partition(1, 2))
+
+    for {
+      asked <- Ref.of[IO, List[PartitionId]](Nil)
+      underlying <- FakeBrowseConsumer.of(log)
+      consumer = offsetGate(underlying, asked, hangOn = Set(PartitionId.unsafe(7)))
+      source = new KafkaRecordSource[IO](
+        (_, _) => Resource.pure(Right(consumer)),
+        BrowseTuning(pollTimeout = 1.milli, emptyPollsBeforeEnd = 0)
+      )
+      records <- source
+        .browse(
+          request(
+            SeekMode.Beginning,
+            Direction.Forward,
+            10,
+            partitions = Some(Set(PartitionId.unsafe(7)))
+          ),
+          budget
+        )
+        .compile
+        .toList
+        .timeout(1.second)
+      lookedUp <- asked.get
+    } yield {
+      assertEquals(lookedUp, Nil)
+      val refusal = records.collect { case Left(error) => error }
+      assertEquals(refusal.map(_.code), List(ErrorCode.Validation))
+      assert(refusal.headOption.exists(_.message.contains("numbered 0 to 1")), records.toString)
+      assert(records.forall(_.isLeft))
+    }
+  }
+
+  /** Sleeps for a minute when an offset call names a partition in `hangOn`, which is what the real
+    * client does for a leaderless or missing partition.
+    */
+  private def offsetGate(
+      underlying: FakeBrowseConsumer,
+      asked: Ref[IO, List[PartitionId]],
+      hangOn: Set[PartitionId]
+  ): BrowseConsumer[IO] =
+    new BrowseConsumer[IO] {
+      def partitions(topic: TopicName) =
+        underlying.partitions(topic).map(_.map(_.map(view => view.copy(leader = !hangOn.contains(view.id)))))
+
+      private def gate(ids: List[PartitionId]): IO[Unit] =
+        asked.update(_ ++ ids) *> IO.sleep(60.seconds).whenA(ids.exists(hangOn.contains))
+
+      def beginningOffsets(topic: TopicName, ids: List[PartitionId]) =
+        gate(ids) *> underlying.beginningOffsets(topic, ids)
+      def endOffsets(topic: TopicName, ids: List[PartitionId]) =
+        gate(ids) *> underlying.endOffsets(topic, ids)
+      def offsetsForTimes(topic: TopicName, ids: List[PartitionId], millis: Long) =
+        gate(ids) *> underlying.offsetsForTimes(topic, ids, millis)
+      def assign(topic: TopicName, ids: List[PartitionId]) = underlying.assign(topic, ids)
+      def seek(topic: TopicName, partition: PartitionId, offset: Long) =
+        underlying.seek(topic, partition, offset)
+      def poll(timeout: scala.concurrent.duration.FiniteDuration) = underlying.poll(timeout)
+      def positions = underlying.positions
+    }
 
   // --------------------------------------------------------------------------------- cancellation
 

@@ -53,11 +53,18 @@ final class KafkaBrowseConsumer[F[_]: Async] private (
 
   import KafkaBrowseConsumer.*
 
-  def partitions(topic: TopicName): F[Either[KuiError, List[PartitionId]]] =
+  def partitions(topic: TopicName): F[Either[KuiError, List[PartitionView]]] =
     attempt("partitionsFor") {
       Option(consumer.partitionsFor(topic.value)).toList
         .flatMap(_.asScala.toList)
-        .map(info => PartitionId.unsafe(info.partition))
+        .map { info =>
+          // The same leader test as a purge plan. A null leader and `Node.noNode` (id -1) are
+          // both "do not ask this partition for offsets".
+          PartitionView(
+            PartitionId.unsafe(info.partition),
+            leader = Option(info.leader).exists(_.id >= 0)
+          )
+        }
     }.map {
       // An empty partition list means the broker has no such topic. It is a 404 and never an empty
       // page: "this topic does not exist" and "this topic has no records" send a user to different

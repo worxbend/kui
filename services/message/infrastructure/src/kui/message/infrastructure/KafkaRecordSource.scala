@@ -8,7 +8,7 @@ import cats.syntax.all.*
 import fs2.Stream
 
 import kui.kernel.browse.{Direction, IsolationLevel, PollBudget, SeekMode}
-import kui.kernel.error.KuiError
+import kui.kernel.error.{ApplicationError, FieldError, KuiError}
 import kui.kernel.{ClusterId, Offset, PartitionId, TopicName}
 import kui.message.application.{RawRecord, RecordSource, ScanCompletion, ScanEvent}
 import kui.message.domain.BrowseRequest
@@ -139,13 +139,19 @@ final class KafkaRecordSource[F[_]: Temporal](
     * built from, fetched once so neither has to ask the broker twice for the same answer.
     */
   private def resolvePlan(consumer: BrowseConsumer[F], request: BrowseRequest): EitherT[F, KuiError, Plan] =
-    for {
-      all <- selected(consumer, request)
-      chosen = named(request, all)
-      beginning <- EitherT(consumer.beginningOffsets(request.topic, chosen))
-      end <- EitherT(consumer.endOffsets(request.topic, chosen))
-      starts <- startOffsets(consumer, request, chosen, end)
-    } yield Plan(chosen, beginning, end, starts)
+    selected(consumer, request).flatMap { all =>
+      val chosen = named(request, all)
+      // An empty selection is a finished browse, not an offset call. The call is what hangs for
+      // sixty seconds when every remaining partition is leaderless, and an empty list still has
+      // to be kept off that path.
+      if chosen.isEmpty then EitherT.rightT[F, KuiError](Plan(Nil, Map.empty, Map.empty, Map.empty))
+      else
+        for {
+          beginning <- EitherT(consumer.beginningOffsets(request.topic, chosen))
+          end <- EitherT(consumer.endOffsets(request.topic, chosen))
+          starts <- startOffsets(consumer, request, chosen, end)
+        } yield Plan(chosen, beginning, end, starts)
+    }
 
   /** Turns a seek into a concrete half-open offset range per partition.
     *
@@ -211,10 +217,29 @@ final class KafkaRecordSource[F[_]: Temporal](
       consumer: BrowseConsumer[F],
       request: BrowseRequest
   ): EitherT[F, KuiError, List[PartitionId]] =
-    request.partitions match {
-      case Some(chosen) => EitherT.rightT[F, KuiError](chosen.toSortedSet.toList)
-      case None => EitherT(consumer.partitions(request.topic)).map(_.sortBy(_.value))
+    EitherT(consumer.partitions(request.topic)).flatMap { known =>
+      val led = known.filter(_.leader).map(_.id).sortBy(_.value)
+      request.partitions match {
+        case None => EitherT.rightT[F, KuiError](led)
+        case Some(chosen) =>
+          val asked = chosen.toSortedSet.toList
+          val knownIds = known.map(_.id).toSet
+          if asked.exists(id => !knownIds.contains(id)) then
+            EitherT.fromEither[F](unknownPartitions(request.topic, known.size).asLeft[List[PartitionId]])
+          else EitherT.rightT[F, KuiError](asked.filter(id => led.contains(id)))
+      }
     }
+
+  /** A partition number the topic does not have. Named against the real range so a typo is a
+    * validation error instead of a sixty-second metadata retry.
+    */
+  private def unknownPartitions(topic: TopicName, count: Int): KuiError = {
+    val last = math.max(count - 1, 0)
+    ApplicationError.Invalid(
+      s"topic ${topic.value} has $count partitions, numbered 0 to $last",
+      List(FieldError.of("partition", s"a partition between 0 and $last"))
+    )
+  }
 
   /** Where each partition starts, before clamping.
     *
