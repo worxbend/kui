@@ -14,8 +14,9 @@
  * That is a real loss and it is worth naming. Lag on its own does not answer the operator's actual
  * question, which is "is this getting better?" — a lag of two million falling at forty thousand a
  * second needs nothing, and a lag of nine hundred that is not moving needs attention now. The
- * answer is not to smuggle PACE back into a table the design does not draw it in; it is on the group
- * detail page, where there is room to print it with the word "per second" beside it.
+ * answer is not to smuggle PACE back into a table the design does not draw it in. The lag poll
+ * carries a server-measured rate for a client that asks for one; this table does not, and the
+ * detail endpoint does not either, so the detail page's PACE row stays unavailable.
  *
  * ## The count over the table is the cluster's, and the rows are one page of it
  *
@@ -393,8 +394,8 @@ function StateCell(props: { readonly row: GroupSummary }): JSX.Element {
  *   then read as the odd one out, which is backwards.
  * - The interesting quantity is not *that* the figure moved but which way and how fast, and this
  *   column cannot show that. A group falling from two million to one million and a group climbing
- *   from nine hundred to a thousand would get the same flash. The rate has a home already: PACE on
- *   the group detail page, printed with the words "per second" beside it.
+ *   from nine hundred to a thousand would get the same flash. The rate is not drawn here, and the
+ *   detail page cannot show it either: that endpoint does not carry a measured rate.
  * - The row is a link people click. A cell that repaints under a moving pointer every thirty seconds
  *   makes a table feel untrustworthy while telling nobody anything.
  *

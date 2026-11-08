@@ -85,6 +85,44 @@ final class GroupSnapshotsSuite extends KuiIOSuite {
     } yield assertEquals(result.map(_.incompleteCoordinators), Right(2))
   }
 
+  test("a held partition's first commit does not become a pace") {
+    // P1 is assigned and has never committed. Its first commit is the whole log in one interval.
+    // The partition set the pace guard compares has to be the partitions that were summed, or that
+    // first commit passes the "same set" check and renders as a spike.
+    val held = GroupFixtures.group(
+      id = "orders",
+      state = GroupState.Stable,
+      members = List(GroupFixtures.member("m-1", Set(0, 1))),
+      partitions = List(
+        GroupFixtures.state(0, Some(100L), end = Some(100L), memberId = Some("m-1")),
+        GroupFixtures.state(1, None, end = Some(5000000L), memberId = Some("m-1"))
+      )
+    )
+    val firstCommit = GroupFixtures.group(
+      id = "orders",
+      state = GroupState.Stable,
+      members = List(GroupFixtures.member("m-1", Set(0, 1))),
+      partitions = List(
+        GroupFixtures.state(0, Some(100L), end = Some(100L), memberId = Some("m-1")),
+        GroupFixtures.state(1, Some(5000000L), end = Some(5000000L), memberId = Some("m-1"))
+      )
+    )
+
+    for {
+      logger <- FakeStructuredLogger[IO]
+      port <- ConsumerRig.port(
+        ConsumerRig.PortState.Empty.copy(
+          listing = Right(ConsumerRig.listingOf(List(held))),
+          described = Right(Map(held.groupId -> held))
+        )
+      )
+      first <- GroupSnapshots.refreshOne[IO](port, None, logger, ConsumerRig.Cluster)
+      _ <- IO.sleep(1.second)
+      _ <- port.state.update(_.copy(described = Right(Map(firstCommit.groupId -> firstCommit))))
+      second <- GroupSnapshots.refreshOne[IO](port, first.toOption, logger, ConsumerRig.Cluster)
+    } yield assertEquals(second.map(_.summaries.head.pace), Right(None))
+  }
+
   test("pace is None on the first pass and a rate on the second") {
     val moved = ConsumerRig.group("orders", committed = 190L, end = 200L)
 

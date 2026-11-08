@@ -174,18 +174,25 @@ object GroupSnapshots {
     }
   }
 
-  /** Where this group's commits were, as one number, for the next pass to compare against. */
+  /** Where this group's commits were, as one number, for the next pass to compare against.
+    *
+    * The set is the partitions that contributed to the total, not every partition the group holds. A held
+    * partition with no commit adds nothing to the sum; leaving it in the set lets its first commit — often
+    * the whole log, in one interval — pass `LagMath.pace`'s "same set" guard and render as a spike.
+    */
   private def paceSampleOf(group: ConsumerGroup, at: Instant): LagMath.PaceSample = {
-    val committed = group.partitions.flatMap(_.committed.map(_.value))
+    val committed = group.subscriptions.flatMap { subscription =>
+      subscription.partitions.flatMap { state =>
+        state.committed.map { offset =>
+          kui.kernel.TopicPartition(subscription.topic, state.partition) -> offset.value
+        }
+      }
+    }
 
     LagMath.PaceSample(
       at = at,
-      committedTotal = Option.when(committed.nonEmpty)(committed.sum),
-      partitions = group.subscriptions
-        .flatMap(subscription =>
-          subscription.partitions.map(state => kui.kernel.TopicPartition(subscription.topic, state.partition))
-        )
-        .toSet
+      committedTotal = Option.when(committed.nonEmpty)(committed.map(_._2).sum),
+      partitions = committed.map(_._1).toSet
     )
   }
 

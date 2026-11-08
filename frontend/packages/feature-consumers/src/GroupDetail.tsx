@@ -253,9 +253,9 @@ function describeHeld(count: number): string {
  * The strip of facts under the title.
  *
  * Each is a label and a value, and a value that is not known is an em dash with a reason — never a
- * blank and never a zero. `pace` is here rather than in the list's table (see `GroupList`): this is
- * where there is room to print the words "records per second" beside it, which is what makes the
- * figure mean anything.
+ * blank and never a zero. The PACE row is where a rate would be printed, with the words "records
+ * per second" beside it. The detail endpoint does not send one — `fetchGroup` leaves `pace` null —
+ * so the row stays unavailable rather than inventing a rate from how often the page was reloaded.
  */
 function Facts(props: { readonly group: Group }): JSX.Element {
   const facts = createMemo<readonly { readonly label: string; readonly value: JSX.Element; readonly title?: string | undefined }[]>(() => [

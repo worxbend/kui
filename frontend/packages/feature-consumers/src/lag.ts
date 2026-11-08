@@ -78,9 +78,9 @@ export interface LagUpdate {
    * Records per second, when the server has two observations to derive it from.
    *
    * Carried through the mapping and deliberately not put on the list's rows: `GroupList` draws six
-   * columns and PACE is not one of them, and its header explains why. It is here so that a screen
-   * which does want it — the group detail page — can be given a measured rate rather than one this
-   * browser computed from two page loads.
+   * columns and PACE is not one of them, and its header explains why. The group detail endpoint
+   * does not carry this figure, so the detail page cannot show it; it is on the delta so a client
+   * can use the server's rate rather than one computed from two page loads.
    */
   readonly pace: number | null;
 }
