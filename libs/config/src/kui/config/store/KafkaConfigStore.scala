@@ -9,7 +9,6 @@ import cats.effect.syntax.all.*
 import cats.effect.{Async, Clock, Ref, Resource}
 import cats.syntax.all.*
 import fs2.Stream
-import fs2.concurrent.Topic
 import fs2.io.file.Files
 import fs2.kafka.{KafkaConsumer, KafkaProducer}
 import io.circe.Json
@@ -77,7 +76,7 @@ object KafkaConfigStore {
 
     for {
       state <- Resource.eval(Ref.of[F, StoreState](StoreState.empty))
-      changes <- Resource.eval(Topic[F, StoreChange])
+      changes <- Resource.eval(StoreChanges.fanout[F](ChangeBufferSize))
       waiter <- Resource.eval(WriteWaiter.create[F])
       health <- Resource.eval(
         StoreHealthRef.of[F](StoreHealth.Healthy(-1L, java.time.Instant.EPOCH, Nil))
@@ -214,7 +213,7 @@ object KafkaConfigStore {
   private[store] def replay[F[_]: Async](
       log: StoreLog[F],
       state: Ref[F, StoreState],
-      changes: Topic[F, StoreChange],
+      changes: StoreChanges[F],
       crypto: FieldCrypto[F],
       topic: String,
       endOffset: Long,
@@ -260,7 +259,7 @@ object KafkaConfigStore {
   private[store] def follow[F[_]: Async](
       log: StoreLog[F],
       state: Ref[F, StoreState],
-      changes: Topic[F, StoreChange],
+      changes: StoreChanges[F],
       crypto: FieldCrypto[F],
       waiter: Option[WriteWaiter[F]],
       logger: Logger[F],
@@ -287,7 +286,7 @@ object KafkaConfigStore {
   private[store] def followForever[F[_]: Async](
       open: Resource[F, StoreLog[F]],
       state: Ref[F, StoreState],
-      changes: Topic[F, StoreChange],
+      changes: StoreChanges[F],
       crypto: FieldCrypto[F],
       waiter: WriteWaiter[F],
       health: StoreHealthRef[F],
@@ -343,7 +342,7 @@ object KafkaConfigStore {
     */
   private def applyEach[F[_]: Async](
       state: Ref[F, StoreState],
-      changes: Topic[F, StoreChange],
+      changes: StoreChanges[F],
       crypto: FieldCrypto[F],
       waiter: Option[WriteWaiter[F]],
       logger: Logger[F],
@@ -380,7 +379,7 @@ object KafkaConfigStore {
   private def report[F[_]: Async](
       outcome: StoreApplied,
       offset: Long,
-      changes: Topic[F, StoreChange],
+      changes: StoreChanges[F],
       logger: Logger[F]
   ): F[Unit] =
     outcome match {
@@ -390,7 +389,7 @@ object KafkaConfigStore {
           case StoreChange.Deleted(key, version, _) => s"key=${key.render} version=$version deleted"
           case StoreChange.Desynchronized(missed) => s"desynchronized missed=$missed"
         }
-        logger.info(s"store change applied: $described offset=$offset") *> changes.publish1(change).void
+        logger.info(s"store change applied: $described offset=$offset") *> changes.publish(change)
       case StoreApplied.Ignored(key, recordVersion, expectedVersion) =>
         logger.warn(
           s"store record ignored: key=${key.render} recordVersion=$recordVersion " +
@@ -481,7 +480,7 @@ object KafkaConfigStore {
 
   private[store] def writable[F[_]: Async](
       state: Ref[F, StoreState],
-      changeTopic: Topic[F, StoreChange],
+      changeTopic: StoreChanges[F],
       waiter: WriteWaiter[F],
       healthRef: StoreHealthRef[F],
       sink: RecordSink[F],
@@ -496,7 +495,7 @@ object KafkaConfigStore {
 
       def list(section: StoreSection): F[List[StoreRecord]] = state.get.map(_.list(section))
 
-      def changes: Stream[F, StoreChange] = changeTopic.subscribe(ChangeBufferSize)
+      def changes: Stream[F, StoreChange] = changeTopic.subscribe
 
       /** The health value, assembled from the two things that know a piece of it: the follower's own
         * lifecycle (is the store reachable, and since when) and the replayed state (how far the log has been

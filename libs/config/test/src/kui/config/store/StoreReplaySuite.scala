@@ -7,7 +7,6 @@ import scala.concurrent.duration.*
 import cats.effect.testkit.TestControl
 import cats.effect.{Deferred, IO, Ref, Resource}
 import fs2.Stream
-import fs2.concurrent.Topic
 import io.circe.Json
 import io.circe.syntax.*
 import org.typelevel.log4cats.Logger
@@ -84,7 +83,7 @@ final class StoreReplaySuite extends KuiIOSuite {
   ): IO[(Either[Throwable, Unit], StoreState)] =
     for {
       state <- Ref.of[IO, StoreState](StoreState.empty)
-      changes <- Topic[IO, StoreChange]
+      changes <- StoreChanges.fanout[IO](KafkaConfigStore.ChangeBufferSize)
       outcome <- KafkaConfigStore
         .replay[IO](fakeLog(end, records), state, changes, crypto, "__kui_config", end, timeout, logger)
         .attempt
@@ -159,7 +158,7 @@ final class StoreReplaySuite extends KuiIOSuite {
       released <- Ref.of[IO, Int](0)
       started <- Deferred[IO, Unit]
       state <- Ref.of[IO, StoreState](StoreState.empty)
-      changes <- Topic[IO, StoreChange]
+      changes <- StoreChanges.fanout[IO](KafkaConfigStore.ChangeBufferSize)
       log = (Stream.eval(started.complete(()).void).drain ++ Stream.never[IO])
         .onFinalize(released.update(_ + 1))
       fiber <- KafkaConfigStore
@@ -233,7 +232,7 @@ final class StoreReplaySuite extends KuiIOSuite {
     val key = StoreKey(StoreSection.Cluster, "prod")
     val program = for {
       state <- Ref.of[IO, StoreState](StoreState.empty)
-      changes <- Topic[IO, StoreChange]
+      changes <- StoreChanges.fanout[IO](KafkaConfigStore.ChangeBufferSize)
       _ <- KafkaConfigStore.replay[IO](
         fakeLog(2L, Stream.emits(List(entry("prod", 1L, 0L), undecryptable("prod", 2L, 1L)))),
         state,
@@ -317,7 +316,7 @@ final class StoreReplaySuite extends KuiIOSuite {
     val fresh = StoreKey(StoreSection.Cluster, "fresh")
     val program = for {
       state <- Ref.of[IO, StoreState](StoreState.empty)
-      changes <- Topic[IO, StoreChange]
+      changes <- StoreChanges.fanout[IO](KafkaConfigStore.ChangeBufferSize)
       waiter <- WriteWaiter.create[IO]
       health <- StoreHealthRef.of[IO](StoreHealth.Healthy(-1L, at, Nil))
       attempts <- Ref.of[IO, Int](0)
@@ -399,6 +398,39 @@ final class StoreReplaySuite extends KuiIOSuite {
         }
       }
     }
+
+  test("aSubscriberThatDoesNotReadDoesNotStallTheFold") {
+    // 300 accepts and a mailbox of 256. A subscriber that is registered and not reading must not
+    // back-pressure the fold, and it must be told that it lost changes.
+    val records = Stream.emits((0 until 300).toList.map(i => entry(s"c$i", 1L, i.toLong)))
+    val program = for {
+      state <- Ref.of[IO, StoreState](StoreState.empty)
+      changes <- StoreChanges.fanout[IO](KafkaConfigStore.ChangeBufferSize)
+      seen <- changes.listen.use { pending =>
+        for {
+          _ <- KafkaConfigStore.replay[IO](
+            fakeLog(300L, records),
+            state,
+            changes,
+            crypto,
+            "__kui_config",
+            300L,
+            30.seconds,
+            logger
+          )
+          offset <- state.get.map(_.lastAppliedOffset)
+          taken <- pending.take(KafkaConfigStore.ChangeBufferSize.toLong).compile.toVector
+        } yield (offset, taken)
+      }
+    } yield seen
+    TestControl.executeEmbed(program).map { (offset, seen) =>
+      assertEquals(offset, 299L)
+      assert(
+        seen.exists(_.isInstanceOf[StoreChange.Desynchronized]),
+        s"expected Desynchronized, saw ${seen.size} changes"
+      )
+    }
+  }
 
   test("aPhysicalTombstoneDeletesTheKey") {
     // KUI writes logical tombstones, but a compacted or hand-edited log contains null values, so they
