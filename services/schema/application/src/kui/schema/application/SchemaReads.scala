@@ -86,7 +86,14 @@ object RegistryQuery {
   * that decorated it did not answer would send an operator looking for a schema nobody deleted.
   */
 trait SubjectListUseCase[F[_]] {
-  def list(cluster: ClusterId, query: SubjectQuery): F[Either[KuiError, Page[SubjectSummary]]]
+
+  /** `visible` runs before paging and before enrichment, so a hidden subject is neither counted nor fetched.
+    */
+  def list(
+      cluster: ClusterId,
+      query: SubjectQuery,
+      visible: Subject => Boolean = _ => true
+  ): F[Either[KuiError, Page[SubjectSummary]]]
 }
 
 object SubjectListUseCase {
@@ -106,12 +113,17 @@ object SubjectListUseCase {
   ): SubjectListUseCase[F] =
     new SubjectListUseCase[F] {
 
-      def list(cluster: ClusterId, query: SubjectQuery): F[Either[KuiError, Page[SubjectSummary]]] =
+      def list(
+          cluster: ClusterId,
+          query: SubjectQuery,
+          visible: Subject => Boolean
+      ): F[Either[KuiError, Page[SubjectSummary]]] =
         RegistryQuery.on(registries, cluster) { port =>
           port.subjects.flatMap {
             case Left(error) => error.asLeft[Page[SubjectSummary]].pure[F]
             case Right(names) =>
-              enrich(port, cluster, SubjectCatalog.page(names, query)).map(_.asRight[KuiError])
+              enrich(port, cluster, SubjectCatalog.page(names.filter(visible), query))
+                .map(_.asRight[KuiError])
           }
         }
 

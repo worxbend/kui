@@ -17,14 +17,15 @@ import sttp.model.Uri
 import sttp.tapir.server.stub4.TapirStubInterpreter
 
 import kui.contracts.KuiEndpoint
-import kui.http.principal.PrincipalVerification
+import kui.http.principal.{PrincipalVerification, RbacGuard}
 import kui.kernel.error.{InfrastructureError, KuiError}
-import kui.kernel.{ClusterId, SchemaId, Secret, Subject, UserName}
+import kui.kernel.{ClusterId, RoleName, SchemaId, Secret, Subject, UserName}
 import kui.observability.Telemetry
 import kui.schema.application.*
 import kui.schema.contract.SchemaEndpoints
 import kui.schema.domain.*
 import kui.security.*
+import kui.security.rbac.{Action, ClusterFlags, RbacPolicy, ResourcePattern, Role}
 import kui.testkit.KuiIOSuite
 import kui.testkit.fakes.FakeStructuredLogger
 
@@ -120,7 +121,8 @@ final class SubjectListRoutesSuite extends KuiIOSuite {
   /** The service, with no socket, over one cluster whose registry counts. */
   private def server(
       names: List[String] = many,
-      broken: Set[String] = Set.empty
+      broken: Set[String] = Set.empty,
+      guard: RbacGuard[IO] = RbacGuard.allowAll[IO]
   ): Resource[IO, (Backend[IO], CountingRegistry)] =
     Resource.eval(
       for {
@@ -146,7 +148,8 @@ final class SubjectListRoutesSuite extends KuiIOSuite {
           SubjectVersionsUseCase.make[IO](registries),
           SchemaVersionUseCase.make[IO](registries),
           CompatibilityReadUseCase.make[IO](registries, logger),
-          SchemaApi.Securing[IO](codec, rejections, logger)
+          SchemaApi.Securing[IO](codec, rejections, logger),
+          guard
         )
 
         val backend = TapirStubInterpreter(interceptors, BackendStub[IO](summon))
@@ -175,12 +178,16 @@ final class SubjectListRoutesSuite extends KuiIOSuite {
   /** A token for one request line. The digest covers the method and the path and not the query string
     * (ADR-020), which is why every case here can vary `?pageSize=` against one token.
     */
-  private def token(path: String, validFor: FiniteDuration = 60.seconds): IO[SignedPrincipal] =
+  private def token(
+      path: String,
+      roles: Set[RoleName],
+      validFor: FiniteDuration = 60.seconds
+  ): IO[SignedPrincipal] =
     IO.realTimeInstant.flatMap(now =>
       codec.sign(
         PrincipalClaims(
           subject = UserName.unsafe("alice"),
-          roles = Set.empty,
+          roles = roles,
           kind = PrincipalKind.Session,
           sessionRef = None,
           issuedAt = now,
@@ -191,8 +198,12 @@ final class SubjectListRoutesSuite extends KuiIOSuite {
       )
     )
 
-  private def get(backend: Backend[IO], path: String): IO[Response[String]] =
-    token(path).flatMap(signed =>
+  private def get(
+      backend: Backend[IO],
+      path: String,
+      roles: Set[RoleName] = Set.empty
+  ): IO[Response[String]] =
+    token(path, roles).flatMap(signed =>
       basicRequest
         .get(Uri.unsafeParse(s"http://schema$path"))
         .header(KuiEndpoint.PrincipalHeader, signed.value)
@@ -204,6 +215,47 @@ final class SubjectListRoutesSuite extends KuiIOSuite {
     parse(response.body).fold(failure => fail(s"not JSON: ${failure.message} in ${response.body}"), identity)
 
   // -----------------------------------------------------------------------------------------------
+
+  test("a subject outside the caller's pattern is absent from the page and is not enriched") {
+    // `schema.subjects` is cluster-scoped. A 200 with every subject the registry named is the leak:
+    // the page total and the enrichment calls both have to be taken over the visible names only.
+    // `allowAll` would show both rows on purpose, so this case binds `fromPolicy`.
+    val reader = RoleName.unsafe("reader")
+    val pattern = ResourcePattern.compile("orders-.*").fold(msg => fail(msg), identity)
+    val policy = RbacPolicy(
+      roles = List(
+        Role(
+          name = reader,
+          clusters = Set(cluster),
+          subjects = Nil,
+          permissions = List(
+            RbacPolicy.permission(kui.security.rbac.Resource.Schema, Some(pattern), Set(Action.SchemaView))
+          )
+        )
+      ),
+      defaultRole = None
+    )
+
+    FakeStructuredLogger[IO].flatMap { logger =>
+      val guard = RbacGuard.fromPolicy[IO](policy, _ => ClusterFlags.Writable, logger)
+      server(names = List("orders-value", "secrets-value"), guard = guard).use { (backend, registry) =>
+        for {
+          response <- get(backend, subjectsPath, Set(reader))
+          enriched <- registry.enriched.get
+        } yield {
+          val items = body(response).hcursor.downField("items")
+          assertEquals(response.code.code, 200, response.body)
+          assertEquals(
+            items.as[List[Json]].map(_.flatMap(_.hcursor.get[String]("subject").toOption)),
+            Right(List("orders-value"))
+          )
+          assertEquals(body(response).hcursor.downField("page").get[Int]("totalItems"), Right(1))
+          assertEquals(enriched, List("orders-value"))
+          assert(!response.body.contains("secrets-value"), response.body)
+        }
+      }
+    }
+  }
 
   test("one row's enrichment failing is still a 200 with the bare row in it") {
     // The half of W2-09's acceptance that was never asserted anywhere a client can see. `result.isRight` at

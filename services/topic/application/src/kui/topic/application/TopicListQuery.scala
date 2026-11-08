@@ -16,9 +16,9 @@ import kui.topic.domain.TopicSortField
   *   [[ListTopics]]. The edge is what tells the two apart, because only the edge can see whether the
   *   parameter was present in the query string.
   * @param visible
-  *   M6's RBAC filter. M2 passes [[TopicListQuery.EverythingVisible]]. It exists now, unused, so that the
-  *   ordering rule — filter before you page — is enforced by a property test before there is anything to get
-  *   wrong, rather than being retrofitted into a pipeline that has meanwhile grown two more filters
+  *   topics this caller may see. The list pipeline applies it before the internal filter, the search, the
+  *   sort and the page, so a hidden topic cannot occupy a row or a `totalItems`.
+  *   [[TopicListQuery.EverythingVisible]] is what a caller passes when it is not filtering.
   */
 final case class TopicListQuery(
     q: Option[String],
@@ -37,9 +37,7 @@ final case class TopicListQuery(
 
 object TopicListQuery {
 
-  /** The visibility predicate M2 passes: everything. Named rather than written as `_ => true` at the call
-    * site, so that a search for the place RBAC plugs in finds one result.
-    */
+  /** Every topic. A caller that is not applying a permission filter passes this. */
   val EverythingVisible: TopicName => Boolean = _ => true
 
   val DefaultSort: Sort[TopicSortField] = Sort(TopicSortField.Name, SortOrder.Asc)

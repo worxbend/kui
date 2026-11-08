@@ -7,7 +7,7 @@ import kui.consumer.domain.GroupSummary
 import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
 import kui.kernel.group.GroupState
 import kui.kernel.search.{NameIndex, SearchMode}
-import kui.kernel.{ClusterId, Page, PageRequest, PageSize, PositiveInt}
+import kui.kernel.{ClusterId, GroupId, Page, PageRequest, PageSize, PositiveInt}
 
 /** What a group list may be sorted by. */
 enum GroupSortField(val wire: String) {
@@ -80,8 +80,9 @@ final case class GroupListView(
       * short, and the screen says so rather than silently showing fewer groups.
       */
     incompleteCoordinators: Int,
-    /** Every state present on the cluster with its count, computed **before** the state filter is applied, so
-      * a filter chip can show how many groups filtering it in would reveal.
+    /** Every state present among the groups this caller may see, computed **before** the state filter, so a
+      * filter chip can show how many visible groups filtering it in would reveal. A hidden group is not a
+      * count.
       */
     stateCounts: Map[GroupState, Int],
     /** What `normalise` changed about the request. */
@@ -96,7 +97,11 @@ trait GroupListUseCase[F[_]] {
     * reached is a `Right` whose freshness says `Unavailable`, because "this cluster is not configured" and
     * "this cluster is not answering" are different screens and only one of them is the operator's mistake.
     */
-  def list(cluster: ClusterId, query: GroupQuery): F[Either[KuiError, GroupListView]]
+  def list(
+      cluster: ClusterId,
+      query: GroupQuery,
+      visible: GroupId => Boolean = _ => true
+  ): F[Either[KuiError, GroupListView]]
 }
 
 object GroupListUseCase {
@@ -106,7 +111,11 @@ object GroupListUseCase {
   def make[F[_]: Temporal](snapshots: GroupSnapshots[F]): GroupListUseCase[F] =
     new GroupListUseCase[F] {
 
-      def list(cluster: ClusterId, query: GroupQuery): F[Either[KuiError, GroupListView]] =
+      def list(
+          cluster: ClusterId,
+          query: GroupQuery,
+          visible: GroupId => Boolean
+      ): F[Either[KuiError, GroupListView]] =
         snapshots.of(cluster).flatMap {
           case None =>
             ApplicationError
@@ -125,12 +134,15 @@ object GroupListUseCase {
               val held = snapshot.value.getOrElse(
                 GroupSnapshot.empty(snapshot.scrapedAt.getOrElse(java.time.Instant.EPOCH))
               )
+              // Before the state counts and before paging. A hidden group that survived either would
+              // publish its existence as a chip count or as `totalItems`.
+              val permitted = held.summaries.filter(row => visible(row.groupId))
 
               GroupListView(
-                page = applyQuery(held.summaries, normalised, held.index),
+                page = applyQuery(permitted, normalised, held.index),
                 freshness = freshness,
                 incompleteCoordinators = held.incompleteCoordinators,
-                stateCounts = held.summaries.groupBy(_.state).view.mapValues(_.size).toMap,
+                stateCounts = permitted.groupBy(_.state).view.mapValues(_.size).toMap,
                 notes = notes
               ).asRight[KuiError]
             }
@@ -147,10 +159,12 @@ object GroupListUseCase {
   def applyQuery(
       rows: Vector[GroupSummary],
       query: GroupQuery,
-      index: NameIndex
+      index: NameIndex,
+      visible: GroupId => Boolean = _ => true
   ): Page[GroupSummary] = {
+    val permitted = rows.filter(row => visible(row.groupId))
     val byState =
-      if query.states.isEmpty then rows else rows.filter(row => query.states.contains(row.state))
+      if query.states.isEmpty then permitted else permitted.filter(row => query.states.contains(row.state))
 
     val searched = query.search match {
       case None => byState

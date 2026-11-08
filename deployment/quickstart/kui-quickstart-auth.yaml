@@ -31,12 +31,13 @@
 #     Making it work is two edits and not one — the block, and a `KSQL` permission on `operators` —
 #     and that is a change to what this deployment demonstrates, which is authorization. The
 #     `connect` block that IS here is the instructive contrast, and it was measured in the same
-#     pass: the connector LIST answers 200 with `quickstart-file-source RUNNING`, because ADR-021
-#     keeps Kafbat's rule that a list filters rather than refuses and `connect.list` is
-#     cluster-scoped; the same signed-in `admin` gets 403 on `.../connectors/quickstart-file-source
-#     /pause`, which requires `Resource.Connect` with `OPERATE`. So this deployment already ships
-#     one feature that can be read and not operated, and that is a truth about the role rather than
-#     about the block. Filed for the next wave through W12-01: `operators` either grows the
+#     pass: `connect.list` stays 200, because ADR-021 keeps Kafbat's rule that a list filters rather
+#     than refuses. The signed-in `admin` holds no `CONNECTOR` or `CONNECT` `VIEW`, so the answer
+#     names no connector and no task trace. The same account gets 403 on
+#     `.../connectors/quickstart-file-source/pause`, which requires `Resource.Connect` with
+#     `OPERATE`. The 2026-09-12 measurement that the list body contained `quickstart-file-source
+#     RUNNING` recorded the missing row filter: cluster scope was treated as permission to see every
+#     connector. Filed for the next wave through W12-01: `operators` either grows the
 #     permissions that make its own comment true — `CONNECT`, `CONNECTOR`, `KSQL`, `METRICS`,
 #     `ALERTS` — and the `ksql` block lands with it and somebody signs in and looks, or the roles
 #     stay as they are and both features are described the way they now are below. **It is one
@@ -404,11 +405,13 @@ kui:
   # `operators` may do everything to the four resources it names below — topics, consumer groups,
   # the cluster's connection settings and Schema Registry subjects. IT IS NOT "EVERYTHING ON THIS
   # CLUSTER", WHICH IS WHAT THIS LINE SAID UNTIL WAVE 12, and the difference is measurable: signed
-  # in as `admin` on 2026-09-12, `GET .../connect/connectors` answered **200** with the worker's one
-  # connector — a list filters rather than refuses (ADR-021) — while `POST .../pause` on that same
-  # connector answered **403**, because no role here grants `CONNECT`. `KSQL`, `METRICS` and
-  # `ALERTS` are three more resources in ADR-021's vocabulary that no role here names. The header at
-  # the top of this file carries the decision and what it would take to change it.
+  # `GET .../connect/connectors` answers **200** with no connector rows: a list filters rather than
+  # refuses (ADR-021), and neither role grants `CONNECTOR` `VIEW` or the parent `CONNECT` `VIEW` a
+  # connector row falls back to. `POST .../pause` on a connector answers **403**, because no role
+  # here grants `CONNECT` `OPERATE`. The 2026-09-12 note that the list body contained the worker's
+  # connector recorded the missing row filter, not the role. `KSQL`, `METRICS` and `ALERTS` are
+  # three more resources in ADR-021's vocabulary that no role here names. The header at the top of
+  # this file carries the decision and what it would take to change it.
   #
   # `readers` may look at topics and read their records, and may do nothing else — no creating a
   # topic, no editing a configuration, no adding partitions, no emptying and no deleting. Signed in

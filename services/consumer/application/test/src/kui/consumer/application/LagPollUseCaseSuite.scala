@@ -54,6 +54,21 @@ final class LagPollUseCaseSuite extends FunSuite {
     assertEquals(gone.map(_.value), List("b"))
   }
 
+  test("a hidden group is absent from changed and from gone") {
+    val before = snapshot(1L, List("order-a" -> 1L, "billing-x" -> 9L, "order-old" -> 2L))
+    val after = snapshot(2L, List("order-a" -> 3L, "billing-x" -> 8L))
+
+    val (changed, gone) = LagPollUseCase.diff(
+      Some(before),
+      after,
+      Set.empty,
+      visible = id => id.value.startsWith("order")
+    )
+
+    assertEquals(changed.map(_.groupId.value), List("order-a"))
+    assertEquals(gone.map(_.value), List("order-old"))
+  }
+
   test("the caller's group filter restricts both halves") {
     val before = snapshot(1L, List("a" -> 90L, "b" -> 80L))
     val after = snapshot(2L, List("a" -> 95L))

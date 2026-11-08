@@ -102,8 +102,15 @@ object ConsumerTestServer {
     )
 
   final class StubList(view: GroupListView) extends GroupListUseCase[IO] {
-    def list(cluster: ClusterId, query: GroupQuery): IO[Either[KuiError, GroupListView]] =
-      IO.pure(notThisCluster[GroupListView](cluster).getOrElse(Right(view)))
+    def list(
+        cluster: ClusterId,
+        query: GroupQuery,
+        visible: GroupId => Boolean
+    ): IO[Either[KuiError, GroupListView]] =
+      IO.pure(notThisCluster[GroupListView](cluster).getOrElse {
+        val items = view.page.items.filter(row => visible(row.groupId))
+        Right(view.copy(page = view.page.copy(items = items, totalItems = Some(items.size.toLong))))
+      })
   }
 
   /** Records every group id it was asked about.
@@ -124,9 +131,19 @@ object ConsumerTestServer {
     def poll(
         cluster: ClusterId,
         groups: Set[GroupId],
-        since: Option[String]
+        since: Option[String],
+        visible: GroupId => Boolean
     ): IO[Either[KuiError, LagPollView]] =
-      IO.pure(notThisCluster[LagPollView](cluster).getOrElse(Right(view)))
+      IO.pure(
+        notThisCluster[LagPollView](cluster).getOrElse(
+          Right(
+            view.copy(
+              changed = view.changed.filter(update => visible(update.groupId)),
+              gone = view.gone.filter(visible)
+            )
+          )
+        )
+      )
   }
 
   final class StubForTopic(view: TopicConsumersView) extends GroupsForTopicUseCase[IO] {
@@ -290,6 +307,7 @@ object ConsumerTestServer {
   def resource(
       groups: List[GroupSummary] = Nil,
       lag: List[LagUpdate] = Nil,
+      gone: List[GroupId] = Nil,
       freshness: SnapshotFreshness = Fresh,
       // What this service allows on its own account, independently of whatever the gateway decided. It
       // defaults to allowing everything so that a suite about consumer groups is about consumer groups;
@@ -314,7 +332,7 @@ object ConsumerTestServer {
         val routes = ConsumerApi.routes[IO](
           new StubList(listView(groups).copy(freshness = freshness)),
           detail,
-          new StubLag(lagView(lag)),
+          new StubLag(lagView(lag).copy(gone = gone)),
           new StubForTopic(TopicConsumersView(Topic, Nil, Fresh, At)),
           new StubSnapshots,
           reset,

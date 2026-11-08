@@ -172,14 +172,22 @@ object AlertsWiring {
             endpoint: sttp.tapir.AnyEndpoint,
             requestPath: String
         ): F[Either[kui.kernel.error.KuiError, Unit]] =
-          currentClusters.flatMap(current =>
-            RbacGuard
-              .fromPolicy[F](
-                rbac,
-                cluster => ClusterFlags(current.find(_.id == cluster).forall(_.readOnly)),
-                logger
-              )
-              .authorize(principal, endpoint, requestPath)
+          delegate(currentClusters).flatMap(_.authorize(principal, endpoint, requestPath))
+
+        def visibility(
+            principal: kui.security.Principal,
+            cluster: kui.kernel.ClusterId,
+            accessOf: String => kui.security.rbac.ResourceAccess
+        ): F[String => Boolean] =
+          delegate(currentClusters).flatMap(_.visibility(principal, cluster, accessOf))
+
+        private def delegate(clusters: F[List[ClusterConfig]]) =
+          clusters.map(current =>
+            RbacGuard.fromPolicy[F](
+              rbac,
+              cluster => ClusterFlags(current.find(_.id == cluster).forall(_.readOnly)),
+              logger
+            )
           )
       }
     } yield AlertsServer(

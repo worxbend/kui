@@ -51,6 +51,18 @@ final case class TopicSnapshot private (
     * two halves are disjoint by construction and this is a concatenation rather than a merge.
     */
   lazy val names: Vector[TopicName] = (topics.map(_.name) ++ incomplete.keys).sortBy(_.value)
+
+  /** The topics `visible` allows, described rows and incomplete names alike.
+    *
+    * The search index stays the one the scrape built. The list intersects search hits with the rows that
+    * remain, so a hidden name in the index cannot come back. Rebuilding through [[TopicSnapshot.of]] would
+    * difference produce rates against this snapshot as if it were the previous scrape and wipe them.
+    */
+  def retaining(visible: TopicName => Boolean): TopicSnapshot =
+    copy(
+      topics = topics.filter(row => visible(row.name)),
+      incomplete = incomplete.filter((name, _) => visible(name))
+    )
 }
 
 object TopicSnapshot {

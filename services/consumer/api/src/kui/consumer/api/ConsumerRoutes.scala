@@ -7,7 +7,9 @@ import sttp.tapir.server.ServerEndpoint
 import kui.consumer.application.*
 import kui.consumer.contract.dto.*
 import kui.consumer.contract.{ConsumerEndpoints, GroupListParams}
+import kui.http.principal.RbacGuard
 import kui.kernel.SortOrder
+import kui.security.rbac.{Action, Resource, ResourceAccess}
 
 /** The four read endpoints, bound to use cases.
   *
@@ -37,14 +39,15 @@ object ConsumerRoutes {
       lag: LagPollUseCase[F],
       forTopic: GroupsForTopicUseCase[F],
       snapshots: GroupSnapshots[F],
-      secured: ConsumerApi.Securing[F]
+      secured: ConsumerApi.Securing[F],
+      guard: RbacGuard[F]
   ): List[ServerEndpoint[Any, F]] =
     // `lagPoll` before `groupDetail`, for the reason `ConsumerEndpoints.all` records at length: both match
     // `/consumer-groups/lag`, and the detail route answers it with a fabricated dead group rather than an
     // error, so getting this order wrong produces a well-formed 200 and a lag column that silently stops.
     List(
-      listGroups(list, secured),
-      lagPoll(lag, secured),
+      listGroups(list, secured, guard),
+      lagPoll(lag, secured, guard),
       groupDetail(detail, secured),
       topicConsumers(forTopic, snapshots, secured)
     )
@@ -57,20 +60,23 @@ object ConsumerRoutes {
     */
   private def listGroups[F[_]: Async](
       list: GroupListUseCase[F],
-      secured: ConsumerApi.Securing[F]
+      secured: ConsumerApi.Securing[F],
+      guard: RbacGuard[F]
   ): ServerEndpoint[Any, F] =
-    secured(ConsumerEndpoints.list) { _ => (cluster, params) =>
-      list
-        .list(cluster, queryOf(params))
-        .map(_.map { view =>
-          // The freshness travels with the rows rather than being dropped here. Before it did, a cluster
-          // that had stopped answering was a bare 200 carrying the lag figures of the last successful
-          // scrape, and the browser had no way to tell that from a caught-up cluster.
-          GroupsResponse(
-            groups = ConsumerSections.of(view.freshness, ConsumerMapping.page(view.page)),
-            incompleteCoordinators = view.incompleteCoordinators
-          )
-        })
+    secured(ConsumerEndpoints.list) { principal => (cluster, params) =>
+      visibleGroups(guard, principal, cluster).flatMap { allow =>
+        list
+          .list(cluster, queryOf(params), allow)
+          .map(_.map { view =>
+            // The freshness travels with the rows rather than being dropped here. Before it did, a cluster
+            // that had stopped answering was a bare 200 carrying the lag figures of the last successful
+            // scrape, and the browser had no way to tell that from a caught-up cluster.
+            GroupsResponse(
+              groups = ConsumerSections.of(view.freshness, ConsumerMapping.page(view.page)),
+              incompleteCoordinators = view.incompleteCoordinators
+            )
+          })
+      }
     }
 
   /** One group, whole. A deep link has to work without fetching the list first. */
@@ -91,23 +97,42 @@ object ConsumerRoutes {
     */
   private def lagPoll[F[_]: Async](
       lag: LagPollUseCase[F],
-      secured: ConsumerApi.Securing[F]
+      secured: ConsumerApi.Securing[F],
+      guard: RbacGuard[F]
   ): ServerEndpoint[Any, F] =
-    secured(ConsumerEndpoints.lag) { _ => (cluster, groups, since) =>
-      lag
-        .poll(cluster, groups, since)
-        .map(
-          _.map(view =>
-            LagDeltaDto(
-              changed = view.changed.map(ConsumerMapping.lagUpdate),
-              gone = view.gone,
-              token = LagToken.value(view.token),
-              nextPollMs = view.nextPollMs,
-              full = view.full
+    secured(ConsumerEndpoints.lag) { principal => (cluster, groups, since) =>
+      visibleGroups(guard, principal, cluster).flatMap { allow =>
+        lag
+          .poll(cluster, groups, since, allow)
+          .map(
+            _.map(view =>
+              LagDeltaDto(
+                changed = view.changed.map(ConsumerMapping.lagUpdate),
+                gone = view.gone,
+                token = LagToken.value(view.token),
+                nextPollMs = view.nextPollMs,
+                full = view.full
+              )
             )
           )
-        )
+      }
     }
+
+  /** `CONSUMER VIEW` on the group id. Hidden ids are dropped from the page, the state counts and the lag
+    * delta, including names that only appear because they disappeared.
+    */
+  private def visibleGroups[F[_]: cats.Functor](
+      guard: RbacGuard[F],
+      principal: kui.security.Principal,
+      cluster: kui.kernel.ClusterId
+  ): F[kui.kernel.GroupId => Boolean] =
+    guard
+      .visibility(
+        principal,
+        cluster,
+        name => ResourceAccess.named(Resource.ConsumerGroup, name, Action.ConsumerGroupView)
+      )
+      .map(allow => id => allow(id.value))
 
   /** Every consumer group that reads one topic — the topic page's Consumers tab.
     *

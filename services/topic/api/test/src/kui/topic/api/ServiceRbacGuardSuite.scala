@@ -3,6 +3,8 @@ package kui.topic.api
 import java.time.Instant
 
 import cats.effect.IO
+import io.circe.Json
+import io.circe.parser.parse
 import munit.CatsEffectSuite
 import sttp.client4.*
 
@@ -143,15 +145,64 @@ final class ServiceRbacGuardSuite extends CatsEffectSuite {
 
   test("a list endpoint is reachable by anyone who may reach the cluster, and filters instead of refusing") {
     // ADR-021's rule, and the reason a list declares cluster scope rather than a per-topic permission:
-    // a 403 here would tell a caller that topics they may not see exist.
-    TopicTestServer
-      .resource(snapshot, rbac = policy("payments\\..*", Action.TopicView))
-      .use { server =>
-        get(server, path("/topics"), Set(reader)).map { response =>
-          assertEquals(response.code.code, 200, response.body.fold(identity, identity))
-        }
+    // a 403 here would tell a caller that topics they may not see exist. The hidden row has to be in the
+    // fixture, or a 200 with the one permitted topic cannot tell filtering from returning everything.
+    val both = TopicTestServer.online(
+      TopicSnapshot.of(
+        Vector(topic("payments.orders"), topic("secrets")),
+        Instant.parse("2026-09-04T09:00:00Z"),
+        incomplete = Map(TopicName.unsafe("secrets.unread") -> "describe failed")
+      )
+    )
+
+    TopicTestServer.resource(both, rbac = policy("payments\\..*", Action.TopicView)).use { server =>
+      for {
+        listed <- get(server, path("/topics"), Set(reader))
+        names <- get(server, path("/topics/names"), Set(reader))
+        stats <- get(server, path("/topics/statistics"), Set(reader))
+      } yield {
+        val listBody = listed.body.fold(identity, identity)
+        val listJson = parse(listBody).fold(failure => fail(failure.message), identity)
+        assertEquals(listed.code.code, 200, listBody)
+        assertEquals(field(listJson, "topics", "data", "page", "totalItems"), Some(Json.fromInt(1)))
+        assertEquals(namesOf(listJson, "topics", "data", "items"), List("payments.orders"))
+        assert(!listBody.contains("secrets"), listBody)
+        assertEquals(field(listJson, "incompleteTopics"), Some(Json.fromInt(0)))
+
+        val namesBody = names.body.fold(identity, identity)
+        assertEquals(names.code.code, 200, namesBody)
+        assert(!namesBody.contains("secrets"), namesBody)
+        assert(namesBody.contains("payments.orders"), namesBody)
+
+        val statsBody = stats.body.fold(identity, identity)
+        val statsJson = parse(statsBody).fold(failure => fail(failure.message), identity)
+        assertEquals(stats.code.code, 200, statsBody)
+        assertEquals(field(statsJson, "statistics", "data", "topicCount"), Some(Json.fromInt(1)))
+        assertEquals(field(statsJson, "statistics", "data", "incompleteTopics"), Some(Json.fromInt(0)))
       }
+    }
   }
+
+  private def topic(name: String): TopicSummary =
+    TopicSummary(
+      name = TopicName.unsafe(name),
+      isInternal = false,
+      partitionCount = 1,
+      replicationFactor = Some(1),
+      outOfSyncReplicas = 0,
+      offlinePartitions = 0,
+      messageCount = Some(0L),
+      sizeBytes = Some(0L)
+    )
+
+  private def field(json: Json, path: String*): Option[Json] =
+    path.foldLeft(Option(json))((current, key) => current.flatMap(_.hcursor.downField(key).focus))
+
+  private def namesOf(json: Json, path: String*): List[String] =
+    field(json, path*)
+      .flatMap(_.as[List[Json]].toOption)
+      .getOrElse(Nil)
+      .flatMap(_.hcursor.get[String]("name").toOption)
 
   test("a deployment with no roles configured is unaffected") {
     TopicTestServer

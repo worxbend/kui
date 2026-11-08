@@ -5,9 +5,11 @@ import cats.syntax.all.*
 import sttp.tapir.server.ServerEndpoint
 
 import kui.contracts.paging.PageDto
+import kui.http.principal.RbacGuard
 import kui.schema.application.*
 import kui.schema.contract.SchemaEndpoints
 import kui.schema.contract.dto.*
+import kui.security.rbac.{Action, Resource, ResourceAccess}
 
 /** The five read endpoints, bound to use cases.
   *
@@ -37,6 +39,16 @@ object SchemaRoutes {
       compatibility: CompatibilityReadUseCase[F],
       secured: SchemaApi.Securing[F]
   ): List[ServerEndpoint[Any, F]] =
+    apply(subjects, versions, schema, compatibility, secured, RbacGuard.allowAll[F])
+
+  def apply[F[_]: Async](
+      subjects: SubjectListUseCase[F],
+      versions: SubjectVersionsUseCase[F],
+      schema: SchemaVersionUseCase[F],
+      compatibility: CompatibilityReadUseCase[F],
+      secured: SchemaApi.Securing[F],
+      guard: RbacGuard[F]
+  ): List[ServerEndpoint[Any, F]] =
     // The order is the contract's own. It used to be described here as load bearing — a router trying the
     // subject routes first answering `/schemas/compatibility` with a lookup of a subject named
     // "compatibility" — and wave 5 measured that and it is not so: `/schemas/compatibility` is one segment
@@ -45,7 +57,7 @@ object SchemaRoutes {
     // which is worth something on its own, and it is no longer claimed to be a rule.
     List(
       globalCompatibility(compatibility, secured),
-      subjectList(subjects, secured),
+      subjectList(subjects, secured, guard),
       subjectCompatibility(compatibility, secured),
       subjectVersions(versions, secured),
       subjectSchema(schema, secured)
@@ -53,12 +65,21 @@ object SchemaRoutes {
 
   private def subjectList[F[_]: Async](
       subjects: SubjectListUseCase[F],
-      secured: SchemaApi.Securing[F]
+      secured: SchemaApi.Securing[F],
+      guard: RbacGuard[F]
   ): ServerEndpoint[Any, F] =
-    secured(SchemaEndpoints.subjects) { _ => (cluster, params) =>
-      subjects
-        .list(cluster, SchemaMapping.query(params))
-        .map(_.map(page => PageDto.of(page)(SchemaMapping.summary)))
+    secured(SchemaEndpoints.subjects) { principal => (cluster, params) =>
+      guard
+        .visibility(
+          principal,
+          cluster,
+          name => ResourceAccess.named(Resource.Schema, name, Action.SchemaView)
+        )
+        .flatMap { allow =>
+          subjects
+            .list(cluster, SchemaMapping.query(params), subject => allow(subject.value))
+            .map(_.map(page => PageDto.of(page)(SchemaMapping.summary)))
+        }
     }
 
   private def subjectVersions[F[_]: Async](

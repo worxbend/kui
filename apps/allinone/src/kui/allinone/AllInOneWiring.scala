@@ -281,6 +281,7 @@ object AllInOneWiring {
       identityService <- IdentityWiring.make[F](auth, rbac, store, telemetry, principals, logger)
       schemaService <- SchemaWiring.make[F](
         clusters,
+        rbac,
         UrlPolicy.fromEnv(schemaEnvironment),
         telemetry,
         principals,

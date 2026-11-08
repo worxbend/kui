@@ -11,7 +11,8 @@ import kui.contracts.Section
 import kui.http.principal.RbacGuard
 import kui.kernel.error.KuiError
 import kui.kernel.{ClusterId, TopicName}
-import kui.security.PrincipalCodec
+import kui.security.rbac.{Action, Resource, ResourceAccess}
+import kui.security.{Principal, PrincipalCodec}
 import kui.topic.application.*
 import kui.topic.contract.dto.*
 import kui.topic.contract.{TopicEndpoints, TopicListParams}
@@ -59,9 +60,9 @@ object TopicRoutes {
     // first or both are served as the detail page of a topic with that name. `TopicEndpoints.all` declares
     // the same order for the gateway's proxy routes, which are derived from that list in order.
     List(
-      listTopics(snapshots, secured),
-      topicStatistics(snapshots, secured),
-      topicNames(snapshots, secured),
+      listTopics(snapshots, secured, guard),
+      topicStatistics(snapshots, secured, guard),
+      topicNames(snapshots, secured, guard),
       getTopic(detail, secured),
       topicConfig(config, secured),
       topicPartitions(detail, secured),
@@ -80,12 +81,13 @@ object TopicRoutes {
     */
   private def listTopics[F[_]: Async](
       snapshots: TopicSnapshots[F],
-      secured: TopicApi.Securing[F]
+      secured: TopicApi.Securing[F],
+      guard: RbacGuard[F]
   ): ServerEndpoint[Any, F] =
-    secured(TopicEndpoints.listTopics) { _ => (cluster, params) =>
-      withSnapshot(snapshots, cluster) { snapshot =>
+    secured(TopicEndpoints.listTopics) { principal => (cluster, params) =>
+      withVisibleSnapshot(snapshots, guard, principal, cluster) { (snapshot, allow) =>
         Clock[F].realTimeInstant.map { now =>
-          val query = queryOf(params)
+          val query = queryOf(params, allow)
           val section =
             TopicSections.of(snapshot, now)(topics => TopicMapping.page(ListTopics(topics, query)))
 
@@ -105,10 +107,11 @@ object TopicRoutes {
     */
   private def topicStatistics[F[_]: Async](
       snapshots: TopicSnapshots[F],
-      secured: TopicApi.Securing[F]
+      secured: TopicApi.Securing[F],
+      guard: RbacGuard[F]
   ): ServerEndpoint[Any, F] =
-    secured(TopicEndpoints.topicStatistics) { _ => cluster =>
-      withSnapshot(snapshots, cluster) { snapshot =>
+    secured(TopicEndpoints.topicStatistics) { principal => cluster =>
+      withVisibleSnapshot(snapshots, guard, principal, cluster) { (snapshot, _) =>
         Clock[F].realTimeInstant.map { now =>
           TopicStatisticsResponse(
             TopicSections.of(snapshot, now)(topics => TopicMapping.statistics(TopicStatistics.of(topics)))
@@ -125,10 +128,11 @@ object TopicRoutes {
     */
   private def topicNames[F[_]: Async](
       snapshots: TopicSnapshots[F],
-      secured: TopicApi.Securing[F]
+      secured: TopicApi.Securing[F],
+      guard: RbacGuard[F]
   ): ServerEndpoint[Any, F] =
-    secured(TopicEndpoints.topicNames) { _ => cluster =>
-      withSnapshot(snapshots, cluster) { snapshot =>
+    secured(TopicEndpoints.topicNames) { principal => cluster =>
+      withVisibleSnapshot(snapshots, guard, principal, cluster) { (snapshot, _) =>
         Clock[F].realTimeInstant.map { now =>
           TopicNamesResponse(TopicSections.of(snapshot, now)(_.names.toList))
         }
@@ -204,18 +208,40 @@ object TopicRoutes {
 
   // -----------------------------------------------------------------------------------------------
 
-  /** The wire query as the use case's, which is where the two `TopicSortField` enums meet. */
-  private def queryOf(params: TopicListParams): TopicListQuery =
+  /** The wire query as the use case's, which is where the two `TopicSortField` enums meet.
+    *
+    * `allow` is applied here, before paging, and again by narrowing the snapshot the statistics, the name
+    * list and `incompleteTopics` are folded from. A total taken from the unfiltered snapshot would publish
+    * the size of a topic the caller may not see.
+    */
+  private def queryOf(params: TopicListParams, allow: String => Boolean): TopicListQuery =
     TopicListQuery(
       q = params.q,
       mode = params.mode,
       showInternal = params.showInternal,
       sort = params.sort.map(TopicMapping.sort),
       page = params.page,
-      // M6 replaces this with the caller's own permission filter. It is a parameter now, and not a `filter`
-      // applied after paging, because "filter before you page" is the ordering the total depends on.
-      visible = TopicListQuery.EverythingVisible
+      visible = name => allow(name.value)
     )
+
+  /** The snapshot restricted to the topics this caller may view, or 404 for an unknown cluster. */
+  private def withVisibleSnapshot[F[_]: Async, A](
+      snapshots: TopicSnapshots[F],
+      guard: RbacGuard[F],
+      principal: Principal,
+      cluster: ClusterId
+  )(body: (Snapshot[TopicSnapshot], String => Boolean) => F[A]): F[Either[KuiError, A]] =
+    guard
+      .visibility(
+        principal,
+        cluster,
+        name => ResourceAccess.named(Resource.Topic, name, Action.TopicView)
+      )
+      .flatMap { allow =>
+        withSnapshot(snapshots, cluster) { snapshot =>
+          body(snapshot.copy(value = snapshot.value.map(_.retaining(name => allow(name.value)))), allow)
+        }
+      }
 
   /** Runs `body` against a configured cluster's snapshot, or answers 404.
     *

@@ -5,12 +5,15 @@ import cats.syntax.all.*
 import sttp.tapir.Endpoint
 import sttp.tapir.server.ServerEndpoint
 
-import kui.connect.application.ConnectUseCases
+import kui.connect.application.{ConnectListing, ConnectUseCases, WorkerReport}
 import kui.connect.contract.ConnectEndpoints
 import kui.connect.contract.dto.*
-import kui.connect.domain.ConnectorOperation
+import kui.connect.domain.{ConnectorFacts, ConnectorOperation}
 import kui.contracts.ErrorEnvelope
-import kui.security.SignedPrincipal
+import kui.http.principal.RbacGuard
+import kui.kernel.ClusterId
+import kui.security.rbac.{Action, ResourceAccess}
+import kui.security.{Principal, SignedPrincipal}
 
 /** The four routes, bound to use cases.
   *
@@ -35,10 +38,11 @@ object ConnectRoutes {
 
   def apply[F[_]: Async](
       connect: ConnectUseCases[F],
-      secured: ConnectApi.Securing[F]
+      secured: ConnectApi.Securing[F],
+      guard: RbacGuard[F]
   ): List[ServerEndpoint[Any, F]] =
     List(
-      connectorsRoute(connect, secured),
+      connectorsRoute(connect, secured, guard),
       operationRoute(ConnectEndpoints.pause, ConnectorOperation.Pause, connect, secured),
       operationRoute(ConnectEndpoints.resume, ConnectorOperation.Resume, connect, secured),
       operationRoute(ConnectEndpoints.restart, ConnectorOperation.Restart, connect, secured)
@@ -47,14 +51,62 @@ object ConnectRoutes {
   /** `GET /internal/v1/clusters/{clusterId}/connect/connectors`. */
   private def connectorsRoute[F[_]: Async](
       connect: ConnectUseCases[F],
-      secured: ConnectApi.Securing[F]
+      secured: ConnectApi.Securing[F],
+      guard: RbacGuard[F]
   ): ServerEndpoint[Any, F] =
     secured(ConnectEndpoints.connectors) { principal => cluster =>
       for {
         now <- Clock[F].realTimeInstant
         answer <- connect.connectors(principal, cluster)
-      } yield answer.map(ConnectMapping.response(_, now))
+        filtered <- filterListing(guard, principal, cluster, answer)
+      } yield filtered.map(ConnectMapping.response(_, now))
     }
+
+  /** Drops connector rows and unreadable names the caller may not view.
+    *
+    * A worker with nothing left still appears: the Connect cluster's name is configuration, not a secret. A
+    * worker that did not answer has no rows to hide. The access is [[ResourceAccess.connector]], so a
+    * `CONNECT VIEW` grant on the parent still shows its connectors.
+    */
+  private def filterListing[F[_]: Async](
+      guard: RbacGuard[F],
+      principal: Principal,
+      cluster: ClusterId,
+      answer: Either[kui.kernel.error.KuiError, ConnectListing]
+  ): F[Either[kui.kernel.error.KuiError, ConnectListing]] =
+    answer match {
+      case Left(error) => error.asLeft[ConnectListing].pure[F]
+      case Right(ConnectListing.NotConfigured) =>
+        ConnectListing.NotConfigured.asRight[kui.kernel.error.KuiError].pure[F]
+      case Right(ConnectListing.Workers(reports)) =>
+        reports
+          .traverse(filterReport(guard, principal, cluster, _))
+          .map(rows => ConnectListing.Workers(rows).asRight[kui.kernel.error.KuiError])
+    }
+
+  private def filterReport[F[_]: Async](
+      guard: RbacGuard[F],
+      principal: Principal,
+      cluster: ClusterId,
+      report: WorkerReport
+  ): F[WorkerReport] =
+    report.facts match {
+      case Left(_) => report.pure[F]
+      case Right(facts) =>
+        guard
+          .visibility(
+            principal,
+            cluster,
+            name => ResourceAccess.connector(report.connect.value, name, Action.ConnectorView)
+          )
+          .map(allow => report.copy(facts = Right(visibleFacts(facts, allow))))
+    }
+
+  private def visibleFacts(facts: ConnectorFacts, allow: String => Boolean): ConnectorFacts =
+    facts.copy(
+      connectors = facts.connectors.filter(row => allow(row.name.value)),
+      unreadable = facts.unreadable.filter(allow)
+    )
 
   /** `POST /internal/v1/clusters/{clusterId}/connect/{connectName}/connectors/{connectorName}/{operation}`.
     *

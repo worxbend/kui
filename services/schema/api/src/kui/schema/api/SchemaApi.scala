@@ -16,7 +16,7 @@ import sttp.tapir.server.interceptor.Interceptor
 import kui.contracts.capability.ServiceCapabilities
 import kui.http.ErrorInterceptor
 import kui.http.health.{HealthEndpoints, ReadinessCheck}
-import kui.http.principal.{PrincipalInterceptor, SecuredRoutes}
+import kui.http.principal.{PrincipalInterceptor, RbacGuard, SecuredRoutes}
 import kui.kernel.ServiceId
 import kui.observability.{KuiInterceptors, Telemetry}
 import kui.schema.application.*
@@ -70,12 +70,13 @@ object SchemaApi {
       capabilities: SchemaCapabilities[F],
       principals: PrincipalCodec[F],
       rejections: Counter[F, Long],
-      logger: StructuredLogger[F]
+      logger: StructuredLogger[F],
+      guard: RbacGuard[F]
   ): List[ServerEndpoint[Any, F]] = {
-    val secured = Securing[F](principals, rejections, logger)
+    val secured = Securing[F](principals, rejections, logger, guard)
 
     HealthEndpoints.make[F](readiness, capabilityDocument[F](capabilities, logger)) ++
-      SchemaRoutes[F](subjects, versions, schema, compatibility, secured) ++
+      SchemaRoutes[F](subjects, versions, schema, compatibility, secured, guard) ++
       SchemaMutationRoutes[F](set, register, check, secured)
   }
 
@@ -103,7 +104,14 @@ object SchemaApi {
       principals: PrincipalCodec[F],
       rejections: Counter[F, Long],
       logger: StructuredLogger[F]
-  ): SecuredRoutes[F] = new SecuredRoutes[F](principals, Id, rejections, logger)
+  ): SecuredRoutes[F] = Securing[F](principals, rejections, logger, RbacGuard.allowAll[F])
+
+  def Securing[F[_]: Async](
+      principals: PrincipalCodec[F],
+      rejections: Counter[F, Long],
+      logger: StructuredLogger[F],
+      guard: RbacGuard[F]
+  ): SecuredRoutes[F] = new SecuredRoutes[F](principals, Id, rejections, logger, guard)
 
   // -----------------------------------------------------------------------------------------------
   // Capabilities

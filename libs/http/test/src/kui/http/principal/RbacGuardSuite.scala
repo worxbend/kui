@@ -217,6 +217,56 @@ final class RbacGuardSuite extends CatsEffectSuite {
     }
   }
 
+  test("connector visibility keeps the granted name, and a parent connect grant shows every connector") {
+    // A pattern on `Resource.Connector` must not fall through to every connector, and a `CONNECT VIEW` on
+    // the parent must still show them: `ResourceAccess.connector` is what attaches that fallback.
+    val connect = "payments"
+
+    def granting(resource: Resource, pattern: String, action: Action): RbacPolicy =
+      RbacPolicy(
+        roles = List(
+          Role(
+            name = reader,
+            clusters = Set(Cluster),
+            subjects = Nil,
+            permissions = List(
+              RbacPolicy.permission(
+                resource,
+                Some(ResourcePattern.compile(pattern).fold(msg => fail(msg), identity)),
+                Set(action)
+              )
+            )
+          )
+        ),
+        defaultRole = None
+      )
+
+    val access = (name: String) => ResourceAccess.connector(connect, name, Action.ConnectorView)
+
+    FakeStructuredLogger[IO].flatMap { logger =>
+      val named = RbacGuard.fromPolicy[IO](
+        granting(Resource.Connector, s"$connect/a", Action.ConnectorView),
+        _ => ClusterFlags.Writable,
+        logger
+      )
+      val parent = RbacGuard.fromPolicy[IO](
+        granting(Resource.Connect, connect, Action.ConnectView),
+        _ => ClusterFlags.Writable,
+        logger
+      )
+
+      for {
+        onlyA <- named.visibility(principal(reader), Cluster, access)
+        both <- parent.visibility(principal(reader), Cluster, access)
+      } yield {
+        assertEquals(onlyA("a"), true)
+        assertEquals(onlyA("b"), false)
+        assertEquals(both("a"), true)
+        assertEquals(both("b"), true)
+      }
+    }
+  }
+
   test("the cluster the flags are looked up for is the one named in the request path") {
     // Stated separately from the refusal above because the two failures are different: a guard that
     // ignores `flagsFor` and a guard that asks it about the wrong cluster both allow the write, and a

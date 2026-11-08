@@ -1,10 +1,11 @@
 package kui.connect.api
 
 import cats.effect.IO
+import io.circe.Json
 import munit.CatsEffectSuite
 
 import kui.connect.contract.ConnectEndpoints
-import kui.connect.domain.{ConnectorFacts, ConnectorOperation}
+import kui.connect.domain.{ConnectorFacts, ConnectorOperation, ConnectorState, ConnectorTask}
 import kui.security.rbac.*
 
 /** The four routes, answered end to end: the interceptor chain, the principal check, the permission guard,
@@ -37,6 +38,67 @@ final class ConnectRoutesSuite extends CatsEffectSuite {
       ),
       defaultRole = None
     )
+
+  test("a connector list keeps only the connectors the caller's pattern allows") {
+    // `connect.list` is cluster-scoped, so a 200 is not evidence of filtering. The hidden connector carries
+    // a task trace: that string leaving the service is the leak, not merely an extra name.
+    val hidden = connector(
+      name = "b",
+      tasks = List(
+        ConnectorTask(
+          kui.kernel.TaskId.unsafe(0),
+          ConnectorState("FAILED"),
+          None,
+          Some("SECRET_TRACE do not show")
+        )
+      )
+    )
+    val policy = RbacPolicy(
+      roles = List(
+        Role(
+          name = operator,
+          clusters = Set(cluster),
+          subjects = Nil,
+          permissions = List(
+            RbacPolicy.permission(
+              Resource.Connector,
+              Some(ResourcePattern.compile("payments/a.*").getOrElse(fail("payments/a.*"))),
+              Set(Action.ConnectorView)
+            )
+          )
+        )
+      ),
+      defaultRole = None
+    )
+
+    resource(
+      rbac = policy,
+      answer = Right(
+        ConnectorFacts(
+          connectors = List(connector(name = "a"), hidden),
+          unreadable = List("a-unreadable", "b-unreadable")
+        )
+      )
+    ).use { rig =>
+      get(rig, connectorsPath(cluster), Set(operator)).map { response =>
+        val items = body(response).hcursor
+          .downField("connectors")
+          .downField("data")
+          .downField("workers")
+          .downN(0)
+          .downField("connectors")
+          .downField("data")
+        assertEquals(response.code.code, 200, response.body)
+        assertEquals(
+          items.downField("items").as[List[Json]].map(_.flatMap(_.hcursor.get[String]("name").toOption)),
+          Right(List("a"))
+        )
+        assertEquals(items.get[List[String]]("unreadable"), Right(List("a-unreadable")))
+        assert(!response.body.contains("SECRET_TRACE"), response.body)
+        assert(!response.body.contains("b-unreadable"), response.body)
+      }
+    }
+  }
 
   test("the connector list answers 200 with one section per configured Connect cluster") {
     resource().use(get(_, connectorsPath(cluster))).map { response =>

@@ -97,7 +97,8 @@ trait LagPollUseCase[F[_]] {
   def poll(
       cluster: ClusterId,
       groups: Set[GroupId],
-      since: Option[String]
+      since: Option[String],
+      visible: GroupId => Boolean = _ => true
   ): F[Either[KuiError, LagPollView]]
 }
 
@@ -115,7 +116,8 @@ object LagPollUseCase {
       def poll(
           cluster: ClusterId,
           groups: Set[GroupId],
-          since: Option[String]
+          since: Option[String],
+          visible: GroupId => Boolean
       ): F[Either[KuiError, LagPollView]] =
         snapshots.of(cluster).flatMap {
           case None =>
@@ -138,8 +140,8 @@ object LagPollUseCase {
               caughtUp = parsed.exists((id, version) => id == cluster && version == current.version)
               (changed, gone) =
                 if caughtUp then (Nil, Nil)
-                else if usable then diff(previous, current, groups)
-                else diff(None, current, groups)
+                else if usable then diff(previous, current, groups, visible)
+                else diff(None, current, groups, visible)
             } yield LagPollView(
               changed = changed,
               gone = gone,
@@ -159,9 +161,10 @@ object LagPollUseCase {
   def diff(
       previous: Option[GroupSnapshot],
       current: GroupSnapshot,
-      groups: Set[GroupId]
+      groups: Set[GroupId],
+      visible: GroupId => Boolean = _ => true
   ): (List[LagUpdate], List[GroupId]) = {
-    def wanted(id: GroupId): Boolean = groups.isEmpty || groups.contains(id)
+    def wanted(id: GroupId): Boolean = visible(id) && (groups.isEmpty || groups.contains(id))
 
     val now =
       current.summaries.filter(row => wanted(row.groupId)).map(row => row.groupId -> LagUpdate.of(row)).toMap

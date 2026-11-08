@@ -45,9 +45,8 @@ import kui.testkit.fakes.FakeStructuredLogger
   *
   * ==Where the 403 actually comes from==
   *
-  * This service wires `RbacGuard.allowAll` today, exactly as the two compatibility writes do, and the gateway
-  * is the enforcement point for a call that arrives through it. Both are the same `EndpointDecision` over the
-  * same declaration this endpoint carries, so the two cases below are the two halves of that: one calls
+  * The composition root wires `RbacGuard.fromPolicy` over `kui.rbac` (ADR-021). These cases do not go through
+  * that root. Both are the same `EndpointDecision` over the same declaration this endpoint carries: one calls
   * `decide` directly on the published endpoint value, and one binds the route behind a real `RbacGuard` and
   * reads the status code. Neither composes a permission by hand — both read the declaration
   * `SchemaMutationEndpoints.registerVersion` publishes, which is the thing that would be wrong if

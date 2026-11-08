@@ -19,7 +19,7 @@ import kui.config.{
 }
 import kui.contracts.capability.ServiceCapabilities
 import kui.http.health.ReadinessCheck
-import kui.http.principal.PrincipalVerification
+import kui.http.principal.{PrincipalVerification, RbacGuard}
 import kui.http.upstream.{HttpTls, UpstreamClient, UpstreamConfig}
 import kui.kernel.{ClusterId, PositiveInt}
 import kui.observability.Telemetry
@@ -29,6 +29,7 @@ import kui.schema.application.*
 import kui.schema.domain.SchemaRegistryPort
 import kui.schema.infrastructure.{ConfiguredClusterRegistries, RegistryCredentials, RegistryHttp}
 import kui.security.PrincipalCodec
+import kui.security.rbac.{ClusterFlags, RbacPolicy}
 
 /** Everything the schema service needs in order to be served, with no listener started.
   *
@@ -92,6 +93,9 @@ object SchemaWiring {
     *   the configured clusters, from `kui.clusters[]`, read from the same file this process already loaded.
     *   Unlike the other services this one needs no credentials from the cluster service: a registry's address
     *   and credentials are its own configuration block. See [[ConfiguredClusterRegistries]].
+    * @param rbac
+    *   this deployment's roles. The service re-runs the decision on its own port (ADR-021) and filters
+    *   subject lists with it. A disabled policy allows every read, which is the quickstart.
     * @param policy
     *   the address restriction applied to every registry URL. It is a parameter rather than
     *   `UrlPolicy.Strict`, because a Schema Registry is very often the one upstream that legitimately lives
@@ -100,6 +104,7 @@ object SchemaWiring {
     */
   def make[F[_]: {Async, Parallel}](
       clusters: List[ClusterConfig],
+      rbac: RbacPolicy,
       policy: UrlPolicy,
       telemetry: Telemetry[F],
       principals: PrincipalCodec[F],
@@ -136,6 +141,13 @@ object SchemaWiring {
       // *optional* dependency was slow — turning the one component KUI treats as hostile into a reason
       // for KUI itself to be restarted.
       readiness = List.empty[ReadinessCheck[F]]
+      // Read-only comes from `kui.clusters[]`, so a write to a read-only cluster is refused here whether or
+      // not the request came through the gateway. The same guard filters the subject list.
+      permissions = RbacGuard.fromPolicy[F](
+        rbac,
+        cluster => ClusterFlags(clusters.find(_.id == cluster).exists(_.readOnly)),
+        logger
+      )
     } yield SchemaServer(
       routes = SchemaApi.routes[F](
         subjects,
@@ -149,7 +161,8 @@ object SchemaWiring {
         capabilities,
         principals,
         rejections,
-        logger
+        logger,
+        permissions
       ),
       interceptors = interceptors,
       readiness = readiness,

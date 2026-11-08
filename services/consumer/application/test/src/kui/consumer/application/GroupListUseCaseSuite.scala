@@ -46,6 +46,20 @@ final class GroupListUseCaseSuite extends FunSuite {
     assertEquals(ids(GroupQuery.Default.copy(search = Some("ORDERS"))), List("orders"))
   }
 
+  test("a hidden group is excluded before paging, so it cannot occupy the page or the total") {
+    // Alphabetical order puts `audit` first. Filtering after `Page.of` would hand back that row and a
+    // total of four; the visible group is `orders` and the total is one.
+    val page = GroupListUseCase.applyQuery(
+      rows,
+      GroupQuery.Default.copy(pageSize = 1),
+      index,
+      visible = id => id.value.startsWith("order")
+    )
+
+    assertEquals(page.totalItems, Some(1L))
+    assertEquals(page.items.map(_.groupId.value), List("orders"))
+  }
+
   test("a total counts what is left after filtering, not before it") {
     val page =
       GroupListUseCase.applyQuery(rows, GroupQuery.Default.copy(states = Set(GroupState.Empty)), index)

@@ -71,7 +71,7 @@ object ConnectApi {
     val secured = Securing[F](principals, rejections, logger, guard)
 
     HealthEndpoints.make[F](readiness, capabilityDocument[F](capabilities, logger)) ++
-      ConnectRoutes[F](connect, secured)
+      ConnectRoutes[F](connect, secured, guard)
   }
 
   /** The cross-cutting chain, outermost first, in the order `libs/http`'s server wants it: principal, then

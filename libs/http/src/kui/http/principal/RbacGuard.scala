@@ -10,7 +10,15 @@ import kui.contracts.rbac.{EndpointAuthorization, EndpointDecision}
 import kui.kernel.ClusterId
 import kui.kernel.error.{ApplicationError, KuiError}
 import kui.security.Principal
-import kui.security.rbac.{ClusterFlags, Decision, RbacPolicy}
+import kui.security.rbac.{
+  AccessRequest,
+  ClusterFlags,
+  Decision,
+  OperationName,
+  Rbac,
+  RbacPolicy,
+  ResourceAccess
+}
 
 /** A service's own permission check, run on every route it serves.
   *
@@ -44,6 +52,19 @@ trait RbacGuard[F[_]] {
       endpoint: AnyEndpoint,
       requestPath: String
   ): F[Either[KuiError, Unit]]
+
+  /** Which names may appear on a list.
+    *
+    * List endpoints filter rather than refuse (ADR-021). `accessOf` builds one name's access, so a connector
+    * list can attach the parent-connect fallback that [[kui.security.rbac.ResourceAccess.connector]] owns.
+    * The predicate is pure and is applied before paging: a hidden name must not survive in a row, a total, or
+    * a trace.
+    */
+  def visibility(
+      principal: Principal,
+      cluster: ClusterId,
+      accessOf: String => ResourceAccess
+  ): F[String => Boolean]
 }
 
 object RbacGuard {
@@ -67,6 +88,12 @@ object RbacGuard {
           endpoint: AnyEndpoint,
           requestPath: String
       ): F[Either[KuiError, Unit]] = ().asRight[KuiError].pure[F]
+
+      def visibility(
+          principal: Principal,
+          cluster: ClusterId,
+          accessOf: String => ResourceAccess
+      ): F[String => Boolean] = ((_: String) => true).pure[F]
     }
 
   /** The real guard: this deployment's roles, and what it knows about each cluster.
@@ -120,6 +147,25 @@ object RbacGuard {
               )
               .as(refusal.asLeft[Unit])
         }
+      }
+
+      def visibility(
+          principal: Principal,
+          cluster: ClusterId,
+          accessOf: String => ResourceAccess
+      ): F[String => Boolean] = {
+        val flags = flagsFor(cluster)
+        val allow: String => Boolean = name =>
+          Rbac
+            .decide(
+              policy,
+              principal,
+              flags,
+              AccessRequest(Some(cluster), List(accessOf(name)), OperationName("list"))
+            )
+            .isAllowed
+
+        allow.pure[F]
       }
     }
 }

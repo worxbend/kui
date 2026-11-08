@@ -78,7 +78,7 @@ object ConsumerApi {
     val secured = Securing[F](principals, rejections, logger, guard)
 
     HealthEndpoints.make[F](readiness, capabilityDocument[F](capabilities, logger)) ++
-      ConsumerRoutes[F](list, detail, lag, forTopic, snapshots, secured) ++
+      ConsumerRoutes[F](list, detail, lag, forTopic, snapshots, secured, guard) ++
       ConsumerMutationRoutes[F](reset, deleteGroup, deleteOffsets, snapshots, secured)
   }
 

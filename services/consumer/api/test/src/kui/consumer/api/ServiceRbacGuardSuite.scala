@@ -1,9 +1,13 @@
 package kui.consumer.api
 
 import cats.effect.IO
+import io.circe.Json
+import io.circe.parser.parse
 import sttp.client4.*
 
-import kui.kernel.RoleName
+import kui.consumer.application.LagUpdate
+import kui.kernel.group.GroupState
+import kui.kernel.{GroupId, RoleName}
 import kui.security.rbac.*
 import kui.testkit.KuiIOSuite
 
@@ -24,7 +28,7 @@ import kui.testkit.KuiIOSuite
   */
 final class ServiceRbacGuardSuite extends KuiIOSuite {
 
-  import ConsumerTestServer.{Cluster, Group, path, resource, token, uri}
+  import ConsumerTestServer.{Cluster, Group, path, resource, summary, token, uri}
 
   private val reader: RoleName = RoleName.unsafe("reader")
 
@@ -90,13 +94,55 @@ final class ServiceRbacGuardSuite extends KuiIOSuite {
   }
 
   test("a list endpoint is reachable by anyone who may reach the cluster, and filters instead of refusing") {
-    // ADR-021's rule: a 403 on a list would tell a caller that groups they may not see exist.
-    resource(rbac = policy("order-.*", Action.ConsumerGroupView)).use { (server, _) =>
-      get(server, path("/consumer-groups"), Set(reader)).map { response =>
-        assertEquals(response.code.code, 200, response.body.fold(identity, identity))
+    // ADR-021's rule: a 403 on a list would tell a caller that groups they may not see exist. The fixture
+    // holds one group outside the pattern, or a 200 cannot tell filtering from returning the whole cluster.
+    val order = summary(GroupId.unsafe("order-a"), Some(1L))
+    val billing = summary(GroupId.unsafe("billing-x"), Some(9L))
+
+    resource(
+      groups = List(order, billing),
+      lag = List(lagOf("order-a"), lagOf("billing-x")),
+      gone = List(GroupId.unsafe("order-old"), GroupId.unsafe("billing-old")),
+      rbac = policy("order-.*", Action.ConsumerGroupView)
+    ).use { (server, _) =>
+      for {
+        listed <- get(server, path("/consumer-groups"), Set(reader))
+        polled <- get(server, path("/consumer-groups/lag"), Set(reader))
+      } yield {
+        val listBody = listed.body.fold(identity, identity)
+        val listJson = parse(listBody).fold(failure => fail(failure.message), identity)
+        assertEquals(listed.code.code, 200, listBody)
+        assertEquals(field(listJson, "groups", "data", "page", "totalItems"), Some(Json.fromInt(1)))
+        assertEquals(groupIds(listJson), List("order-a"))
+        assert(!listBody.contains("billing-x"), listBody)
+
+        val lagBody = polled.body.fold(identity, identity)
+        val lagJson = parse(lagBody).fold(failure => fail(failure.message), identity)
+        assertEquals(polled.code.code, 200, lagBody)
+        assertEquals(ids(lagJson, "changed"), List("order-a"))
+        assertEquals(ids(lagJson, "gone"), List("order-old"))
+        assert(!lagBody.contains("billing"), lagBody)
       }
     }
   }
+
+  private def lagOf(id: String): LagUpdate =
+    LagUpdate(GroupId.unsafe(id), Some(1L), None, GroupState.Stable, 1)
+
+  private def field(json: Json, path: String*): Option[Json] =
+    path.foldLeft(Option(json))((current, key) => current.flatMap(_.hcursor.downField(key).focus))
+
+  private def groupIds(json: Json): List[String] =
+    field(json, "groups", "data", "items")
+      .flatMap(_.as[List[Json]].toOption)
+      .getOrElse(Nil)
+      .flatMap(_.hcursor.get[String]("groupId").toOption)
+
+  private def ids(json: Json, fieldName: String): List[String] =
+    field(json, fieldName)
+      .flatMap(_.as[List[Json]].toOption)
+      .getOrElse(Nil)
+      .flatMap(item => item.as[String].toOption.orElse(item.hcursor.get[String]("groupId").toOption))
 
   test("a deployment with no roles configured is unaffected") {
     resource().use { (server, _) =>
