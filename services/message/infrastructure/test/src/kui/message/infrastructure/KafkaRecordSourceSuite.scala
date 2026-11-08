@@ -362,7 +362,8 @@ final class KafkaRecordSourceSuite extends KuiIOSuite {
     val clusters: ClusterProfileSource[IO] = (id: ClusterId) =>
       IO.pure(
         Right(
-          kui.message.domain.ports.BrowseCluster(id, "Local", readOnly = false, java.time.Instant.EPOCH, false)
+          kui.message.domain.ports
+            .BrowseCluster(id, "Local", readOnly = false, java.time.Instant.EPOCH, false)
         )
       )
     val serdes: SerdeSource[IO] = new SerdeSource[IO] {
@@ -1097,8 +1098,8 @@ final class KafkaRecordSourceSuite extends KuiIOSuite {
     }
   }
 
-  /** Sleeps for a minute when an offset call names a partition in `hangOn`, which is what the real
-    * client does for a leaderless or missing partition.
+  /** Sleeps for a minute when an offset call names a partition in `hangOn`, which is what the real client
+    * does for a leaderless or missing partition.
     */
   private def offsetGate(
       underlying: FakeBrowseConsumer,
