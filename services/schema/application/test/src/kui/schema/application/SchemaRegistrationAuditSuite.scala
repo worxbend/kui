@@ -3,7 +3,7 @@ package kui.schema.application
 import cats.effect.{Deferred, IO, Ref}
 
 import kui.kernel.Subject
-import kui.kernel.error.KuiError
+import kui.kernel.error.{InfrastructureError, KuiError}
 import kui.schema.domain.*
 import kui.security.Principal
 import kui.security.audit.{MutationOutcome, MutationRecord}
@@ -66,6 +66,32 @@ final class SchemaRegistrationAuditSuite extends KuiIOSuite {
         )
         written <- records.get
       } yield assertEquals(written.map(_.outcome), List(MutationOutcome.Refused, MutationOutcome.Refused))
+    }
+  }
+
+  test("a registry call timeout is audited as unknown, because the schema may already be stored") {
+    val timedOut = InfrastructureError.Timeout("schema-registry", 10000)
+    rig(Some(IO.pure(Left(timedOut)))).flatMap { (useCase, records) =>
+      for {
+        result <- useCase.register(Principal.Anonymous, SchemaRig.WithRegistry, subject, proposed)
+        written <- records.get
+      } yield {
+        assertEquals(result, Left(timedOut))
+        assertEquals(written.map(_.outcome), List(MutationOutcome.Unknown))
+      }
+    }
+  }
+
+  test("a bulkhead rejection is audited as refused, because the registration was never sent") {
+    val bulkhead = InfrastructureError.Timeout("schema-registry (bulkhead full)", 0)
+    rig(Some(IO.pure(Left(bulkhead)))).flatMap { (useCase, records) =>
+      for {
+        result <- useCase.register(Principal.Anonymous, SchemaRig.WithRegistry, subject, proposed)
+        written <- records.get
+      } yield {
+        assertEquals(result, Left(bulkhead))
+        assertEquals(written.map(_.outcome), List(MutationOutcome.Refused))
+      }
     }
   }
 

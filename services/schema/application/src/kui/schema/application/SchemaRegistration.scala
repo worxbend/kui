@@ -87,9 +87,14 @@ object RegisterSchemaUseCase {
                   s"schemaId=${registered.id.value};version=${registered.version.fold("unknown")(_.value.toString)}"
                 record(principal, cluster, subject, MutationOutcome.Succeeded, Some(after), None)
               case Left(error) =>
-                val outcome =
-                  if error.code.httpStatus < 500 then MutationOutcome.Refused else MutationOutcome.Failed
-                record(principal, cluster, subject, outcome, None, Some(error.code.wire))
+                record(
+                  principal,
+                  cluster,
+                  subject,
+                  MutationOutcome.ofError(error),
+                  None,
+                  Some(error.code.wire)
+                )
             }
           case Outcome.Errored(_) =>
             record(principal, cluster, subject, MutationOutcome.Failed, None, Some(ErrorCode.Internal.wire))

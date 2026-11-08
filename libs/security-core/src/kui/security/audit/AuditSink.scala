@@ -5,6 +5,7 @@ import java.time.Instant
 import cats.Applicative
 
 import kui.kernel.ClusterId
+import kui.kernel.error.{InfrastructureError, KuiError}
 import kui.security.{Principal, PrincipalKind}
 
 /** What kind of change an operation makes to a cluster.
@@ -100,6 +101,21 @@ enum MutationOutcome {
 
 object MutationOutcome {
   given CanEqual[MutationOutcome, MutationOutcome] = CanEqual.derived
+
+  /** How a returned [[KuiError]] is recorded.
+    *
+    * A call timeout (`afterMs > 0`) fires after the request was sent, so the upstream may already have
+    * applied it. Recording that as [[Refused]] would claim it did not. A bulkhead rejection is the same error
+    * with `afterMs == 0` and never left the process, and an open circuit never sends either. Every other
+    * error keeps the status split: below 500 is a refusal, and 500 or above is a failure.
+    */
+  def ofError(error: KuiError): MutationOutcome =
+    error match {
+      case InfrastructureError.Timeout(_, afterMs) if afterMs > 0 => Unknown
+      case _: InfrastructureError.CircuitOpen => Refused
+      case other if other.code.httpStatus < 500 => Refused
+      case _ => Failed
+    }
 }
 
 /** One thing that was done, or attempted, to a cluster.

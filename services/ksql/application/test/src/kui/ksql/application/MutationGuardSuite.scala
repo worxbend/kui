@@ -79,6 +79,28 @@ final class MutationGuardSuite extends CatsEffectSuite {
     }
   }
 
+  test("a call timeout is Unknown and a bulkhead rejection is Refused") {
+    // The timeout fires after the statement was sent. ksqlDB writes the command before it answers, so a
+    // record saying Refused would tell an incident review the statement never ran. A bulkhead rejection is
+    // the same error with a zero wait, and the call never left the process.
+    val timedOut: Either[KuiError, Unit] = Left(InfrastructureError.Timeout("ksqldb", 10000))
+    val bulkhead: Either[KuiError, Unit] = Left(InfrastructureError.Timeout("ksqldb (bulkhead full)", 0))
+    val open: Either[KuiError, Unit] =
+      Left(InfrastructureError.CircuitOpen("ksqldb", java.time.Instant.EPOCH))
+
+    recording.flatMap { (guard, sink) =>
+      for {
+        _ <- guard.guard(alice, cluster, statement, "ksql.statement")(IO.pure(timedOut))
+        _ <- guard.guard(alice, cluster, statement, "ksql.statement")(IO.pure(bulkhead))
+        _ <- guard.guard(alice, cluster, statement, "ksql.statement")(IO.pure(open))
+        entries <- sink.entries.get
+      } yield assertEquals(
+        entries.map(_.outcome),
+        List(MutationOutcome.Unknown, MutationOutcome.Refused, MutationOutcome.Refused)
+      )
+    }
+  }
+
   test("a refusal below 500 is Refused and a failure at or above it is Failed") {
     // The split an audit reader depends on: "ksqlDB said no" and "KUI could not reach ksqlDB" are
     // different incidents, and a trail that filed both as failures cannot tell them apart.

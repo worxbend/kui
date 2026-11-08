@@ -4,7 +4,7 @@ import cats.effect.IO
 import cats.effect.kernel.{Deferred, Ref}
 
 import kui.kernel.Subject
-import kui.kernel.error.ErrorCode
+import kui.kernel.error.{ErrorCode, InfrastructureError}
 import kui.schema.domain.*
 import kui.security.Principal
 import kui.security.audit.{AuditSink, MutationKind, MutationOutcome, MutationRecord}
@@ -208,6 +208,30 @@ final class SetCompatibilitySuite extends KuiIOSuite {
     } yield {
       assertEquals(result.left.map(_.code), Left(ErrorCode.Unsupported))
       assertEquals(records.map(_.outcome), List(MutationOutcome.Failed))
+    }
+  }
+
+  test("a registry call timeout is audited as unknown and a bulkhead rejection as refused") {
+    // The PUT may already have been applied when the call budget runs out. A bulkhead rejection is the
+    // same timeout type with a zero wait, and that request never left.
+    val timedOut = InfrastructureError.Timeout("schema-registry", 10000)
+    val bulkhead = InfrastructureError.Timeout("schema-registry (bulkhead full)", 0)
+    for {
+      slow <- SchemaRig.registry(failure = Some(timedOut))
+      timedPair <- rig(slow)
+      (timedUseCase, timedAudit) = timedPair
+      timed <- timedUseCase.setGlobal(who, SchemaRig.WithRegistry, CompatibilityLevel.None)
+      timedRecords <- timedAudit.records.get
+      full <- SchemaRig.registry(failure = Some(bulkhead))
+      refusedPair <- rig(full)
+      (refusedUseCase, refusedAudit) = refusedPair
+      refused <- refusedUseCase.setGlobal(who, SchemaRig.WithRegistry, CompatibilityLevel.None)
+      refusedRecords <- refusedAudit.records.get
+    } yield {
+      assertEquals(timed, Left(timedOut))
+      assertEquals(timedRecords.map(_.outcome), List(MutationOutcome.Unknown))
+      assertEquals(refused, Left(bulkhead))
+      assertEquals(refusedRecords.map(_.outcome), List(MutationOutcome.Refused))
     }
   }
 

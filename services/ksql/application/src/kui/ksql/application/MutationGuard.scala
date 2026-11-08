@@ -139,10 +139,8 @@ object MutationGuard {
                 )
                 write(outcome, reason).as(value.asRight[KuiError])
               case Left(error) =>
-                val outcome =
-                  if error.code.httpStatus < 500 then MutationOutcome.Refused else MutationOutcome.Failed
-
-                write(outcome, Some(s"${error.code.wire}: ${error.message}")).as(error.asLeft[A])
+                write(MutationOutcome.ofError(error), Some(s"${error.code.wire}: ${error.message}"))
+                  .as(error.asLeft[A])
             }
         }
       }

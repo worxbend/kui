@@ -232,7 +232,7 @@ object SetCompatibilityUseCase {
                         .as(value.asRight[KuiError])
                     case (before, Left(error)) =>
                       write(
-                        MutationOutcome.Failed,
+                        MutationOutcome.ofError(error),
                         before.orElse(Some(UnknownBefore)),
                         Some(s"${error.code.wire}: ${error.message}")
                       ).as(error.asLeft[A])

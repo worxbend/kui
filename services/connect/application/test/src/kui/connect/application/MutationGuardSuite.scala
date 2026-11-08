@@ -6,7 +6,8 @@ import cats.effect.IO
 import cats.syntax.all.*
 
 import kui.connect.domain.ConnectorOperation
-import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
+import kui.kernel.error.{ApplicationError, ErrorCode, InfrastructureError, KuiError}
+import kui.security.audit.MutationOutcome
 import kui.testkit.KuiIOSuite
 import kui.testkit.fakes.FakeStructuredLogger
 
@@ -58,6 +59,28 @@ final class MutationGuardSuite extends KuiIOSuite {
       assertEquals(written.map(_.resource), List("payments/elastic-sink"))
       assertEquals(written.head.detail, Map.empty[String, String])
     }
+  }
+
+  test("a call timeout is Unknown and a bulkhead rejection is Refused") {
+    // A restart that times out may already have been accepted by the worker. Recording Refused claims it
+    // was not. The bulkhead case never sent the request, and an open circuit did not either.
+    for {
+      sink <- RecordingSink.create
+      mutations <- guard(sink)
+      _ <- mutations.guard(caller, cluster, payments, elastic, ConnectorOperation.Restart)(
+        IO.pure(InfrastructureError.Timeout("connect", 10000).asLeft[Unit])
+      )
+      _ <- mutations.guard(caller, cluster, payments, elastic, ConnectorOperation.Restart)(
+        IO.pure(InfrastructureError.Timeout("connect (bulkhead full)", 0).asLeft[Unit])
+      )
+      _ <- mutations.guard(caller, cluster, payments, elastic, ConnectorOperation.Restart)(
+        IO.pure(InfrastructureError.CircuitOpen("connect", java.time.Instant.EPOCH).asLeft[Unit])
+      )
+      written <- sink.written.get
+    } yield assertEquals(
+      written.map(_.outcome),
+      List(MutationOutcome.Unknown, MutationOutcome.Refused, MutationOutcome.Refused)
+    )
   }
 
   test("a refusal under 500 is Refused and a failure at or over it is Failed") {
