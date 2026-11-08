@@ -109,6 +109,39 @@ export function scratchTopic(what: string): string {
   return `kui-e2e-${what}-${Date.now()}`;
 }
 
+/** What `POST /api/v1/clusters/{clusterId}/topics` takes, as far as these specs use it. */
+export interface NewScratchTopic {
+  readonly name: string;
+  readonly partitions?: number;
+  readonly config?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Creates a topic over HTTP, and returns only once the gateway can describe it.
+ *
+ * The create's answer is not that promise. `KafkaTopicWriter.create` returns when
+ * `Admin#createTopics` does, which is when the controller has committed the topic, and Kafka's own
+ * contract says a broker may not know the topic for a while after that. The read-back that fills
+ * the 200's partition count swallows exactly that miss (`TopicAdminUseCase.create` falls back to the
+ * request's own figures), while the topic page and the deletion plan read live and treat an unknown
+ * topic as a final 404. So a case that created a topic and opened it straight away was racing the
+ * broker's metadata: on a loaded runner it opened a page for a topic that "did not exist", which is
+ * what `QUALITY_REVIEW.md` recorded for the topic-delete case.
+ *
+ * The wait asks the same question those screens ask, `GET …/topics/{name}`, and stops at the first
+ * 200. On a quiet stack that is the first attempt.
+ */
+export async function createTopic(api: KuiApi, topic: NewScratchTopic): Promise<void> {
+  await api.post(`/api/v1/clusters/${CLUSTER}/topics`, { config: {}, ...topic });
+  const detail = `${API}/api/v1/clusters/${CLUSTER}/topics/${encodeURIComponent(topic.name)}`;
+  await expect
+    .poll(async () => (await api.raw.get(detail)).status(), {
+      message: `${topic.name} was created, but the gateway still cannot describe it`,
+      timeout: 20_000,
+    })
+    .toBe(200);
+}
+
 /**
  * Removes a topic, and does not care whether it was there.
  *
