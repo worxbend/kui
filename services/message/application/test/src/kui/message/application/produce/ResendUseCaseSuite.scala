@@ -3,13 +3,15 @@ package kui.message.application.produce
 import java.time.Instant
 
 import cats.effect.IO
+import cats.effect.kernel.Ref
+import fs2.Stream
 import munit.CatsEffectSuite
 
-import kui.kernel.browse.PollBudget
+import kui.kernel.browse.{IsolationLevel, PollBudget}
 import kui.kernel.error.ErrorCode
 import kui.kernel.{Offset, OffsetRange, PartitionId}
-import kui.message.application.{RawHeader, RawRecord}
-import kui.message.domain.{Destination, ResendRequest, SourceRange, TimestampType}
+import kui.message.application.{RawHeader, RawRecord, RecordSource}
+import kui.message.domain.{BrowseRequest, Destination, ResendRequest, SourceRange, TimestampType}
 import kui.security.audit.{MutationKind, MutationOutcome}
 
 /** Copying records into another topic.
@@ -239,6 +241,21 @@ final class ResendUseCaseSuite extends CatsEffectSuite {
     }
   }
 
+  test("a resend reads the source as committed so an aborted transaction is not replayed") {
+    // Browse defaults to read_uncommitted on purpose. A resend copies what it reads into another topic
+    // as ordinary records, so an aborted or still-open transaction would be replayed as committed data.
+    for {
+      seen <- Ref.of[IO, List[BrowseRequest]](Nil)
+      producers <- FakeProducers.make()
+      audit <- RecordingAudit.make
+      guard <- guardFor(new Profiles(readOnly = false), audit)
+      records = new CapturingRecords(new FakeRecords(List(record(10L), record(11L), record(12L))), seen)
+      resend = ResendUseCase.make[IO](producers, records, guard, budget, ResendLimits.Default)
+      _ <- resend.resend(ProduceRig.Caller, requestOf())
+      scanned <- seen.get
+    } yield assertEquals(scanned.map(_.isolation), List(IsolationLevel.ReadCommitted))
+  }
+
   test("copyingAPartitionOntoItselfIsRefusedByTheDomain") {
     // It would append every record it reads and then read what it appended. The domain refuses it, so no
     // use case can be written that does it by accident.
@@ -254,5 +271,30 @@ final class ResendUseCaseSuite extends CatsEffectSuite {
     )
 
     assert(same.isLeft, s"copying a partition onto itself must be refused: $same")
+  }
+
+  /** Records the browse a resend actually scans. `FakeRecords` answers the log and drops the request, which
+    * is what hid `isolation = None` falling through to read_uncommitted.
+    */
+  final private class CapturingRecords(inner: FakeRecords, seen: Ref[IO, List[BrowseRequest]])
+      extends RecordSource[IO] {
+
+    override def scan(
+        request: BrowseRequest,
+        budget: PollBudget,
+        upperOffsets: Map[PartitionId, Offset]
+    ): Stream[IO, kui.message.application.ScanEvent] =
+      Stream.eval(seen.update(_ :+ request)) >> inner.scan(request, budget, upperOffsets)
+
+    def browse(
+        request: BrowseRequest,
+        budget: PollBudget
+    ): Stream[IO, Either[kui.kernel.error.KuiError, RawRecord]] =
+      inner.browse(request, budget)
+
+    def assignedStarts(
+        request: BrowseRequest
+    ): IO[Either[kui.kernel.error.KuiError, Map[PartitionId, Offset]]] =
+      inner.assignedStarts(request)
   }
 }

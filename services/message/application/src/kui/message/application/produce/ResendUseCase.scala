@@ -3,7 +3,7 @@ package kui.message.application.produce
 import cats.effect.kernel.Async
 import cats.syntax.all.*
 
-import kui.kernel.browse.{Direction, PollBudget, SeekMode}
+import kui.kernel.browse.{Direction, IsolationLevel, PollBudget, SeekMode}
 import kui.kernel.error.{ApplicationError, FieldError, KuiError}
 import kui.message.application.{RawRecord, RecordSource, ScanCompletion, ScanEvent}
 import kui.message.domain.*
@@ -125,6 +125,11 @@ object ResendUseCase {
         *
         * The records are filtered to the requested range afterwards anyway: `limit` bounds how many come
         * back, not which, and retention moving underneath the read is a normal condition rather than a fault.
+        *
+        * Isolation is read-committed, not the browse default. A browse shows an operator the same records
+        * their applications see, including ones from a transaction that has not committed. A resend writes
+        * the bytes it reads back out as ordinary records, so that default would publish an aborted
+        * transaction as committed data. The request has no isolation field; this is not a caller choice.
         */
       private def read(request: ResendRequest): F[Either[KuiError, List[RawRecord]]] =
         BrowseRequest.of(
@@ -134,7 +139,7 @@ object ResendUseCase {
           direction = Some(Direction.Forward),
           partitions = Some(Set(request.source.partition)),
           limit = Some(request.source.offsets.size.toInt),
-          isolation = None,
+          isolation = Some(IsolationLevel.ReadCommitted),
           keySerde = None,
           valueSerde = None,
           stringFilter = None,
