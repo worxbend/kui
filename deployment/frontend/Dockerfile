@@ -21,7 +21,8 @@
 # Everything that varies between deployments is read at *container start*, not baked in at build
 # time, so one image runs in every environment:
 #
-#   KUI_GATEWAY_URL   where the API is            (default http://kui:8080)
+#   KUI_GATEWAY_URL   where the API is            (default http://kui:8080; scheme and
+#                     authority only, no path)
 #   KUI_BASE_PATH     mount point behind a proxy  (default empty, i.e. served at /)
 #   KUI_BUILD_VERSION shown on the settings page  (default "unknown")
 #

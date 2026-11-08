@@ -199,7 +199,9 @@ directly reachable from users.
 
 The frontend container needs:
 
-- `KUI_GATEWAY_URL`, an internal URL such as `http://kui-gateway:8080`;
+- `KUI_GATEWAY_URL`, an internal origin such as `http://kui-gateway:8080`. A trailing
+  slash is removed. A path is refused: nginx would replace `/api/` with that path and every
+  API call would 404 while `/healthz` stayed healthy;
 - `KUI_BASE_PATH`, empty for a root deployment or a prefix such as `/kui`;
 - `KUI_BUILD_VERSION`, the release identifier built and deployed with the backend.
 

@@ -14,6 +14,27 @@ GATEWAY="${KUI_GATEWAY_URL:-http://kui:8080}"
 BASE_PATH="${KUI_BASE_PATH:-}"
 BUILD_VERSION="${KUI_BUILD_VERSION:-unknown}"
 
+# A trailing slash is the natural way to write a base URL, and nginx treats any URI on
+# proxy_pass — even a lone "/" — as a prefix replacement. `/api/v1/...` would then reach the
+# gateway as `/v1/...` and 404, while /healthz, which nginx answers itself, stayed green.
+# Keep scheme and authority only.
+GATEWAY="${GATEWAY%/}"
+case "$GATEWAY" in
+  http://*|https://*)
+    gateway_authority="${GATEWAY#*://}"
+    ;;
+  *)
+    echo "kui-frontend: KUI_GATEWAY_URL must be an http(s) origin with no path (got: ${GATEWAY})" >&2
+    exit 1
+    ;;
+esac
+case "$gateway_authority" in
+  ""|*/*)
+    echo "kui-frontend: KUI_GATEWAY_URL must be an http(s) origin with no path (got: ${GATEWAY})" >&2
+    exit 1
+    ;;
+esac
+
 # A trailing slash on the mount point breaks both the `<base href>` and every `location`, and it is
 # the natural way to write it. Strip it rather than refusing.
 BASE_PATH="${BASE_PATH%/}"

@@ -232,6 +232,7 @@ class FrontendProxy(unittest.TestCase):
             'server { listen 8080; large_client_header_buffers 4 16k; '
             'location / { return 200 "upstream:$request_uri"; } }\n')
         cls.prefixes = ("", "/kui", "/ops/kui")
+        cls.trailing_slash = None
         for prefix in cls.prefixes:
             container = run(
                 "docker", "run", "--rm", "-d", "--network", "none", "--read-only",
@@ -255,6 +256,27 @@ class FrontendProxy(unittest.TestCase):
                 if time.monotonic() >= deadline:
                     raise AssertionError(run("docker", "logs", container).stdout)
                 time.sleep(0.05)
+        slash = run(
+            "docker", "run", "--rm", "-d", "--network", "none", "--read-only",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+            "--tmpfs", "/tmp", "--tmpfs", "/etc/nginx/conf.d:mode=0777",
+            "-e", "KUI_GATEWAY_URL=http://127.0.0.1:8080/",
+            "-v", f"{fixtures}:/usr/share/nginx/html/ui:ro",
+            "-v", f"{ROOT / 'deployment/frontend/entrypoint.sh'}:/configure.sh:ro",
+            "--entrypoint", "sh", IMAGE, "-ec",
+            "sh /configure.sh; cp /usr/share/nginx/html/ui/upstream.conf "
+            "/etc/nginx/conf.d/upstream.conf; exec nginx -g 'daemon off;'",
+        ).stdout.strip()
+        cls.containers.append(slash)
+        cls.trailing_slash = slash
+        deadline = time.monotonic() + 10
+        while True:
+            result = cls.fetch(slash, "/healthz")
+            if result.returncode == 0:
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError(run("docker", "logs", slash).stdout)
+            time.sleep(0.05)
 
     @classmethod
     def cleanup_containers(cls):
@@ -286,6 +308,12 @@ class FrontendProxy(unittest.TestCase):
             missing = self.fetch(container, prefix + "/ui/assets/missing.js")
             self.assertIn("404 Not Found", missing.stderr)
             self.assertNotIn("kui-bootstrap", missing.stdout)
+
+    def test_trailing_slash_on_gateway_url_keeps_the_api_prefix(self):
+        path = "/api/v1/health/ready?check=1"
+        result = self.fetch(self.trailing_slash, path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "upstream:" + path)
 
     def test_api_preserves_prefix_and_query(self):
         for container, prefix in zip(self.containers, self.prefixes):
