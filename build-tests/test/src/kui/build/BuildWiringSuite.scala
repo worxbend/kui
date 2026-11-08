@@ -318,7 +318,8 @@ final class BuildWiringSuite extends FunSuite {
         "build.mill",
         ".github/workflows/ci.yml",
         "frontend/package.json",
-        "deployment/frontend/Dockerfile"
+        "deployment/frontend/Dockerfile",
+        "deployment/quickstart/Dockerfile"
       ),
       clue = s"the files declared as inputs of build-tests.test are ${declaredInputs.toList.sorted}. This " +
         "case is the roster: a file added to build.mill's `buildWiringInputs` belongs here, and a file " +
@@ -490,6 +491,32 @@ final class BuildWiringSuite extends FunSuite {
         "package's directory. Both names are real packages, so ci.yml's manifest step compares two equal " +
         "sets and exits 0; the image it builds has `packages/<a>/package.json` declaring `@kui/<b>`, and " +
         "pnpm resolves a workspace in which two packages have swapped identities."
+    )
+  }
+
+  test("imageSourceLabelNamesThisRepository") {
+    val source = "https://github.com/worxbend/kui"
+    val assignment = (
+      """"org\.opencontainers\.image\.source"\s+->\s+"""" +
+        java.util.regex.Pattern.quote(source) + "\""
+    ).r
+    val build = readDeclared("build.mill")
+    assert(
+      assignment.findFirstIn(build).isDefined,
+      clue = s"deployment.docker labels do not set org.opencontainers.image.source to $source"
+    )
+    assert(
+      !build.contains("https://github.com/kui/kui"),
+      clue = "build.mill still points an image source label at github.com/kui/kui"
+    )
+    val dockerfile = readDeclared("deployment/quickstart/Dockerfile")
+    assert(
+      dockerfile.contains(s"""LABEL "org.opencontainers.image.source"="$source""""),
+      clue = s"deployment/quickstart/Dockerfile does not label the image with $source"
+    )
+    assert(
+      !dockerfile.contains("https://github.com/kui/kui"),
+      clue = "the quickstart Dockerfile still points its source label at github.com/kui/kui"
     )
   }
 }

@@ -3806,7 +3806,7 @@ object deployment extends Module {
             "org.opencontainers.image.description" -> imageDescription,
             "org.opencontainers.image.version"     -> kuiVersion(),
             "org.opencontainers.image.revision"    -> gitRevision(),
-            "org.opencontainers.image.source"      -> "https://github.com/kui/kui",
+            "org.opencontainers.image.source"      -> "https://github.com/worxbend/kui",
             "org.opencontainers.image.licenses"    -> "Apache-2.0"
           )
         }
@@ -4423,7 +4423,8 @@ object `build-tests` extends KuiPureModule with KuiJvmModule {
       mill.api.BuildCtx.workspaceRoot / "build.mill",
       mill.api.BuildCtx.workspaceRoot / ".github/workflows/ci.yml",
       mill.api.BuildCtx.workspaceRoot / "frontend/package.json",
-      mill.api.BuildCtx.workspaceRoot / "deployment/frontend/Dockerfile"
+      mill.api.BuildCtx.workspaceRoot / "deployment/frontend/Dockerfile",
+      mill.api.BuildCtx.workspaceRoot / "deployment/quickstart/Dockerfile"
     )
 
     override def forkEnv: T[Map[String, String]] = Task {

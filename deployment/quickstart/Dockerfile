@@ -49,7 +49,7 @@ FROM eclipse-temurin:21-jre
 
 LABEL "org.opencontainers.image.title"="kui-allinone"
 LABEL "org.opencontainers.image.description"="KUI all-in-one: the gateway and every service in one process"
-LABEL "org.opencontainers.image.source"="https://github.com/kui/kui"
+LABEL "org.opencontainers.image.source"="https://github.com/worxbend/kui"
 LABEL "org.opencontainers.image.licenses"="Apache-2.0"
 
 # No user account is created for uid 1001, only the number, which is why `whoami` fails inside the
