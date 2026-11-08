@@ -9,9 +9,9 @@ access and CSRF checks on mutations.
 
 ## Reverse proxies and client-address budgets
 
-By default **no proxy is trusted**. Login, password-change and anonymous-session
-creation budgets use the socket peer address. A deployment behind a reverse proxy
-must explicitly name its proxy's literal addresses:
+By default **no proxy is trusted**. Login, password-change, OIDC-start and
+anonymous-session creation budgets use the socket peer address. A deployment
+behind a reverse proxy must explicitly name its proxy's literal addresses:
 
 ```yaml
 kui:
@@ -39,6 +39,8 @@ Budgets are per gateway process, in fixed one-minute windows:
 - Login: 20 attempts per client IP and 5 per canonical username (trimmed,
   case-insensitive).
 - Password changes: 10 attempts per client IP.
+- OIDC start: 10 per browser session and 20 per client IP. A refused start does
+  not call identity.
 - New anonymous sessions: 30 per client IP and 600 process-wide. Existing valid
   sessions do not consume that creation budget. Exhaustion returns HTTP 429.
 
@@ -49,12 +51,15 @@ session cookies; only creation or explicit sign-in rotation issues a cookie.
 
 ## OIDC and credential persistence
 
-An OIDC state is bound to the initiating gateway session, expires after ten
-minutes, and is consumed atomically before code redemption. A callback without
-that browser's session cannot redeem its state. One pending flow per session is
-kept, bounded to 10,000 pending browser sessions. Starting again replaces that
-browser's previous flow. Session loss or gateway restart requires restarting
-sign-in.
+An OIDC state is bound to the initiating gateway session, expires after five
+minutes — the same window identity keeps the pending login — and is consumed
+atomically before code redemption. A callback without that browser's session
+cannot redeem its state. One pending flow per session is kept, bounded to
+10,000 pending browser sessions. Starting again replaces that browser's gateway
+binding. Identity keeps each issued state until it is redeemed or expires; the
+start budget above is what stops one browser from filling that store and
+evicting someone else's sign-in. Session loss or gateway restart requires
+restarting sign-in.
 
 Identity password overrides use `ConfigStoreResource`: Kafka configuration takes
 precedence, with topic bootstrap, encryption and replay owned by the resource.

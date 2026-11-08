@@ -17,12 +17,18 @@ final class BrowserOidcStateSuite extends KuiIOSuite {
       for {
         bound <- states.bind(session, "state")
         results <- List.fill(20)(states.consume(session, "state")).parSequence
+        held <- states.bind(session, "held")
+        _ <- IO.sleep(299.seconds)
+        still <- states.consume(session, "held")
         rebound <- states.bind(session, "expired")
-        _ <- IO.sleep(10.minutes)
+        // Identity forgets a pending login after five minutes. A gateway binding that outlasts that
+        // accepts a callback identity can no longer complete.
+        _ <- IO.sleep(301.seconds)
         expired <- states.consume(session, "expired")
       } yield {
-        assert(bound && rebound)
+        assert(bound && held && rebound)
         assertEquals(results.count(identity), 1)
+        assertEquals(still, true)
         assertEquals(expired, false)
       }
     }

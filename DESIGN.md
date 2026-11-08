@@ -54,7 +54,7 @@ overall, because no evidence of production scale, paying users, or compliance sc
 | F3 | The distributed compose stack runs the gateway, 9 services and the frontend, with auth `disabled` (asserted by smoke) | `deployment/compose/docker-compose.yml`, `smoke.sh:1043` |
 | F4 | The quickstart (including `--with-auth`) runs `kui-allinone` | `deployment/quickstart/docker-compose.quickstart.yml:453` |
 | F5 | One gateway replica only. Sessions live in process memory. | `docs/operations/deployment.md` |
-| F6 | Session creation budget: 30 new anonymous sessions per IP per minute, 600 per process. Login: 20/IP, 5/username per minute. | `docs/operations/gateway-authentication.md` |
+| F6 | Session creation budget: 30 new anonymous sessions per IP per minute, 600 per process. Login: 20/IP, 5/username per minute. OIDC start: 10/session, 20/IP per minute. | `docs/operations/gateway-authentication.md` |
 | F7 | Playwright runs serially (`workers: 1`), with 128 selected cases | `frontend/playwright.config.ts:48-52`, QUALITY_REVIEW |
 | F8 | Upstream HTTP budget per backend: 10 finite + 10 streaming sockets, at most 256 queued per pool | `DEPENDENCY_MATRIX.md` |
 | F9 | Metadata lives in compacted Kafka topics `__kui_config` (one partition) and `__kui_files` (4 MiB cap), plus `__kui_audit`. There is no RDBMS. | ARCHITECTURE.md §10.1 |

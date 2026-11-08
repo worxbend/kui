@@ -16,7 +16,7 @@ final private[auth] class BrowserOidcState[F[_]: Sync] {
       pending.modify { entries =>
         val live = entries.filter((_, entry) => entry._2.isAfter(now))
         if live.size >= 10000 && !live.contains(session) then (live, false)
-        else (live.updated(session, (state, now.plusSeconds(600))), true)
+        else (live.updated(session, (state, now.plusSeconds(BrowserOidcState.TtlSeconds))), true)
       }
     }
 
@@ -28,4 +28,12 @@ final private[auth] class BrowserOidcState[F[_]: Sync] {
         (if matches then live - session else live, matches)
       }
     }
+}
+
+object BrowserOidcState {
+
+  /** Five minutes, matching identity's pending-login TTL. A longer binding accepts a callback the identity
+    * service has already forgotten.
+    */
+  private[auth] val TtlSeconds: Long = 300
 }

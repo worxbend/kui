@@ -35,8 +35,9 @@ import kui.kernel.Secret
   * "expired" from "never existed" — the same information a guessed token would otherwise leak.
   *
   * **Bounded.** Both flows are reachable without being signed in, so anything that grows per request is a way
-  * for an unauthenticated client to exhaust memory. When the store is full the *oldest* entry goes, which is
-  * the one closest to expiring anyway.
+  * for an unauthenticated client to exhaust memory. When the store is full the oldest entry goes. The TTL is
+  * fixed and a replaced token's expiry moves forward with it, so insertion order — with a refresh moved to
+  * the end — is expiry order, and remembering does not sort the store.
   *
   * ==Why there is no sweeper fiber==
   *
@@ -84,12 +85,23 @@ object SingleUseTokens {
 
   final private case class Entry[A](payload: A, expiresAt: Instant)
 
+  /** Entries in expiry order. A fixed TTL makes that the order they were remembered, except a token
+    * remembered again, whose new expiry is later, so it moves to the end.
+    */
+  final private case class Ledger[A](entries: Map[String, Entry[A]], order: Vector[String]) {
+    def remove(key: String): Ledger[A] = Ledger(entries - key, order.filterNot(_ == key))
+  }
+
+  private object Ledger {
+    def empty[A]: Ledger[A] = Ledger(Map.empty, Vector.empty)
+  }
+
   def make[F[_]: Async, A](
       ttl: FiniteDuration = DefaultTtl,
       capacity: Int = DefaultCapacity
   ): F[SingleUseTokens[F, A]] =
     for {
-      cell <- AtomicCell[F].of(Map.empty[String, Entry[A]])
+      cell <- AtomicCell[F].of(Ledger.empty[A])
       random <- Sync[F].delay(new SecureRandom())
     } yield new SingleUseTokens[F, A] {
 
@@ -102,24 +114,30 @@ object SingleUseTokens {
         val expiry = now.plusMillis(ttl.toMillis)
         cell.evalUpdate { state =>
           // Expired entries go on every write, which is the only operation that can make the store
-          // grow; the bound then drops whatever is closest to expiring.
-          val alive = state.filter((_, entry) => entry.expiresAt.isAfter(now))
-          val bounded =
-            if alive.sizeIs < capacity then alive
-            else alive.toList.sortBy(_._2.expiresAt).drop(1 + alive.size - capacity).toMap
-          Sync[F].pure(bounded + (token.value -> Entry(payload, expiry)))
+          // grow. What remains is already in expiry order, so the bound drops from the front.
+          val alive = state.order.filter(key => state.entries.get(key).exists(_.expiresAt.isAfter(now)))
+          val withoutThis = alive.filterNot(_ == token.value)
+          val kept =
+            if withoutThis.sizeIs < capacity then withoutThis
+            else withoutThis.drop(withoutThis.size - (capacity - 1))
+          val nextOrder = kept :+ token.value
+          val nextEntries = nextOrder.iterator.map { key =>
+            val entry = if key == token.value then Entry(payload, expiry) else state.entries(key)
+            key -> entry
+          }.toMap
+          Sync[F].pure(Ledger(nextEntries, nextOrder))
         }
       }
 
       def redeem(token: Secret[String], now: Instant): F[Option[A]] =
         cell.evalModify { state =>
-          state.get(token.value) match {
+          state.entries.get(token.value) match {
             case Some(entry) if entry.expiresAt.isAfter(now) =>
-              Sync[F].pure((state - token.value, Some(entry.payload)))
+              Sync[F].pure((state.remove(token.value), Some(entry.payload)))
             case Some(_) =>
               // Expired. Removed, and reported as absent: the caller must not be able to tell an
               // expired token from one that never existed.
-              Sync[F].pure((state - token.value, None))
+              Sync[F].pure((state.remove(token.value), None))
             case None => Sync[F].pure((state, None))
           }
         }

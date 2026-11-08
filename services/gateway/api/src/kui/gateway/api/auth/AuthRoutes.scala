@@ -87,7 +87,7 @@ object AuthRoutes {
       settings[F](auth, policy),
       login[F](store, identity, basePath, secureCookies, loginLimiter, auth.trustedProxies),
       changePassword[F](identity, loginLimiter, auth.trustedProxies),
-      oidcStart[F](identity, oidcStates),
+      oidcStart[F](identity, oidcStates, loginLimiter, auth.trustedProxies),
       oidcCallback[F](store, identity, basePath, secureCookies, oidcStates),
       logout[F](store)
     )
@@ -186,21 +186,39 @@ object AuthRoutes {
 
   private def oidcStart[F[_]: Sync](
       identity: Option[ServiceClient[F]],
-      states: BrowserOidcState[F]
+      states: BrowserOidcState[F],
+      limiter: RateLimiter[F],
+      trustedProxies: Set[String]
   ): ServerEndpoint[Any, F] =
     AuthEndpoints.oidcStart
       .in(request)
       .serverLogic[F] { req =>
-        answering[F, OidcStartResponse](req) {
-          withIdentity(identity) { client =>
-            call(client, req)(IdentityEndpoints.oidcStart, ()).flatMap {
-              case Left(error) => error.asLeft[OidcStartResponse].pure[F]
-              case Right(started) =>
-                sessionOf[F](req).flatMap(session => states.bind(session.id, started.state)).map {
-                  case true => Right(started)
-                  case false =>
-                    Left(ApplicationError.Unauthenticated("too many pending sign-ins; try again later"))
+        // Charged before identity is called. Each start mints a pending login that identity keeps until
+        // it expires, even after this gateway replaces the session's binding, so an unthrottled loop
+        // fills that store and evicts other browsers' in-flight sign-ins.
+        sessionOf[F](req).flatMap { session =>
+          withinRateLimit[F, OidcStartResponse](
+            limiter,
+            req,
+            List(
+              s"oidc:session:${session.id.value}" -> MaxOidcStartsPerSession,
+              s"oidc:ip:${ClientAddress.of(req, trustedProxies)}" -> MaxOidcStartsPerIp
+            )
+          ) {
+            answering[F, OidcStartResponse](req) {
+              withIdentity(identity) { client =>
+                call(client, req)(IdentityEndpoints.oidcStart, ()).flatMap {
+                  case Left(error) => error.asLeft[OidcStartResponse].pure[F]
+                  case Right(started) =>
+                    states.bind(session.id, started.state).map {
+                      case true => Right(started)
+                      case false =>
+                        Left(
+                          ApplicationError.Unauthenticated("too many pending sign-ins; try again later")
+                        )
+                    }
                 }
+              }
             }
           }
         }
@@ -280,6 +298,12 @@ object AuthRoutes {
   private val MaxLoginAttemptsPerIp: Int = 20
   private val MaxLoginAttemptsPerUser: Int = 5
   private val MaxPasswordChangeAttemptsPerIp: Int = 10
+
+  /** Per session is the tighter bucket: one cookie looping on start. Per IP catches many sessions from one
+    * address. Both sit in front of identity, whose pending-login store is shared by every browser.
+    */
+  private val MaxOidcStartsPerSession: Int = 10
+  private val MaxOidcStartsPerIp: Int = 20
 
   /** Runs `action` only while every key in `limits` is still under its own budget for this window, and
     * answers `429 KUI-AUTH-RATE-LIMITED` the moment one of them is not. Each key is charged in order and the

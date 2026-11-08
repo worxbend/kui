@@ -59,6 +59,33 @@ final class SignInRoutesSuite extends KuiIOSuite {
     }
   }
 
+  test("repeated OIDC starts from one session are refused before they reach identity") {
+    // One anonymous session looping on /auth/oidc/start used to mint a pending login on every call.
+    // At capacity identity evicts the oldest in-flight sign-in, including somebody else's.
+    val started = kui.identity.contract.dto.OidcStartResponse("https://issuer.example/authorize", "the-state")
+    ServiceClientFixture.stub(ServiceBehaviour.Ok(started.asJson)).flatMap { stub =>
+      ServiceClientFixture.client(ServiceId.unsafe("identity"), stub).use { identity =>
+        GatewayTestServer.resource(identity = Some(identity)).use { server =>
+          for {
+            me <- server.get(s"$api/auth/me")
+            headers = Map(
+              "Cookie" -> me.header("Set-Cookie").get.takeWhile(_ != ';'),
+              SessionMiddleware.CsrfHeaderName -> decode[AuthMeResponse](me.body).toOption.get.csrfToken
+            )
+            responses <- List.fill(30)(()).traverse(_ => server.post(s"$api/auth/oidc/start", headers))
+            sent <- stub.sent
+          } yield {
+            val starts = sent.count(_.uri.contains("oidc/start"))
+            assertEquals(responses.map(_.code.code).count(_ == 200), 10, responses.map(_.code.code).toString)
+            assertEquals(responses.map(_.code.code).count(_ == 429), 20)
+            assertEquals(starts, 10, "calls past the session budget must not reach identity")
+            assertEquals(envelope(responses.last.body).code, "KUI-AUTH-RATE-LIMITED")
+          }
+        }
+      }
+    }
+  }
+
   test("OIDC state belongs to its initiating browser and is single use") {
     withOidcFlow(signedIn) { (server, owner) =>
       for {

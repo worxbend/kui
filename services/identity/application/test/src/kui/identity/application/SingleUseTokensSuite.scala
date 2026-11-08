@@ -74,6 +74,23 @@ final class SingleUseTokensSuite extends KuiIOSuite {
     }
   }
 
+  test("remembering a token again moves its expiry, so an older neighbour is the one evicted") {
+    for {
+      tokens <- SingleUseTokens.make[IO, String](capacity = 2)
+      first <- tokens.issue("first", now)
+      second <- tokens.issue("second", now.plusSeconds(1))
+      _ <- tokens.remember(first, "first-again", now.plusSeconds(2))
+      third <- tokens.issue("third", now.plusSeconds(3))
+      kept <- tokens.redeem(first, now.plusSeconds(3))
+      evicted <- tokens.redeem(second, now.plusSeconds(3))
+      newest <- tokens.redeem(third, now.plusSeconds(3))
+    } yield {
+      assertEquals(kept, Some("first-again"))
+      assertEquals(evicted, None)
+      assertEquals(newest, Some("third"))
+    }
+  }
+
   test("expired entries are dropped on a write, so an idle store does not accumulate them") {
     for {
       tokens <- SingleUseTokens.make[IO, String](ttl = 1.minute, capacity = 2)
