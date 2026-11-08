@@ -25,8 +25,8 @@ enum SseOverflow {
   /** A live view: the newest event is the one worth showing, and the producer must not wait. */
   case DropOldest
 
-  /** A finite page: wait for the reader. A cursor minted from produced records must not skip one
-    * that the buffer threw away.
+  /** A finite page: wait for the reader. A cursor minted from produced records must not skip one that the
+    * buffer threw away.
     */
   case Block
 }
@@ -91,8 +91,8 @@ object Sse {
     * produces them and the terminal event is never held up behind one.
     *
     * On a live view, dropping the oldest is what keeps the terminal event: it is the newest thing in the
-    * queue, so it is never the one thrown away. A finite page never drops, so the terminal event simply
-    * waits its turn.
+    * queue, so it is never the one thrown away. A finite page never drops, so the terminal event simply waits
+    * its turn.
     *
     * @param streamName
     *   the stream's name in `kui.stream.active` and `kui.stream.events`, e.g. `capabilities`
@@ -239,8 +239,8 @@ object Sse {
     * The queue is always bounded. Unbounded buffering is a browser tab that stopped reading turning into an
     * out-of-memory error, which is PLAN §28's rule. What the bound *does* depends on the page. A live view
     * drops the oldest event — the newest state is the one worth showing — and counts the drop. A finite page
-    * waits instead: its cursor is minted from records the producer has already counted, so dropping one
-    * skips it on this page and the next. Waiting is safe there because the page is finite and the producer's
+    * waits instead: its cursor is minted from records the producer has already counted, so dropping one skips
+    * it on this page and the next. Waiting is safe there because the page is finite and the producer's
     * deadline still bounds the work. The finaliser never waits forever; see `terminate`.
     */
   private def buffered[F[_]: Temporal](

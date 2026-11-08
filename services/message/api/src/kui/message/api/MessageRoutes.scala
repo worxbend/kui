@@ -94,8 +94,8 @@ object MessageRoutes {
     )
   }
 
-  /** Bounded pages block when the reader falls behind. A live tail keeps drop-oldest: the screen
-    * already discards rows it cannot show, and waiting would pin a Kafka consumer on a stalled tab.
+  /** Bounded pages block when the reader falls behind. A live tail keeps drop-oldest: the screen already
+    * discards rows it cannot show, and waiting would pin a Kafka consumer on a stalled tab.
     */
   private[api] def streamConfig(live: Boolean, sse: SseConfig): SseConfig =
     if live then sse else sse.copy(overflow = SseOverflow.Block)

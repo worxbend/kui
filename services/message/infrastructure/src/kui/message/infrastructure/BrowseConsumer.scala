@@ -8,9 +8,9 @@ import kui.message.application.RawRecord
 
 /** One partition `partitionsFor` reported, and whether it currently has a leader.
   *
-  * `leader` is false when the broker's `PartitionInfo.leader` is null or `Node.noNode` (`id < 0`).
-  * An offset call that includes such a partition retries metadata until `default.api.timeout.ms` —
-  * sixty seconds — and then fails the whole call, including partitions that already answered.
+  * `leader` is false when the broker's `PartitionInfo.leader` is null or `Node.noNode` (`id < 0`). An offset
+  * call that includes such a partition retries metadata until `default.api.timeout.ms` — sixty seconds — and
+  * then fails the whole call, including partitions that already answered.
   */
 final case class PartitionView(id: PartitionId, leader: Boolean)
 
@@ -39,8 +39,8 @@ object PartitionView {
   */
 trait BrowseConsumer[F[_]] {
 
-  /** Every partition of the topic, in whatever order the broker reports them, including ones with
-    * no leader. The caller drops the leaderless ones before any offset call.
+  /** Every partition of the topic, in whatever order the broker reports them, including ones with no leader.
+    * The caller drops the leaderless ones before any offset call.
     */
   def partitions(topic: TopicName): F[Either[KuiError, List[PartitionView]]]
 
