@@ -15,7 +15,7 @@ import kui.kernel.cluster.{
   ClusterConnection,
   ClusterSecurity
 }
-import kui.kernel.error.{InfrastructureError, KuiError}
+import kui.kernel.error.{ErrorCode, InfrastructureError, KuiError}
 import kui.kernel.group.{GroupProtocol, GroupState, LagAnomaly}
 import kui.kernel.{ClusterId, GroupId, Offset, PartitionId, TopicName, TopicPartition}
 import kui.testkit.KuiIOSuite
@@ -195,6 +195,17 @@ final class KafkaGroupAdminPortSuite extends KuiIOSuite {
       (port, _) = rigged
       result <- port.describe(List(orders))
     } yield assertEquals(result.left.toOption.map(_.message), Some("describe denied"))
+  }
+
+  test("a timestamp past the epoch-milli range is a validation error, not a raised overflow") {
+    // `Instant.toEpochMilli` throws ArithmeticException for a year past about 292 million. Inside the
+    // offset-window comprehension that escape becomes a 500, after the group has already been accepted.
+    val beyond = Instant.parse("+300000000-01-01T00:00:00Z")
+
+    for {
+      rigged <- rig()
+      result <- rigged._1.offsetWindow(orders, ResetScope(topic, Set(partition(0))), Some(beyond))
+    } yield assertEquals(result.left.map(_.code), Left(ErrorCode.Validation))
   }
 
   test("failed timestamp lookups are not absent timestamps; explicit absence remains valid") {

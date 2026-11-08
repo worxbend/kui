@@ -317,6 +317,25 @@ final class ConsumerContractSuite extends ScalaCheckSuite {
     assert(decode[ResetPlanRequest](body("SHIFT_BY", ""","shiftBy":-500""")).isRight)
   }
 
+  test("anOutOfRangeResetParameterIsADecodeFailure") {
+    // `FiniteDuration` and `Instant.toEpochMilli` throw once these values get large enough, and a throw
+    // on the plan route is a 500. The bound is the decoder's, so the route never sees the value.
+    def body(target: String, extra: String): String =
+      s"""{"topic":"orders","partitions":[],"target":"$target"$extra}"""
+
+    assert(decode[ResetPlanRequest](body("DURATION", ""","durationMs":9223372036854775807""")).isLeft)
+    assert(decode[ResetPlanRequest](body("DURATION", ""","durationMs":0""")).isLeft)
+    assert(decode[ResetPlanRequest](body("DURATION", ""","durationMs":-1""")).isLeft)
+    assert(decode[ResetPlanRequest](body("DURATION", ""","durationMs":60000""")).isRight)
+    assert(
+      decode[ResetPlanRequest](
+        body("TIMESTAMP", ""","timestamp":"+300000000-01-01T00:00:00Z"""")
+      ).isLeft
+    )
+    assert(decode[ResetPlanRequest](body("TIMESTAMP", ""","timestamp":"1969-12-31T23:59:59Z"""")).isLeft)
+    assert(decode[ResetPlanRequest](body("TIMESTAMP", ""","timestamp":"2026-09-04T09:00:00Z"""")).isRight)
+  }
+
   test("anEmptyOffsetMapDoesNotSatisfyTheOffsetMode") {
     // `{}` is not an offset map, it is a request with no offsets in it wearing one.
     assert(decode[ResetPlanRequest]("""{"topic":"orders","target":"OFFSET","offsets":{}}""").isLeft)

@@ -1,14 +1,20 @@
 package kui.consumer.api
 
+import java.nio.charset.StandardCharsets
+import java.time.Instant
+
 import cats.effect.IO
+import io.circe.Printer
 import io.circe.parser.parse
+import io.circe.syntax.*
 import sttp.client4.*
 import sttp.model.StatusCode
 
 import kui.consumer.application.{LagUpdate, SnapshotFreshness}
+import kui.consumer.contract.dto.ResetPlanRequest
 import kui.kernel.GroupId
 import kui.kernel.error.InfrastructureError
-import kui.kernel.group.GroupState
+import kui.kernel.group.{GroupState, ResetTarget}
 import kui.testkit.KuiIOSuite
 
 /** The order the router tries this service's routes in, asserted through the router rather than by reading
@@ -166,6 +172,77 @@ final class ConsumerRoutesSuite extends KuiIOSuite {
       } yield assertEquals(json.hcursor.downField("groups").get[String]("status").toOption, Some("ok"))
     }
   }
+
+  test("anAbsurdResetDurationIsAValidationErrorAndNotAnInternalOne") {
+    // `FiniteDuration(Long.MaxValue, MILLISECONDS)` throws. Thrown from the route, that is a 500
+    // `KUI-INTERNAL` and an error log, for a value that was never an offset.
+    val request = ResetPlanRequest(
+      topic = ConsumerTestServer.Topic,
+      partitions = Nil,
+      target = ResetTarget.Duration,
+      timestamp = None,
+      offsets = None,
+      shiftBy = None,
+      durationMs = Some(Long.MaxValue)
+    )
+    val requestPath = path(s"/consumer-groups/${Group.value}/offsets/plan")
+    val body = Printer.noSpaces.print(request.asJson).getBytes(StandardCharsets.UTF_8)
+
+    resource().use { (server, stubs) =>
+      for {
+        response <- postPlan(server, requestPath, body)
+        planned <- stubs.reset.planned.get
+      } yield {
+        assertEquals(response.code, StatusCode.BadRequest, clue = response.body)
+        assert(
+          response.body.swap.getOrElse("").contains("KUI-VALIDATION"),
+          clue = response.body
+        )
+        assertEquals(planned, Nil)
+      }
+    }
+  }
+
+  test("anAbsurdResetTimestampIsAValidationErrorAndNotAnInternalOne") {
+    val request = ResetPlanRequest(
+      topic = ConsumerTestServer.Topic,
+      partitions = Nil,
+      target = ResetTarget.Timestamp,
+      timestamp = Some(Instant.parse("+300000000-01-01T00:00:00Z")),
+      offsets = None,
+      shiftBy = None,
+      durationMs = None
+    )
+    val requestPath = path(s"/consumer-groups/${Group.value}/offsets/plan")
+    val body = Printer.noSpaces.print(request.asJson).getBytes(StandardCharsets.UTF_8)
+
+    resource().use { (server, _) =>
+      for {
+        response <- postPlan(server, requestPath, body)
+      } yield {
+        assertEquals(response.code, StatusCode.BadRequest, clue = response.body)
+        assert(
+          response.body.swap.getOrElse("").contains("KUI-VALIDATION"),
+          clue = response.body
+        )
+      }
+    }
+  }
+
+  private def postPlan(
+      server: ConsumerTestServer,
+      requestPath: String,
+      body: Array[Byte]
+  ): IO[Response[Either[String, String]]] =
+    token(requestPath, method = "POST", body = body).flatMap(principal =>
+      basicRequest
+        .post(uri"${uri(requestPath)}")
+        .header(kui.contracts.KuiEndpoint.PrincipalHeader, principal.value)
+        .header(kui.contracts.HttpHeaders.Csrf, "a-csrf-token")
+        .header("Content-Type", "application/json")
+        .body(new String(body, StandardCharsets.UTF_8))
+        .send(server.backend)
+    )
 
   test("aRequestWithNoPrincipalIsRefusedBeforeAnyUseCaseRuns") {
     resource().use { (server, stubs) =>

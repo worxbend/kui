@@ -200,11 +200,28 @@ object ConsumerMutationRoutes {
       case ResetTarget.Earliest => Right(ResetSpec.ToEarliest)
       case ResetTarget.Latest => Right(ResetSpec.ToLatest)
       case ResetTarget.Timestamp =>
-        request.timestamp.fold(missing("timestamp"))(at => Right(ResetSpec.ToTimestamp(at)))
+        request.timestamp.fold(missing("timestamp"))(at =>
+          if ResetPlanRequest.timestampInRange(at) then Right(ResetSpec.ToTimestamp(at))
+          else
+            Left(
+              ApplicationError.Invalid(
+                s"timestamp must be between ${ResetPlanRequest.MinTimestamp} and ${ResetPlanRequest.MaxTimestamp}",
+                Nil
+              )
+            )
+        )
       case ResetTarget.ShiftBy => request.shiftBy.fold(missing("shiftBy"))(by => Right(ResetSpec.ShiftBy(by)))
       case ResetTarget.Duration =>
         request.durationMs.fold(missing("durationMs"))(ms =>
-          Right(ResetSpec.ByDuration(FiniteDuration(ms, java.util.concurrent.TimeUnit.MILLISECONDS)))
+          if ResetPlanRequest.durationInRange(ms) then
+            Right(ResetSpec.ByDuration(FiniteDuration(ms, java.util.concurrent.TimeUnit.MILLISECONDS)))
+          else
+            Left(
+              ApplicationError.Invalid(
+                s"durationMs must be between 1 and ${ResetPlanRequest.MaxDurationMs} milliseconds",
+                Nil
+              )
+            )
         )
       case ResetTarget.Offset =>
         request.offsets.filter(_.nonEmpty) match {

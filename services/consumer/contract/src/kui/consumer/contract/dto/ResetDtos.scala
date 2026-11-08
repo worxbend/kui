@@ -184,6 +184,24 @@ final case class ResetPlanRequest(
 
 object ResetPlanRequest {
 
+  /** One hundred 365-day years, in milliseconds.
+    *
+    * Longer than a rewind anybody means, and short enough that `FiniteDuration` can represent it: the
+    * constructor throws past about 9.22e12 ms, and that throw is a 500 on the plan route.
+    */
+  val MaxDurationMs: Long = 100L * 365 * 24 * 60 * 60 * 1000
+
+  /** Kafka timestamps before the epoch are not a reset this API accepts. The far end is year 9999, which is
+    * inside `Instant.toEpochMilli`; a later instant throws `ArithmeticException` and that throw is a 500 once
+    * the group has already been accepted. A decoder has no clock, so the cap is not "now".
+    */
+  val MinTimestamp: Instant = Instant.EPOCH
+  val MaxTimestamp: Instant = Instant.parse("9999-12-31T23:59:59Z")
+
+  def durationInRange(ms: Long): Boolean = ms > 0 && ms <= MaxDurationMs
+
+  def timestampInRange(at: Instant): Boolean = !at.isBefore(MinTimestamp) && !at.isAfter(MaxTimestamp)
+
   /** The parameter each mode requires, named for the message a rejected request carries. */
   private def requiredParameter(target: ResetTarget): Option[String] = target match {
     case ResetTarget.Timestamp => Some("timestamp")
@@ -219,9 +237,22 @@ object ResetPlanRequest {
               cursor.history
             )
           )
-        case _ => Right(request)
+        case _ =>
+          outOfRange(request) match {
+            case Some(message) => Left(DecodingFailure(message, cursor.history))
+            case None => Right(request)
+          }
       }
     } yield checked
+
+  /** Rejects the values that would throw while the route turned them into a `ResetSpec`. */
+  private def outOfRange(request: ResetPlanRequest): Option[String] = request.target match {
+    case ResetTarget.Duration if request.durationMs.exists(!durationInRange(_)) =>
+      Some(s"durationMs must be between 1 and $MaxDurationMs milliseconds")
+    case ResetTarget.Timestamp if request.timestamp.exists(!timestampInRange(_)) =>
+      Some(s"timestamp must be between $MinTimestamp and $MaxTimestamp")
+    case _ => None
+  }
 
   given Codec[ResetPlanRequest] = Codec.from(
     decoder,

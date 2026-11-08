@@ -149,11 +149,16 @@ object KafkaGroupAdminPort {
         timestamps <- at match {
           case None => eitherT(Map.empty[TopicPartition, Option[Offset]].asRight[KuiError].pure[F])
           case Some(instant) =>
-            eitherT(
-              offsets
-                .offsetsForTimes(connection, askable.map(_ -> instant.toEpochMilli).toMap)
-                .map(_.flatMap(requireResults(_, askable)))
-            )
+            epochMillis(instant) match {
+              case Left(error) =>
+                eitherT(error.asLeft[Map[TopicPartition, Option[Offset]]].pure[F])
+              case Right(millis) =>
+                eitherT(
+                  offsets
+                    .offsetsForTimes(connection, askable.map(_ -> millis).toMap)
+                    .map(_.flatMap(requireResults(_, askable)))
+                )
+            }
         }
       } yield OffsetWindow(
         begin = begin,
@@ -286,6 +291,21 @@ object KafkaGroupAdminPort {
         partitions = member.assignment.partitions,
         targetPartitions = member.targetAssignment.map(_.partitions)
       )
+
+    /** `toEpochMilli` throws for a year past about 292 million. That must stay a validation error: the call
+      * sits inside the window's `Either`, and a throw there becomes a 500 after the group was accepted.
+      */
+    private def epochMillis(instant: Instant): Either[KuiError, Long] =
+      try Right(instant.toEpochMilli)
+      catch {
+        case _: ArithmeticException =>
+          Left(
+            kui.kernel.error.ApplicationError.Invalid(
+              "timestamp is outside the range that can be resolved to an offset",
+              Nil
+            )
+          )
+      }
 
     /** A missing batch key is a failed lookup, not a successful absent offset. */
     private def requireResults[K, V](batch: BatchResult[K, V], keys: Set[K]): Either[KuiError, Map[K, V]] =
