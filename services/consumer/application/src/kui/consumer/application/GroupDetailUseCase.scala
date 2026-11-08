@@ -10,7 +10,7 @@ import org.typelevel.log4cats.StructuredLogger
 
 import kui.cache.{BoundedCache, CacheMetrics}
 import kui.consumer.domain.*
-import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
+import kui.kernel.error.{ApplicationError, ErrorCode, InfrastructureError, KuiError}
 import kui.kernel.{ClusterId, GroupId}
 
 /** Whether the assignments on screen are the ones the coordinator holds right now. */
@@ -110,9 +110,14 @@ object GroupDetailUseCase {
       /** In-flight describes, keyed by (cluster, group), so several operators on the same detail page — or
         * one polling it — join the live coordinator round trip already running instead of each starting their
         * own.
+        *
+        * `None` in the gate means the starter was cancelled before the describe answered. Joiners retry.
+        * Completing it with an `Upstream` status would tell them Kafka answered 502 when Kafka was never
+        * asked.
         */
-      private val inFlight
-          : Ref[F, Map[(ClusterId, GroupId), Deferred[F, Either[KuiError, Map[GroupId, ConsumerGroup]]]]] =
+      private type Described = Either[KuiError, Map[GroupId, ConsumerGroup]]
+
+      private val inFlight: Ref[F, Map[(ClusterId, GroupId), Deferred[F, Option[Described]]]] =
         Ref.unsafe(Map.empty)
 
       def detail(cluster: ClusterId, group: GroupId): F[Either[KuiError, GroupDetailView]] =
@@ -161,7 +166,7 @@ object GroupDetailUseCase {
           group: GroupId
       ): F[Either[KuiError, Map[GroupId, ConsumerGroup]]] =
         Async[F].uncancelable { poll =>
-          Deferred[F, Either[KuiError, Map[GroupId, ConsumerGroup]]].flatMap { gate =>
+          Deferred[F, Option[Described]].flatMap { gate =>
             val key = (cluster, group)
             inFlight
               .modify { running =>
@@ -173,20 +178,49 @@ object GroupDetailUseCase {
               .flatMap {
                 // Somebody else is already describing this group: wait for *their* result. `poll` keeps
                 // the wait itself cancellable, so a caller that gives up does not pin its fiber.
-                case Left(existing) => poll(existing.get)
-                case Right(mine) =>
-                  Async[F].guaranteeCase(poll(admin(cluster).describe(List(group)))) { outcome =>
-                    // The slot is released and the waiters are woken on every path, cancellation
-                    // included, so a cancelled describe never leaves a joiner blocked forever.
-                    inFlight.update(_ - key) >> (outcome match {
-                      case Outcome.Succeeded(result) => result.flatMap(mine.complete).void
-                      case Outcome.Errored(_) | Outcome.Canceled() =>
-                        mine.complete(kui.kernel.error.InfrastructureError.Upstream("kafka", 502).asLeft).void
-                    })
+                // `None` means that starter was cancelled; retry, the way `SnapshotCell.refresh`
+                // does, instead of inheriting an error Kafka did not return.
+                case Left(existing) =>
+                  poll(existing.get).flatMap {
+                    case Some(result) => result.pure[F]
+                    case None => poll(describeCoalesced(cluster, group))
                   }
+                case Right(mine) =>
+                  Async[F]
+                    .guaranteeCase(poll(admin(cluster).describe(List(group)))) { outcome =>
+                      // The slot is released before anyone is woken, so a joiner told to retry does
+                      // not join a gate that has already been completed.
+                      inFlight.update(_ - key) >> (outcome match {
+                        case Outcome.Succeeded(result) =>
+                          result.flatMap(value => mine.complete(value.some)).void
+                        case Outcome.Canceled() => mine.complete(None).void
+                        case Outcome.Errored(failure) =>
+                          logger.warn(
+                            Map("cluster.id" -> cluster.value, "group.id" -> group.value),
+                            failure
+                          )(
+                            "a group describe failed before Kafka answered"
+                          ) >> mine.complete(describeFailure(failure).asLeft.some).void
+                      })
+                    }
+                    // The starter sees the same mapped failure the joiners were given. A raw raise
+                    // here would be a 500 for the tab that opened the page and a different error
+                    // for the tab that joined it.
+                    .handleErrorWith(failure => describeFailure(failure).asLeft.pure[F])
               }
           }
         }
+
+      /** A describe that raised, rather than one Kafka answered.
+        *
+        * `Upstream` would say "kafka answered with status 502". Nothing answered. `Unreachable` is the error
+        * whose contract is that, and its message does not repeat the client's text.
+        */
+      private def describeFailure(failure: Throwable): KuiError =
+        InfrastructureError.Unreachable(
+          "kafka",
+          Option(failure.getMessage).filter(_.nonEmpty).getOrElse(failure.getClass.getName)
+        )
 
       /** The rebalance rule (DC-H10).
         *
