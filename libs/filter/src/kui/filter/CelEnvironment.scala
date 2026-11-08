@@ -49,9 +49,9 @@ import io.circe.{parser, Json}
   * | compiled-program cache   | 10 000 entries, 1 hour      | ADR-017                                                                                              |
   * | regex engine             | re2j, through CEL's default | linear time, so a regex filter cannot backtrack the service to a halt                                |
   *
-  * Every row except comprehension iterations is a `kui.message.filter.*` default. The comprehension
-  * budget is a `FilterLimits` field (`maxComprehensionIterations`), not another key: `MessageWiring`
-  * builds `FilterLimits.default`, and those keys are not read from configuration.
+  * Every row except comprehension iterations is a `kui.message.filter.*` default. The comprehension budget is
+  * a `FilterLimits` field (`maxComprehensionIterations`), not another key: `MessageWiring` builds
+  * `FilterLimits.default`, and those keys are not read from configuration.
   *
   * The per-record deadline is enforced by `Sync[F].interruptible` around the whole evaluation, JSON parsing
   * included (`CelFilterEngine`'s `program.test`). `interruptible` only requests `Thread.interrupt()`; it
