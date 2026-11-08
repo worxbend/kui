@@ -8,11 +8,9 @@
 # This file is safe to commit. Every secret in it is a reference to an environment variable, not a
 # value. See "Secrets" below and in docs/operations/configuration.md.
 #
-# WHAT YOU WILL SEE TODAY (M0): KUI starts, serves its interface, and reports the cluster
-# capability as "not yet available". KUI does not connect to Kafka until M1, so the `kui.clusters`
-# section below is accepted and read by nothing yet. Everything else in this file -- the listener,
-# the gateway's upstreams, the signing keys, CORS, telemetry -- is live today and is exactly what a
-# real deployment uses.
+# WHAT YOU WILL SEE TODAY: KUI starts, connects to the clusters below, and lists their brokers,
+# topics, messages and consumer groups. The listener, the gateway's upstreams, the signing keys,
+# CORS, telemetry, `kui.clusters` and `kui.rbac` are all read.
 #
 # ---------------------------------------------------------------------------------------------
 # The environment variables this file requires. KUI fails to start, naming the variable, if any
@@ -20,9 +18,9 @@
 #
 #   KUI_PRINCIPAL_KEY        the shared signing key (see the note on principalKeys below).
 #                            Required today: KUI refuses to start without it.
-#   KUI_ANALYTICS_PASSWORD   the SCRAM password for the `analytics` cluster. Required from M1,
-#                            when `kui.clusters` starts being read. Set it now anyway, so that
-#                            the upgrade is not the moment you discover it is missing.
+#   KUI_ANALYTICS_PASSWORD   the SCRAM password for the `analytics` cluster. Required: the
+#                            cluster section is read at startup, and an unset password stops KUI
+#                            naming this variable.
 #   KUI_ANALYTICS_TRUSTSTORE_PASSWORD
 #                            the password of the PKCS12 truststore below. Required whenever the
 #                            `truststore` block is present, and easy to miss: leaving it unset
@@ -142,9 +140,10 @@ kui:
     refreshInterval: 30s
 
   auth:
-    # The only value KUI accepts today. Real authentication arrives with the identity service in
-    # M6. Anything else here fails the load with a message saying so, rather than being ignored --
-    # so a file that asks for authentication can never start a deployment that has none.
+    # `disabled` signs nobody in and is the default. `form` and `oidc` are accepted as well; a
+    # worked form deployment is `deployment/quickstart/kui-quickstart-auth.yaml`. An unknown type
+    # fails the load rather than being ignored, so a file cannot name a mode KUI does not
+    # implement and then start without authentication.
     type: disabled
 
   telemetry:
@@ -255,5 +254,6 @@ kui:
   #       username: "kui"
   #       password: "env:KUI_STORE_PASSWORD"
 
-  # Declared so the shape exists; read by nothing yet. The authorization model is M6.
+  # Read at startup. An empty section allows every action; a worked role set is
+  # `deployment/quickstart/kui-quickstart-auth.yaml`.
   rbac: {}

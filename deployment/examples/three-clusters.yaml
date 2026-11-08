@@ -53,9 +53,10 @@ kui:
     host: "0.0.0.0"
     port: 8080
 
-  # `disabled` is the only value KUI accepts today; real authentication arrives with the identity
-  # service in M6. Writing it down rather than relying on the default makes the security posture of
-  # the file explicit, which matters for the one setting nobody should have to guess at.
+  # Authentication is off. `disabled` is the default; `form` and `oidc` are also accepted, and a
+  # worked form deployment is `deployment/quickstart/kui-quickstart-auth.yaml`. Writing it down
+  # rather than relying on the default makes the security posture of the file explicit, which
+  # matters for the one setting nobody should have to guess at.
   auth:
     type: disabled
 

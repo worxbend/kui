@@ -13,8 +13,9 @@
 # is a smaller file because a single process has no other processes to be told about.
 #
 # WHAT YOU WILL SEE TODAY: KUI starts, connects to both clusters below, and lists their brokers,
-# topics, messages and consumer groups. Everything in this file is live and read except
-# `kui.rbac`, which the authorization model in M6 will be the first thing to read.
+# topics, messages and consumer groups. Everything in this file is live and read, including
+# `kui.rbac`. An empty `rbac: {}` allows every action; a worked role set is
+# `deployment/quickstart/kui-quickstart-auth.yaml`.
 #
 # ---------------------------------------------------------------------------------------------
 # The environment variables this file requires. KUI fails to start, naming the variable, if any
@@ -150,9 +151,10 @@ kui:
     refreshInterval: 30s
 
   auth:
-    # The only value KUI accepts today. Real authentication arrives with the identity service in
-    # M6. Anything else here fails the load with a message saying so, rather than being ignored --
-    # so a file that asks for authentication can never start a deployment that has none.
+    # `disabled` signs nobody in and is the default. `form` and `oidc` are accepted as well; a
+    # worked form deployment is `deployment/quickstart/kui-quickstart-auth.yaml`. An unknown type
+    # fails the load rather than being ignored, so a file cannot name a mode KUI does not
+    # implement and then start without authentication.
     type: disabled
 
   telemetry:
@@ -272,5 +274,6 @@ kui:
             password: "env:KUI_ANALYTICS_TRUSTSTORE_PASSWORD"
             type: PKCS12
 
-  # Declared so the shape exists; read by nothing yet. The authorization model is M6.
+  # Read at startup. An empty section allows every action; a worked role set is
+  # `deployment/quickstart/kui-quickstart-auth.yaml`.
   rbac: {}

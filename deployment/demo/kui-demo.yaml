@@ -29,8 +29,9 @@ kui:
     devInsecureCookies: true
 
   auth:
-    # The only value the current release accepts. Real authentication arrives with the identity
-    # service in M6; anything else here fails the load with a message saying so.
+    # `disabled` signs nobody in and is the default. `form` and `oidc` are accepted as well; a
+    # worked form deployment is `deployment/quickstart/kui-quickstart-auth.yaml`. An unknown type
+    # fails the load with a message saying so.
     type: disabled
 
   topics:
@@ -161,5 +162,6 @@ kui:
             password: "env:KUI_DEMO_TRUSTSTORE_PASSWORD"
             type: PKCS12
 
-  # Declared so the shape exists; read by nothing yet. The authorization model is M6.
+  # Read at startup. An empty section allows every action; a worked role set is
+  # `deployment/quickstart/kui-quickstart-auth.yaml`.
   rbac: {}

@@ -47,13 +47,10 @@ kui:
         url: "http://kui-consumer:8080"
         timeout: "10s"
         maxConcurrent: 32
-      # The metrics service measures nothing in this build — there is no JMX client and no
-      # Prometheus parser — so every one of its answers is a 200 saying `not_configured`. It is
-      # addressed here anyway, because the gateway derives a service's public routes from the
-      # contract it holds *and* the address it was given: with no entry here it holds the metrics
-      # contract and publishes none of it, so the dashboard's cards have nothing to read their
-      # "not measured" sentence from and show an outage instead. The two look different on screen
-      # and mean different things.
+      # The metrics service scrapes Prometheus text exposition when a cluster configures a source.
+      # It is addressed here because the gateway publishes a service's routes only when it has both
+      # the contract and an address: with no entry, the dashboard's cards have nothing to call and
+      # show an outage instead of `not_configured` for a cluster that has no source.
       metrics:
         url: "http://kui-metrics:8080"
         timeout: "10s"
@@ -143,8 +140,9 @@ kui:
       origins: []
 
   auth:
-    # The only value M0 accepts. Real authentication arrives with the identity service in M6, and
-    # anything else here fails the load with a message saying so, rather than being ignored.
+    # `disabled` signs nobody in and is the default. `form` and `oidc` are accepted as well; a
+    # worked form deployment is `deployment/quickstart/kui-quickstart-auth.yaml`. An unknown type
+    # fails the load with a message saying so, rather than being ignored.
     type: disabled
 
   telemetry:

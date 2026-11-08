@@ -18,10 +18,11 @@
 # take the whole console down.
 
 kui:
-  # Authentication is disabled, and `disabled` is the only value KUI accepts today. Real
-  # authentication arrives with the identity service in M6. This line is not strictly required --
-  # `disabled` is also the default -- but writing it down makes the security posture of the file
-  # explicit rather than implied, which matters for the one setting nobody should have to guess.
+  # Authentication is off. `disabled` is the default; `form` and `oidc` are also accepted, and a
+  # worked form deployment is `deployment/quickstart/kui-quickstart-auth.yaml`. This line is not
+  # strictly required -- `disabled` is also the default -- but writing it down makes the security
+  # posture of the file explicit rather than implied, which matters for the one setting nobody
+  # should have to guess.
   auth:
     type: disabled
 

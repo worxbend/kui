@@ -35,7 +35,8 @@ kui:
         notBefore: "2026-01-01T00:00:00Z"
 
   auth:
-    # The only value M0 accepts. Real authentication arrives with the identity service in M6.
+    # `disabled` signs nobody in and is the default. `form` and `oidc` are accepted as well; a
+    # worked form deployment is `deployment/quickstart/kui-quickstart-auth.yaml`.
     type: disabled
 
   telemetry:
