@@ -113,27 +113,43 @@ final class ConnectHttp[F[_]: Async](
         get(root).flatMap {
           case Left(error) => error.asLeft[Unit].pure[F]
           case Right(body) =>
-            // KIP-745 (Kafka 3.0), not KIP-465's 2.3 expanded listing. Older workers silently ignore
-            // includeTasks, so HTTP success alone cannot negotiate this capability.
-            val major = parser
-              .parse(body)
-              .toOption
-              .flatMap(_.hcursor.get[String]("version").toOption)
-              .flatMap(_.takeWhile(_.isDigit).toIntOption)
-            if major.exists(_ >= 3) then
-              send(
-                basicRequest.post(
-                  base
-                    .addPath("restart")
-                    .addParam("includeTasks", "true")
-                    .addParam("onlyFailed", "false")
-                ),
-                Some(connector)
-              ).map(_.void)
+            // KIP-745 (Kafka 3.0 / Confluent Platform 7), not KIP-465's 2.3 expanded listing. GET /
+            // on Confluent reports the platform version with a `-ccs` or `-ce` suffix ("6.2.1-ccs"),
+            // and CP 5/6 are Kafka 2.x: they accept includeTasks and ignore it, answering the
+            // pre-KIP-745 204. A leading 6 is therefore not "Kafka 3". A missing version stays on the
+            // legacy path. A 2xx that is not 202 is the same silence, so it falls back to restarting
+            // each task; a refusal, including a rebalance 409, does not.
+            val version =
+              parser.parse(body).toOption.flatMap(_.hcursor.get[String]("version").toOption)
+            if version.exists(supportsTaskRestart) then restartWithTasks(connector, base)
             else restartLegacy(connector, base)
         }
     }
   }
+
+  /** Apache Kafka 3+ speaks KIP-745. Confluent's root document is the platform version, so only 7+ does. */
+  private def supportsTaskRestart(version: String): Boolean = {
+    val major = version.takeWhile(_.isDigit).toIntOption
+    val confluent = version.contains("-ccs") || version.contains("-ce")
+    major.exists(value => if confluent then value >= 7 else value >= 3)
+  }
+
+  /** One restart that asks the worker to restart the tasks, or the legacy sequence when it did not.
+    *
+    * KIP-745 answers 202 when `includeTasks` or `onlyFailed` is set. A 204 is what a worker that ignored
+    * those parameters has always answered for `POST /restart`, so it is not a successful task restart.
+    */
+  private def restartWithTasks(connector: ConnectorName, base: Uri): F[Either[KuiError, Unit]] =
+    exchange(
+      basicRequest.post(
+        base.addPath("restart").addParam("includeTasks", "true").addParam("onlyFailed", "false")
+      ),
+      Some(connector)
+    ).flatMap {
+      case Left(error) => error.asLeft[Unit].pure[F]
+      case Right((status, _)) if status == StatusCode.Accepted => ().asRight[KuiError].pure[F]
+      case Right(_) => restartLegacy(connector, base)
+    }
 
   private def restartLegacy(connector: ConnectorName, base: Uri): F[Either[KuiError, Unit]] =
     get(base.addPath("status")).flatMap {
@@ -291,14 +307,24 @@ final class ConnectHttp[F[_]: Async](
       request: Request[Either[String, String]],
       connector: Option[ConnectorName]
   ): F[Either[KuiError, String]] =
+    exchange(request, connector).map(_.map(_._2))
+
+  /** [[send]], keeping the status. Any 2xx is a success; the caller decides whether that status is the one it
+    * asked for. The body-only [[send]] cannot tell a KIP-745 202 from a worker that ignored the query and
+    * answered 204.
+    */
+  private def exchange(
+      request: Request[Either[String, String]],
+      connector: Option[ConnectorName]
+  ): F[Either[KuiError, (StatusCode, String)]] =
     credentials.authenticate(request.header("Accept", "application/json").response(asStringAlways)).flatMap {
-      case Left(error) => error.asLeft[String].pure[F]
+      case Left(error) => error.asLeft[(StatusCode, String)].pure[F]
       case Right(authenticated) =>
         authenticated
           .send(backend)
           .map(response =>
-            if response.code.isSuccess then Right(response.body)
-            else Left(errorFrom(response.code, response.body, connector))
+            if response.code.isSuccess then (response.code, response.body).asRight[KuiError]
+            else errorFrom(response.code, response.body, connector).asLeft[(StatusCode, String)]
           )
           .recover {
             // The resilient backend carries its typed error inside this one exception rather than losing

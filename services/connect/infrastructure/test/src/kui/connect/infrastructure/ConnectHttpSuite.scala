@@ -442,6 +442,100 @@ final class ConnectHttpSuite extends KuiIOSuite {
     }
   }
 
+  test("a Confluent 6 worker restarts each task, because it ignores includeTasks") {
+    // GET / on Confluent Platform reports the platform version ("6.2.1-ccs"), not the Kafka jar.
+    // CP 6 ships Kafka 2.8, which has no KIP-745. Reading the leading 6 as "Kafka 3 or newer" sends
+    // includeTasks, the worker ignores it, answers 204, and the FAILED tasks stay FAILED.
+    Ref.of[IO, List[String]](Nil).flatMap { asked =>
+      val backend: Backend[IO] = BackendStub[IO](summon[sttp.monad.MonadError[IO]]).whenAnyRequest
+        .thenRespondF { request =>
+          val path = "/" + request.uri.path.mkString("/")
+          val body = path match {
+            case "/" => """{"version":"6.2.1-ccs"}"""
+            case "/connectors/elastic-sink/status" =>
+              """{"tasks":[{"id":0,"state":"FAILED"},{"id":1,"state":"FAILED"}]}"""
+            case _ => ""
+          }
+          val status =
+            if request.method == Method.POST && path.endsWith("/restart") then StatusCode.NoContent
+            else StatusCode.Ok
+          asked
+            .update(_ :+ s"${request.method.method} ${request.uri}")
+            .as(ResponseStub.adjust(body, status): sttp.client4.Response[StubBody])
+        }
+      for {
+        result <- new ConnectHttp[IO](backend, base, payments, ConnectCredentials.anonymous[IO])
+          .operate(elastic, ConnectorOperation.Restart)
+        calls <- asked.get
+      } yield {
+        assertEquals(result, Right(()))
+        val posts = calls.filter(_.startsWith("POST"))
+        assert(clue(posts).exists(_.contains("/connectors/elastic-sink/tasks/0/restart")))
+        assert(clue(posts).exists(_.contains("/connectors/elastic-sink/tasks/1/restart")))
+      }
+    }
+  }
+
+  test("a 204 from a presumed KIP-745 restart falls back to restarting each task") {
+    // includeTasks=true is 202 on a worker that implemented KIP-745 and 204 on one that ignored the
+    // parameters. Success that is not 202 is not evidence the tasks were restarted.
+    Ref.of[IO, List[String]](Nil).flatMap { asked =>
+      val backend: Backend[IO] = BackendStub[IO](summon[sttp.monad.MonadError[IO]]).whenAnyRequest
+        .thenRespondF { request =>
+          val path = "/" + request.uri.path.mkString("/")
+          val body = path match {
+            case "/" => """{"version":"3.0.0"}"""
+            case "/connectors/elastic-sink/status" =>
+              """{"tasks":[{"id":0,"state":"FAILED"},{"id":1,"state":"RUNNING"}]}"""
+            case _ => ""
+          }
+          val status =
+            if request.method == Method.POST && path.endsWith("/restart") then StatusCode.NoContent
+            else StatusCode.Ok
+          asked
+            .update(_ :+ s"${request.method.method} ${request.uri}")
+            .as(ResponseStub.adjust(body, status): sttp.client4.Response[StubBody])
+        }
+      for {
+        result <- new ConnectHttp[IO](backend, base, payments, ConnectCredentials.anonymous[IO])
+          .operate(elastic, ConnectorOperation.Restart)
+        calls <- asked.get
+      } yield {
+        assertEquals(result, Right(()))
+        val posts = calls.filter(_.startsWith("POST"))
+        assert(clue(posts).exists(_.contains("/connectors/elastic-sink/tasks/0/restart")))
+        assert(clue(posts).exists(_.contains("/connectors/elastic-sink/tasks/1/restart")))
+      }
+    }
+  }
+
+  test("a Confluent 7 worker restarts tasks with the one KIP-745 call") {
+    Ref.of[IO, List[String]](Nil).flatMap { asked =>
+      val backend: Backend[IO] = BackendStub[IO](summon[sttp.monad.MonadError[IO]]).whenAnyRequest
+        .thenRespondF { request =>
+          val path = "/" + request.uri.path.mkString("/")
+          val body = if path == "/" then """{"version":"7.6.0-ccs"}""" else ""
+          val status = if request.method == Method.POST then StatusCode.Accepted else StatusCode.Ok
+          asked
+            .update(_ :+ s"${request.method.method} ${request.uri}")
+            .as(ResponseStub.adjust(body, status): sttp.client4.Response[StubBody])
+        }
+      for {
+        result <- new ConnectHttp[IO](backend, base, payments, ConnectCredentials.anonymous[IO])
+          .operate(elastic, ConnectorOperation.Restart)
+        calls <- asked.get
+      } yield {
+        assertEquals(result, Right(()))
+        val posts = calls.filter(_.startsWith("POST"))
+        assertEquals(posts.size, 1)
+        assert(clue(posts.head).contains("/connectors/elastic-sink/restart"))
+        assert(clue(posts.head).contains("includeTasks=true"))
+        assert(clue(posts.head).contains("onlyFailed=false"))
+        assert(!posts.exists(_.contains("/tasks/")))
+      }
+    }
+  }
+
   test("a legacy task restart failure is not reported as a successful connector restart") {
     worker {
       case "/" => (StatusCode.Ok, """{"version":"2.2.2"}""")
