@@ -230,8 +230,8 @@ final class KafkaRecordSource[F[_]: Temporal](
       }
     }
 
-  /** A partition number the topic does not have. Named against the real range so a typo is a
-    * validation error instead of a sixty-second metadata retry.
+  /** A partition number the topic does not have. Named against the real range so a typo is a validation error
+    * instead of a sixty-second metadata retry.
     */
   private def unknownPartitions(topic: TopicName, count: Int): KuiError = {
     val last = math.max(count - 1, 0)
@@ -374,42 +374,55 @@ final class KafkaRecordSource[F[_]: Temporal](
       completion: Ref[F, ScanCompletion]
   ): Stream[F, Either[KuiError, RawRecord]] = {
 
-    /** Reads one request-depth window per partition with one assignment. This is the ordinary page path:
-      * Kafka can return the whole bounded range in one poll instead of paying one assignment and fetch setup
-      * per offset. A small aggregate record budget still uses `fill`, whose one-offset round robin is what
-      * prevents a high partition id from being starved.
+    /** Reads one window per partition with one assignment. This is the ordinary page path: Kafka can return
+      * the whole bounded range in one poll instead of paying one assignment and fetch setup per offset. A
+      * small aggregate record budget still uses `fill`, whose one-offset round robin is what prevents a high
+      * partition id from being starved.
+      *
+      * Depth starts at `limit` and halves while the 4 KiB-per-offset guess, or the bytes actually fetched,
+      * exceeds the byte budget. The one-offset walk remains only for a depth of one that still does not fit.
+      * Retained bytes are capped by the byte budget itself, not by the guess: a guess that is smaller than
+      * the records would otherwise throw a fetched page away and walk every offset.
       *
       * The fetched candidates are replayed in the same depth-first, partition-round-robin order as `fill`
       * before the byte budget is applied. The broker work is batched; the logical selection is unchanged.
       */
     def batch(walk: Walk): F[Either[KuiError, Option[(Walk, Selected)]]] = {
-      val split = walk.remaining.flatMap(_.newest(size = request.limit.toLong))
-      val round = split.map((window, _) => window)
-      val slots = round.foldLeft(0L)((total, window) => addLong(total, window.size))
       val recordsRemaining = math.max(0, budget.recordsLeft - walk.emitted).toLong
-      val prefetchAllowance = multiplyLong(slots, CandidatePrefetchBytesPerRecord)
+      val bytesLeft = budget.bytesLeft - walk.bytes
 
-      if round.isEmpty || slots > recordsRemaining || prefetchAllowance > budget.bytesLeft - walk.bytes then
-        Option.empty[(Walk, Selected)].asRight.pure[F]
-      else
-        readCandidateBatch(consumer, request.topic, round, prefetchAllowance).map {
-          case Left(error) => error.asLeft[Option[(Walk, Selected)]]
-          case Right(None) => Option.empty[(Walk, Selected)].asRight[KuiError]
-          case Right(Some(candidates)) =>
-            val selected = within(
-              inScanOrder(round, candidates),
-              recordsLeft = math.min(recordsRemaining, Int.MaxValue.toLong).toInt,
-              bytesLeft = budget.bytesLeft - walk.bytes
-            )
-            Some(
-              Walk(
-                if selected.records.size < candidates.size then walk.remaining
-                else split.flatMap((_, below) => below),
-                emitted = walk.emitted + selected.records.size,
-                bytes = addBytes(walk.bytes, selected.bytes)
-              ) -> selected
-            ).asRight[KuiError]
-        }
+      def attempt(depth: Long): F[Either[KuiError, Option[(Walk, Selected)]]] = {
+        val split = walk.remaining.flatMap(_.newest(size = depth))
+        val round = split.map((window, _) => window)
+        val slots = round.foldLeft(0L)((total, window) => addLong(total, window.size))
+        val prefetchAllowance = multiplyLong(slots, CandidatePrefetchBytesPerRecord)
+
+        if round.isEmpty || slots > recordsRemaining then Option.empty[(Walk, Selected)].asRight.pure[F]
+        else if prefetchAllowance > bytesLeft && depth > 1L then attempt(math.max(1L, depth / 2L))
+        else if prefetchAllowance > bytesLeft then Option.empty[(Walk, Selected)].asRight.pure[F]
+        else
+          readCandidateBatch(consumer, request.topic, round, bytesLeft).flatMap {
+            case Left(error) => error.asLeft[Option[(Walk, Selected)]].pure[F]
+            case Right(None) if depth > 1L => attempt(math.max(1L, depth / 2L))
+            case Right(None) => Option.empty[(Walk, Selected)].asRight[KuiError].pure[F]
+            case Right(Some(candidates)) =>
+              val selected = within(
+                inScanOrder(round, candidates),
+                recordsLeft = math.min(recordsRemaining, Int.MaxValue.toLong).toInt,
+                bytesLeft = bytesLeft
+              )
+              Some(
+                Walk(
+                  if selected.records.size < candidates.size then walk.remaining
+                  else split.flatMap((_, below) => below),
+                  emitted = walk.emitted + selected.records.size,
+                  bytes = addBytes(walk.bytes, selected.bytes)
+                ) -> selected
+              ).asRight[KuiError].pure[F]
+          }
+      }
+
+      attempt(math.max(1L, request.limit.toLong))
     }
 
     def fill(walk: Walk, target: Int): F[Either[KuiError, (Walk, Selected)]] =
@@ -788,10 +801,9 @@ object KafkaRecordSource {
     else if left > Long.MaxValue / right then Long.MaxValue
     else left * right
 
-  /** Candidate batching is a latency optimization, never permission to speculatively read an enormous range
-    * near an exhausted byte budget. Four KiB per offset keeps ordinary pages on the fast path while large
-    * assignments and deliberately small budgets retain the exact one-offset walk. The actual bytes are still
-    * measured; a batch whose records exceed this allowance falls back before emitting anything.
+  /** Guess used to decide whether a candidate depth is cheap enough to fetch. It is not the retention cap:
+    * records that pass the guess are kept up to the byte budget. A depth whose guess already exceeds that
+    * budget is halved, and only a depth of one that still does not fit keeps the one-offset walk.
     */
   private val CandidatePrefetchBytesPerRecord: Long = 4L * 1024L
 

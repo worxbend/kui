@@ -622,6 +622,35 @@ final class KafkaRecordSourceSuite extends KuiIOSuite {
     }
   }
 
+  test("a backward page of records larger than 4 KiB stays on the candidate batch") {
+    // Eight KiB is an ordinary JSON value. The 4 KiB prefetch guess used to abandon the batch
+    // after fetching it and walk one offset at a time, so a 100-record page polled once per record.
+    val wide = FakeBrowseConsumer.partition(0, 200)._2.map(record => record.copy(valueSize = 8 * 1024))
+    val log = Map(PartitionId.unsafe(0) -> wide)
+    val rawBudget = PollBudget.unsafe(
+      maxRecords = 50_000,
+      maxBytes = 64L * 1024L * 1024L,
+      deadline = 60.seconds
+    )
+
+    for {
+      consumer <- FakeBrowseConsumer.of(log, maxPollRecords = 500)
+      source = new KafkaRecordSource[IO](
+        (_, _) => Resource.pure((consumer: BrowseConsumer[IO]).asRight[KuiError]),
+        BrowseTuning(pollTimeout = 1.milli, emptyPollsBeforeEnd = 0)
+      )
+      records <- source
+        .browse(request(SeekMode.Latest, Direction.Backward, limit = 100), rawBudget)
+        .take(100)
+        .compile
+        .toList
+      polls <- consumer.pollCount
+    } yield {
+      assertEquals(offsets(records).map(_._2), (199L to 100L by -1L).toList)
+      assert(polls <= 5, clues(polls))
+    }
+  }
+
   test("a backward candidate batch falls back when actual payload bytes exceed its allowance") {
     val oversized = FakeBrowseConsumer.partition(0, 200)._2.map(record => record.copy(valueSize = 16 * 1024))
     val log = Map(PartitionId.unsafe(0) -> oversized)
