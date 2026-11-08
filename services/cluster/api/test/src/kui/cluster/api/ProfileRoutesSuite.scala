@@ -18,6 +18,7 @@ import kui.cluster.contract.ProfileEndpoints
 import kui.cluster.domain.{ClusterProfile, StoreHealth}
 import kui.contracts.KuiEndpoint
 import kui.http.principal.RbacGuard
+import kui.kernel.cluster.BootstrapServers
 import kui.observability.Telemetry
 import kui.security.*
 import kui.testkit.fakes.FakeStructuredLogger
@@ -84,22 +85,23 @@ final class ProfileRoutesSuite extends CatsEffectSuite {
         }
     }
 
-  test("theProfileIsAnswerableWithAnEtagThatIsItsStoreVersion") {
-    server().use(get(_, path)).map { response =>
+  test("theProfileCarriesItsVersionAndAContentEtag") {
+    // The version stays on the body. The validator is not that version: this fixture is version 7, and
+    // answering `ETag: "7"` is what made a static profile (version 0) reusable across a restart.
+    server().use(get(_, path)).flatMap { response =>
       val json = parse(response.body).getOrElse(fail(response.body)).hcursor
+      val etag = response.header("ETag")
 
       assertEquals(response.code.code, 200, response.body)
-      assertEquals(response.header("ETag"), Some("\"7\""))
       assertEquals(json.get[Long]("version"), Right(7L))
       assertEquals(json.get[String]("id"), Right("prod-eu"))
-    }
-  }
+      assert(etag.exists(tag => tag.startsWith("\"") && tag.endsWith("\"") && tag != "\"7\""), etag.toString)
 
-  test("aCallerHoldingTheCurrentVersionIsToldSoWithNoBody") {
-    server().use(get(_, path, ifNoneMatch = Some("\"7\""))).map { response =>
-      assertEquals(response.code.code, 304, response.body)
-      assertEquals(response.header("ETag"), Some("\"7\""))
-      assertEquals(response.body, "")
+      server().use(get(_, path, ifNoneMatch = etag)).map { again =>
+        assertEquals(again.code.code, 304, again.body)
+        assertEquals(again.header("ETag"), etag)
+        assertEquals(again.body, "")
+      }
     }
   }
 
@@ -108,6 +110,60 @@ final class ProfileRoutesSuite extends CatsEffectSuite {
       assertEquals(response.code.code, 200, response.body)
     }
   }
+
+  test("aRestartedStaticProfileWithNewContentIsNotNotModified") {
+    // Static profiles are all version 0, so an ETag of "\"0\"" still matches after the cluster service
+    // restarts with a different bootstrap or credential. The caller then keeps the profile it fetched
+    // from the previous process. The body version stays 0; only the validator may move.
+    val held = ClusterFixtures.profile(version = 0L)
+    val restarted = withBootstrap(held, "broker-2.example.com:9093")
+
+    server(registry = new ClusterFixtures.StubRegistry(List(held)))
+      .use { service =>
+        get(service, path).flatMap { first =>
+          val etag = first.header("ETag")
+
+          assertEquals(first.code.code, 200, first.body)
+          assertEquals(parse(first.body).toOption.flatMap(_.hcursor.get[Long]("version").toOption), Some(0L))
+          assert(etag.exists(_ != "\"0\""), etag.toString)
+
+          // Unchanged content, including another process serving the same profile, is still a 304.
+          get(service, path, ifNoneMatch = etag).map(again => (etag, again))
+        }
+      }
+      .flatMap { (etag, again) =>
+        assertEquals(again.code.code, 304, again.body)
+
+        server(registry = new ClusterFixtures.StubRegistry(List(restarted)))
+          .use(get(_, path, ifNoneMatch = etag))
+          .map { second =>
+            assertEquals(second.code.code, 200, second.body)
+            assert(second.body.contains("broker-2.example.com:9093"), second.body)
+            assert(second.header("ETag") != etag, second.header("ETag").toString)
+            assertEquals(
+              parse(second.body).toOption.flatMap(_.hcursor.get[Long]("version").toOption),
+              Some(0L)
+            )
+          }
+      }
+  }
+
+  /** The same profile, addressed somewhere else. `copy` is private with the constructor. */
+  private def withBootstrap(profile: ClusterProfile, servers: String): ClusterProfile =
+    ClusterProfile
+      .from(
+        id = profile.id,
+        displayName = profile.displayName,
+        bootstrap = BootstrapServers.unsafe(servers),
+        security = profile.security,
+        properties = profile.properties,
+        admin = profile.admin,
+        readOnly = profile.readOnly,
+        colour = profile.colour.map(_.token),
+        version = profile.version,
+        origin = profile.origin
+      )
+      .fold(error => throw new IllegalStateException(error.message), identity)
 
   test("aWildcardAlwaysFetches") {
     // On a read, the only useful reading of `*` is "unconditional": answering 304 to it would leave a

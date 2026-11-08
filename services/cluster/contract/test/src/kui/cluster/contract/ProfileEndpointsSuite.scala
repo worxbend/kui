@@ -26,8 +26,8 @@ import kui.kernel.cluster.{
 }
 import kui.kernel.{ClusterId, Secret}
 
-/** That the profile a service fetches carries exactly what a Kafka client is built from, and that its ETag is
-  * the store version.
+/** That the profile a service fetches carries exactly what a Kafka client is built from, and that its ETag
+  * follows that document rather than the store version alone.
   *
   * M1's version of this suite asserted the opposite — that the document carried no credential — because M1
   * had no consumer that built a client from it. ADR-046 is the decision that changed that, and the
@@ -211,27 +211,37 @@ final class ProfileEndpointsSuite extends ScalaCheckSuite {
     assertEquals(decoded.map(_.change), Right("renamed"))
   }
 
-  property("theEtagIsTheVersion") {
-    forAll(Gen.choose(0L, Long.MaxValue)) { version =>
+  property("theEtagFollowsTheProfileAndNotTheClockOrTheVersionText") {
+    // These assertions used to require the tag to *be* the version. That is the defect: every static
+    // profile is version 0, so the tag never moved when the resolved settings did.
+    forAll(Gen.choose(0L, Long.MaxValue - 1L)) { version =>
       val versioned = profile.copy(version = version)
+      val tag = ClusterProfileDto.etagOf(versioned)
 
-      assertEquals(ProfileResult.current(versioned).entityTag, s""""$version"""")
-      assertEquals(ProfileResult.notModified(version).entityTag, s""""$version"""")
+      assertEquals(ProfileResult.current(versioned).entityTag, tag)
+      assertEquals(ProfileResult.notModified(tag).entityTag, tag)
+      assertEquals(ClusterProfileDto.etagOf(versioned.copy(updatedAt = at.plusSeconds(30))), tag)
+      assert(tag != s""""$version"""")
+      assert(tag != ClusterProfileDto.etagOf(versioned.copy(version = version + 1L)))
     }
   }
 
-  property("a caller holding the current version is told so, whatever a proxy did to the quotes") {
+  property("a caller holding the current etag is told so, whatever a proxy did to the quotes") {
     forAll(Gen.choose(0L, 1000000L)) { version =>
-      val tag = ClusterProfileDto.etagOf(version)
+      val versioned = profile.copy(version = version)
+      val tag = ClusterProfileDto.etagOf(versioned)
+      val moved = ClusterProfileDto.etagOf(versioned.copy(version = version + 1L))
 
-      assert(ProfileResult.isCurrent(Some(tag), version))
-      assert(ProfileResult.isCurrent(Some(version.toString), version))
-      assert(ProfileResult.isCurrent(Some(s"W/$tag"), version))
-      assert(!ProfileResult.isCurrent(Some(tag), version + 1))
+      assert(ProfileResult.isCurrent(Some(tag), tag))
+      assert(ProfileResult.isCurrent(Some(tag.replace("\"", "")), tag))
+      assert(ProfileResult.isCurrent(Some(s"W/$tag"), tag))
+      assert(!ProfileResult.isCurrent(Some(tag), moved))
+      // A version-shaped tag is a previous incarnation's validator, not this document's.
+      assert(!ProfileResult.isCurrent(Some(version.toString), tag))
       // A wildcard is a request for the profile regardless: on a read, "unconditional" is the only
       // reading of `*` that is useful, and answering 304 to it would leave a caller with nothing.
-      assert(!ProfileResult.isCurrent(Some(ProfileEndpoints.AnyEtag), version))
-      assert(!ProfileResult.isCurrent(None, version))
+      assert(!ProfileResult.isCurrent(Some(ProfileEndpoints.AnyEtag), tag))
+      assert(!ProfileResult.isCurrent(None, tag))
     }
   }
 

@@ -121,7 +121,7 @@ object ClusterClientFixture {
           current.profiles.get(id) match {
             case None => IO.pure(ResponseStub.adjust(notFound.noSpaces, StatusCode.NotFound))
             case Some(dto) =>
-              val etag = ClusterProfileDto.etagOf(dto.version)
+              val etag = ClusterProfileDto.etagOf(dto)
               if ifNoneMatch.contains(etag) then
                 IO.pure(ResponseStub.adjust("", StatusCode.NotModified, List(Header("ETag", etag))))
               else

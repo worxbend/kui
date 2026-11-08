@@ -454,10 +454,11 @@ object HttpClusterProfiles {
                   InfrastructureError
                     .Unreachable(ServiceName, s"the profile could not be decoded: ${failure.getMessage}")
                 ),
-              // The tag the service sent, and only as a fallback the one derived from the body's own
-              // version — the two always agree, and `theBodyVersionAndTheETagAgree` on the producing side
-              // is what keeps them agreeing.
-              dto => Right(ProfileResult.Current(tag.getOrElse(ClusterProfileDto.etagOf(dto.version)), dto))
+              // The tag the service sent. A proxy that stripped the header still has to leave a validator
+              // the next poll can send, and it has to be the one `etagOf` would have written: the version
+              // alone is `"0"` for every static profile, which is how a restarted cluster service used to
+              // answer 304 for settings the caller does not hold.
+              dto => Right(ProfileResult.Current(tag.getOrElse(ClusterProfileDto.etagOf(dto)), dto))
             )
         case status =>
           Left(

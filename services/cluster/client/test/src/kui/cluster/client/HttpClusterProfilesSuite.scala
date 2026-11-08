@@ -12,7 +12,7 @@ import org.scalacheck.Gen
 import org.scalacheck.Prop.forAll
 
 import kui.cluster.client.ClusterClientFixture.*
-import kui.cluster.contract.dto.ClusterChangeDto
+import kui.cluster.contract.dto.{ClusterChangeDto, ClusterProfileDto}
 
 /** What this client does over time, on a virtual clock.
   *
@@ -156,11 +156,12 @@ final class HttpClusterProfilesSuite extends CatsEffectSuite {
         seen <- changes.get
         calls <- fake.recorded
       } yield {
-        // The stream said "version 1", which is the version already held, so the refetch is conditional
-        // and answers 304 — and a 304 is not a change.
+        // The stream said "version 1", which this client already holds, so the refetch is conditional
+        // and answers 304 — and a 304 is not a change. The tag is the content validator the first
+        // fetch returned, not the version text: a static profile's version never moves.
         assertEquals(seen, Nil)
         val conditional = calls.filter(_.path.endsWith("/profile")).flatMap(_.ifNoneMatch)
-        assertEquals(conditional, List("\"1\""))
+        assertEquals(conditional, List(ClusterProfileDto.etagOf(profile(Prod, 1L))))
         assertEquals(health.lastError, None, "a 304 is a successful answer, not a failure")
         assertEquals(health.subscribed, true)
       }
@@ -296,7 +297,10 @@ final class HttpClusterProfilesSuite extends CatsEffectSuite {
         }
       } yield {
         assertEquals(calls.count(_.path == "/internal/v1/clusters"), 1)
-        assertEquals(calls.filter(_.path.endsWith("/profile")).flatMap(_.ifNoneMatch), List("\"1\""))
+        assertEquals(
+          calls.filter(_.path.endsWith("/profile")).flatMap(_.ifNoneMatch),
+          List(ClusterProfileDto.etagOf(profile(Prod, 1L)))
+        )
       }
     )
   }

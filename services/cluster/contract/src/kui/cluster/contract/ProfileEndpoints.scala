@@ -83,8 +83,10 @@ object ProfileEndpoints {
       .attribute(EndpointAuthorization.Key, EndpointAuthorization.clusterScoped("cluster.profile"))
       .summary("A cluster's resolved connection settings, for another KUI service")
       .description(
-        "The ETag is the profile's store version. A caller keeps the last profile it saw and re-fetches " +
-          "with If-None-Match; an unchanged profile answers 304 with no body. This document carries the " +
+        "The ETag is a strong validator of the resolved profile, version and connection settings together, " +
+          "not the store version alone: a static profile stays at version 0 across a restart that changed " +
+          "it. A caller keeps the last profile it saw and re-fetches with If-None-Match; an unchanged " +
+          "profile answers 304 with no body. The version is still on the body. This document carries the " +
           "cluster's credentials, because a consuming service builds a Kafka client from it (ADR-046). " +
           "It is served on /internal/v1 only, to a caller with a signed principal; /internal/v1 must not " +
           "be exposed outside the deployment network."

@@ -13,7 +13,7 @@ import sttp.tapir.server.ServerEndpoint
 
 import kui.cluster.application.{ClusterRegistry, RegistrySnapshot}
 import kui.cluster.contract.ProfileEndpoints
-import kui.cluster.contract.dto.{ClusterChangeDto, ProfileResult}
+import kui.cluster.contract.dto.{ClusterChangeDto, ClusterProfileDto, ProfileResult}
 import kui.http.principal.RbacGuard
 import kui.http.sse.{Sse, SseConfig, SseEvent}
 import kui.kernel.error.KuiError
@@ -61,13 +61,17 @@ object ProfileRoutes {
         registry.resolve(id).flatMap {
           case Left(error) => error.asLeft[ProfileResult].pure[F]
           case Right(profile) =>
-            val version = profile.version.value
+            // The tag is the rendered profile, not `profile.version`. A static profile is version 0 for
+            // its whole life, including after this process restarts with a new password, and a caller
+            // that still holds `"0"` must be given the new document rather than a 304.
+            Clock[F].realTimeInstant.map { now =>
+              val dto = ClusterMapping.profile(profile, now)
+              val etag = ClusterProfileDto.etagOf(dto)
 
-            if ProfileResult.isCurrent(ifNoneMatch, version) then
-              ProfileResult.notModified(version).asRight[KuiError].pure[F]
-            else
-              Clock[F].realTimeInstant
-                .map(now => ProfileResult.current(ClusterMapping.profile(profile, now)).asRight[KuiError])
+              if ProfileResult.isCurrent(ifNoneMatch, etag) then
+                ProfileResult.notModified(etag).asRight[KuiError]
+              else ProfileResult.current(dto).asRight[KuiError]
+            }
         }
       }
     }
