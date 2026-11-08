@@ -38,7 +38,9 @@ object CloudHandlers {
     case SaslMechanism.AzureEntra(_, _) =>
       List(LoginModules.OAuthBearer, LoginModules.OAuthBearerCallbackHandler)
     case SaslMechanism.GcpManagedKafka =>
-      List(LoginModules.GcpManagedKafka, LoginModules.GcpManagedKafkaCallbackHandler)
+      // Google's `managed-kafka-auth-login-handler` ships `GcpLoginCallbackHandler` and no login
+      // module. Its documented JAAS line is Kafka's own `OAuthBearerLoginModule`.
+      List(LoginModules.OAuthBearer, LoginModules.GcpManagedKafkaCallbackHandler)
   }
 
   /** The Maven coordinate an operator has to add to make `mechanism` work, if any.

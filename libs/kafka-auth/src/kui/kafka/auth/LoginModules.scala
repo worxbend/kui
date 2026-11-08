@@ -16,7 +16,6 @@ object LoginModules {
   val OAuthBearer: String =
     "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule"
   val AwsMskIam: String = "software.amazon.msk.auth.iam.IAMLoginModule"
-  val GcpManagedKafka: String = "com.google.cloud.hosted.kafka.auth.GcpLoginModule"
 
   val AwsMskIamCallbackHandler: String = "software.amazon.msk.auth.iam.IAMClientCallbackHandler"
 

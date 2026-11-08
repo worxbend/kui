@@ -115,6 +115,24 @@ final class CloudHandlersSuite extends KuiIOSuite {
       .map(results => assertEquals(results.collect { case Left(error) => error.message }, Nil))
   }
 
+  test("gcpUsesKafkasLoginModuleAndOnlyGooglesCallbackHandlerIsMissing") {
+    // managed-kafka-auth-login-handler 1.0.6 ships GcpLoginCallbackHandler and no login module.
+    // Google's documented configuration names Kafka's OAuthBearerLoginModule in sasl.jaas.config.
+    // On this classpath, which has kafka-clients and not Google's jar, that handler is the only
+    // name still unresolved, so the coordinate the error names is enough to make the check pass.
+    // Requiring GcpLoginModule fails here too: that class is not in the jar the message names.
+    assertEquals(
+      CloudHandlers.requiredClasses(SaslMechanism.GcpManagedKafka),
+      List(LoginModules.OAuthBearer, LoginModules.GcpManagedKafkaCallbackHandler)
+    )
+    assertEquals(
+      CloudHandlers
+        .requiredClasses(SaslMechanism.GcpManagedKafka)
+        .filterNot(CloudHandlers.resolvesClass(_, getClass.getClassLoader)),
+      List(LoginModules.GcpManagedKafkaCallbackHandler)
+    )
+  }
+
   test("checkDoesNotInitializeTheClass") {
     // `Class.forName(name, false, loader)` must not run a static initializer. It matters because
     // initialising an AWS or Google login module runs code that can reach for an instance metadata

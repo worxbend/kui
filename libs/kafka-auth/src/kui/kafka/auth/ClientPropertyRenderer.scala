@@ -388,12 +388,13 @@ object ClientPropertyRenderer {
             stsRegion.map(r => "awsStsRegion" -> JaasValue.Plain(r)).toList
         )
 
-      // Both vendor handlers obtain the token themselves from the ambient credential, so the login
-      // module carries no options at all. Rendering one anyway would be inventing a contract.
       case SaslMechanism.AzureEntra(_, _) =>
         Jaas.module(LoginModules.OAuthBearer, "required", Nil)
 
+      // Google's callback handler obtains the token from application-default credentials, so the
+      // login module carries no options. It is Kafka's own `OAuthBearerLoginModule`: the published
+      // handler jar ships `GcpLoginCallbackHandler` and no login module.
       case SaslMechanism.GcpManagedKafka =>
-        Jaas.module(LoginModules.GcpManagedKafka, "required", Nil)
+        Jaas.module(LoginModules.OAuthBearer, "required", Nil)
     }
 }
