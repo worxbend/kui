@@ -144,8 +144,12 @@ object MutationGuard {
                 write(MutationOutcome.Succeeded, None) >>
                   snapshots.invalidate(cluster, s"${kind.operation} on $resource").as(value.asRight[KuiError])
               case Left(error) =>
+                // A timeout is HTTP 408, so the status test alone would record it as a refusal. The
+                // request reached the broker and may still have been applied; `Unknown` is that fact.
                 val outcome =
-                  if error.code.httpStatus < 500 then MutationOutcome.Refused else MutationOutcome.Failed
+                  if error.code == ErrorCode.Timeout then MutationOutcome.Unknown
+                  else if error.code.httpStatus < 500 then MutationOutcome.Refused
+                  else MutationOutcome.Failed
 
                 write(outcome, Some(s"${error.code.wire}: ${error.message}")).as(error.asLeft[A])
             }

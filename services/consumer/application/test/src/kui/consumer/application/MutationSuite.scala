@@ -7,7 +7,7 @@ import cats.effect.kernel.{Deferred, Ref}
 
 import kui.consumer.domain.*
 import kui.consumer.domain.fixtures.GroupFixtures
-import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
+import kui.kernel.error.{ApplicationError, ErrorCode, InfrastructureError, KuiError}
 import kui.kernel.group.GroupState
 import kui.kernel.{GroupId, Offset, Secret, TopicPartition}
 import kui.security.Principal
@@ -471,6 +471,26 @@ final class MutationSuite extends KuiIOSuite {
       assertEquals(result.left.map(_.code), Left(ErrorCode.GroupNotEmpty))
       assertEquals(records.size, 1)
       assertEquals(records.head.outcome, MutationOutcome.Refused)
+    }
+  }
+
+  test("a timed-out mutation is recorded as unknown, because it may still have been applied") {
+    val timedOut = InfrastructureError.Timeout("deleteConsumerGroups", 0L)
+    for {
+      rigged <- rig(emptyGroup)
+      (_, audit, guard, _) = rigged
+      result <- guard.guard(
+        Caller,
+        ConsumerRig.Cluster,
+        MutationKind.DeleteGroup,
+        group.value,
+        Map.empty,
+        Map.empty
+      )(IO.pure(Left(timedOut)))
+      records <- audit.written.get
+    } yield {
+      assertEquals(result, Left(timedOut))
+      assertEquals(records.map(_.outcome), List(MutationOutcome.Unknown))
     }
   }
 

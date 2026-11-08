@@ -181,9 +181,16 @@ object InfrastructureError {
     val message: String = s"$upstream could not be reached"
   }
 
+  /** The upstream did not answer inside the time it was given.
+    *
+    * `afterMs <= 0` means the caller does not know that budget. The message then omits a duration, because
+    * "within 0ms" would tell an operator the call was given no time at all.
+    */
   final case class Timeout(operation: String, afterMs: Long) extends InfrastructureError {
     val code: ErrorCode = ErrorCode.Timeout
-    val message: String = s"$operation did not finish within ${afterMs}ms"
+    val message: String =
+      if afterMs > 0L then s"$operation did not finish within ${afterMs}ms"
+      else s"$operation did not finish"
   }
 
   /** KUI's own credentials for the upstream were rejected. Not the user's problem, and never retryable: the

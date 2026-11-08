@@ -59,6 +59,24 @@ final class TopicErrorsSuite extends FunSuite {
     )
   }
 
+  test("a retryable failure does not claim the call was given zero milliseconds") {
+    // `KafkaTopicWriter.writeError` turns a broker `TimeoutException` into this detail with
+    // `retryable = true`. `toKui` keeps HTTP 408 and used to stuff the sentence into
+    // `InfrastructureError.Timeout`'s operation with `afterMs = 0`, so the wire message ended
+    // "within 0ms".
+    val message = TopicErrors
+      .toKui(
+        TopicError.Unreachable(
+          "the cluster did not answer in time; the change may still have been applied",
+          retryable = true
+        )
+      )
+      .message
+
+    assert(!message.contains("within 0ms"), message)
+    assert(message.contains("may still have been applied"), message)
+  }
+
   test("a retryable failure and a permanent one are different codes") {
     // A screen offers a retry button for one and an explanation for the other. Collapsing the two would
     // make it offer the wrong thing half the time.

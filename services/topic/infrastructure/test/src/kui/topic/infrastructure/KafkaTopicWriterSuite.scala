@@ -4,6 +4,7 @@ import munit.FunSuite
 import org.apache.kafka.common.errors.{
   InvalidConfigurationException,
   InvalidRequestException,
+  SaslAuthenticationException,
   TimeoutException,
   TopicAuthorizationException,
   UnsupportedVersionException
@@ -28,7 +29,7 @@ final class KafkaTopicWriterSuite extends FunSuite {
   test("brokers too old for a call are said to be too old, and not blamed on the request") {
     /*
      * The ordering rule the file's own comment argues for, and the reason it is fragile: Kafka's
-     * `UnsupportedVersionException` is a *subclass* of `InvalidRequestException`, so a later editor
+     * `UnsupportedVersionException` is a *subclass* of `InvalidConfigurationException`, so a later editor
      * grouping the two -- or moving the parent's arm above the child's -- changes the answer with nothing
      * to see in the diff. An operator whose brokers are too old for `incrementalAlterConfigs` would then
      * be told to fix a configuration entry that is perfectly valid.
@@ -57,6 +58,23 @@ final class KafkaTopicWriterSuite extends FunSuite {
       s"an invalid configuration must be Rejected, not $invalidConfig"
     )
     assertNotEquals(old.message, refused.message)
+  }
+
+  test("rejected credentials are not reported as a configuration the operator should edit") {
+    // `SaslAuthenticationException` extends `AuthenticationException`, which extends
+    // `InvalidConfigurationException`. Matching the parent first classifies a bad password as
+    // `Rejected` (`KUI-VALIDATION`, 400) and the audit trail records a refusal.
+    val error = KafkaTopicWriter.writeError(new SaslAuthenticationException("bad password"), orders)
+
+    error match {
+      case dom.TopicError.Rejected(_) =>
+        fail(s"authentication must not be Rejected: $error")
+      case dom.TopicError.Unreachable(detail, retryable) =>
+        assertEquals(detail, "KUI's credentials were rejected")
+        assertEquals(retryable, false)
+        assert(!error.message.contains("bad password"), error.message)
+      case other => fail(s"authentication must be a permanent Unreachable, not $other")
+    }
   }
 
   test("a refusal is said in KUI's own words, never in the broker exception's") {

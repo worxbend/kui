@@ -70,7 +70,7 @@ final class AdminBatchSuite extends KuiIOSuite {
         assertEquals(result.values.keySet, Set(1))
         assertEquals(
           result.skipped.get(2),
-          Some(SkipReason.Failed(ErrorCode.Timeout, "describeConfigs did not finish within 0ms"))
+          Some(SkipReason.Failed(ErrorCode.Timeout, "describeConfigs did not finish"))
         )
         assert(!result.isComplete)
       }

@@ -254,15 +254,19 @@ object KafkaTopicWriter {
             "broker setting and cannot be changed from here."
         )
 
-      // Before the `InvalidRequestException` case below, and it has to be: Kafka's
-      // `UnsupportedVersionException` is a *subclass* of `InvalidRequestException`, so matching the
-      // parent first would swallow it and tell an operator to fix their configuration when the real
-      // answer is that their brokers are too old for the call.
+      // Before the `InvalidConfigurationException` case below, and it has to be: Kafka's
+      // `UnsupportedVersionException` and `AuthenticationException` are both subclasses of it
+      // (`UnsupportedVersionException` is not a subclass of `InvalidRequestException`). Matching the
+      // parent first would tell an operator to fix a configuration entry when the brokers are too old
+      // for the call, or when KUI's own credentials were rejected.
       case _: UnsupportedVersionException =>
         dom.TopicError.Unreachable(
           "this cluster's brokers are too old for this operation",
           retryable = false
         )
+
+      case _: AuthenticationException =>
+        dom.TopicError.Unreachable("KUI's credentials were rejected", retryable = false)
 
       case _: InvalidTopicException =>
         dom.TopicError.Rejected("the broker will not accept that topic name")

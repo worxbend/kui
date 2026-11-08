@@ -58,13 +58,16 @@ final class MutationAuditSuite extends KuiIOSuite {
     *
     * The `Unreachable` arm is not decoration. Until it was added every error this fixture could produce was a
     * 4xx, so the guard's `if wire.code.httpStatus < 500` was only ever asked about codes on one side of its
-    * own boundary — the shape of hole this wave's clue names: the fixture could not express the failing
-    * input. It mirrors `TopicErrors`: a non-retryable `Unreachable` is `KUI-UPSTREAM-UNAVAILABLE`, a 503.
+    * own boundary. It mirrors `TopicErrors`: a non-retryable `Unreachable` is `KUI-UPSTREAM-UNAVAILABLE`
+    * (503) and a retryable one is `KUI-TIMEOUT` (408). Dropping the flag and mapping both to 503 hid a
+    * timed-out mutation being audited as `Refused`.
     */
   private def toKui(error: TopicError): KuiError = error match {
     case TopicError.NotFound(topic) =>
       ApplicationError.NotFound("topic", topic.value, ErrorCode.TopicNotFound)
-    case TopicError.Unreachable(detail, _) => InfrastructureError.Unreachable("kafka", detail)
+    case TopicError.Unreachable(detail, true) =>
+      InfrastructureError.Timeout(s"kafka: $detail", 0L)
+    case TopicError.Unreachable(detail, false) => InfrastructureError.Unreachable("kafka", detail)
     case other => ApplicationError.Refused(ErrorCode.InvalidState, other.toString)
   }
 
@@ -170,6 +173,26 @@ final class MutationAuditSuite extends KuiIOSuite {
       )
       // Neither is a success, so neither asks for a re-scrape.
       assertEquals(refreshed, Nil)
+    }
+  }
+
+  test("a timed-out mutation is recorded as unknown, because it may still have been applied") {
+    for {
+      built <- rig()
+      result <- built.guard.guard(Caller, cluster, TopicMutation.Delete, orders.value)(
+        IO.pure(
+          Left(
+            TopicError.Unreachable(
+              "the cluster did not answer in time; the change may still have been applied",
+              retryable = true
+            )
+          )
+        )
+      )
+      records <- built.records.get
+    } yield {
+      assertEquals(result.left.map(_.code), Left(ErrorCode.Timeout))
+      assertEquals(records.map(_.outcome), List(MutationOutcome.Unknown))
     }
   }
 

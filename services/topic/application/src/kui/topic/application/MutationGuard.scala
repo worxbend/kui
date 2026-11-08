@@ -184,8 +184,12 @@ object MutationGuard {
 
               case Left(error) =>
                 val wire = toKui(error)
+                // A timeout is HTTP 408, so the status test alone would record it as a refusal. The
+                // request reached the broker and may still have been applied; `Unknown` is that fact.
                 val outcome =
-                  if wire.code.httpStatus < 500 then MutationOutcome.Refused else MutationOutcome.Failed
+                  if wire.code == ErrorCode.Timeout then MutationOutcome.Unknown
+                  else if wire.code.httpStatus < 500 then MutationOutcome.Refused
+                  else MutationOutcome.Failed
 
                 write(outcome, Map("reason" -> s"${wire.code.wire}: ${wire.message}")).as(wire.asLeft[A])
             }
