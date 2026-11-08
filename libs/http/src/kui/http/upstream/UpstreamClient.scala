@@ -229,7 +229,9 @@ object UpstreamClient {
   private[upstream] def isResponseLimitCause(error: Throwable): Boolean = {
     @annotation.tailrec
     def loop(current: Throwable, remaining: Int): Boolean =
-      if current.isInstanceOf[StreamMaxLengthExceededException] then true
+      if current.isInstanceOf[StreamMaxLengthExceededException] ||
+        current.isInstanceOf[BoundedResponse.LimitExceeded]
+      then true
       else if remaining <= 0 then false
       else
         Option(current.getCause) match {

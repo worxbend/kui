@@ -187,9 +187,19 @@ final class KsqlHttp[F[_]: Async](
       request: Request[Either[String, String]],
       maxResponseBytes: Option[Long] = None
   ): F[Either[KuiError, String]] = {
-    val responseAs = maxResponseBytes.fold(asStringAlways)(BoundedResponse.asString)
+    // `maxResponseBodyLength` is what the production Http4s transport enforces while receiving.
+    // `BoundedResponse.asString` still refuses a body a stub materialised whole.
+    val prepared = maxResponseBytes match {
+      case Some(limit) =>
+        request
+          .header("Accept", MediaType)
+          .maxResponseBodyLength(limit)
+          .response(BoundedResponse.asString(limit))
+      case None =>
+        request.header("Accept", MediaType).response(asStringAlways)
+    }
 
-    credentials.authenticate(request.header("Accept", MediaType).response(responseAs)).flatMap {
+    credentials.authenticate(prepared).flatMap {
       case Left(error) => error.asLeft[String].pure[F]
       case Right(authenticated) =>
         authenticated
@@ -204,9 +214,10 @@ final class KsqlHttp[F[_]: Async](
             // is, because both are "ksqlDB answered something this call cannot use", not an unreachable
             // upstream. Anything else is genuinely unexpected and is reported as an upstream that did not
             // produce a response, which is the honest description.
+            case failure: UpstreamFailure if UpstreamClient.isResponseLimitFailure(failure) =>
+              Left(oversize(maxResponseBytes))
             case UpstreamFailure(error) => Left(error)
-            case BoundedResponse.LimitExceeded(limit) =>
-              Left(malformed(s"its answer was larger than the $limit-byte limit KUI enforces on this call"))
+            case BoundedResponse.LimitExceeded(limit) => Left(oversize(Some(limit)))
             case failure: Exception => Left(thrown(failure))
           }
     }
@@ -282,6 +293,14 @@ final class KsqlHttp[F[_]: Async](
       s"the ksqlDB cluster answered something KUI could not understand: $why",
       Nil
     )
+
+  private def oversize(limit: Option[Long]): KuiError = {
+    val bound = limit match {
+      case Some(bytes) => s"the $bytes-byte"
+      case None => "the configured"
+    }
+    malformed(s"its answer was larger than $bound limit KUI enforces on this call")
+  }
 
   private def entitiesOf(body: String): Either[KuiError, List[Json]] =
     parser

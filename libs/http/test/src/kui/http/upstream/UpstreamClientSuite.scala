@@ -10,7 +10,7 @@ import munit.CatsEffectSuite
 import sttp.capabilities.StreamMaxLengthExceededException
 import sttp.client4.*
 import sttp.client4.impl.cats.implicits.*
-import sttp.client4.testing.{BackendStub, StubBody}
+import sttp.client4.testing.{BackendStub, ResponseStub, StubBody}
 import sttp.model.{Method, StatusCode}
 
 import kui.kernel.PositiveInt
@@ -470,6 +470,32 @@ final class UpstreamClientSuite extends CatsEffectSuite {
       assertEquals(state, CircuitState.Closed)
       assert(outcomes.forall(_.left.exists(UpstreamClient.isResponseLimitFailure)), outcomes.toString)
       assert(!UpstreamClient.isResponseLimitFailure(UpstreamFailure(forged)))
+    }
+  }
+
+  test(
+    "a bounded reader's own limit failure is classified like the transport's and leaves the circuit closed"
+  ) {
+    // A backend that does not enforce `maxResponseBodyLength` delivers the whole body, and BoundedResponse's
+    // handler is what refuses it. That refusal proves the upstream answered, exactly as the stream limit does.
+    val configured = UpstreamFixture.single("ksql").copy(failureThreshold = PositiveInt.unsafe(2))
+    val backend = BackendStub[IO](summon[sttp.monad.MonadError[IO]]).whenAnyRequest
+      .thenRespond(ResponseStub.adjust("x" * 64))
+
+    val program = UpstreamFixture.client(configured, backend).use { client =>
+      for {
+        outcomes <- BoundedResponse
+          .asString(request(Method.POST), 16L)
+          .send(client.backend)
+          .attempt
+          .replicateA(3)
+        state <- client.currentState
+      } yield (outcomes, state)
+    }
+
+    TestControl.executeEmbed(program).map { case (outcomes, state) =>
+      assert(outcomes.forall(_.left.exists(UpstreamClient.isResponseLimitFailure)), outcomes.toString)
+      assertEquals(state, CircuitState.Closed)
     }
   }
 

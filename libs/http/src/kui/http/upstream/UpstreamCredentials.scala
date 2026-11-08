@@ -281,9 +281,8 @@ object UpstreamCredentials {
         .body(form)
         .followRedirects(false)
         .readTimeout(settings.requestTimeout)
-        // The JVM backend enforces this while receiving the stream. ResponseAsInputStream is not supported
-        // by HttpClientFs2Backend, so the shared OAuth transport must cap before `asStringAlways` instead of
-        // delegating to BoundedResponse's InputStream reader.
+        // The JVM backend enforces this while receiving the stream, before `asStringAlways` materialises
+        // the token. The byte check below covers a stub that ignores the option.
         .maxResponseBodyLength(settings.maxResponseBytes)
         .response(asStringAlways)
 
