@@ -146,6 +146,23 @@ final class StoreConfigSuite extends KuiSuite {
     assert(message.exists(!_.contains(keyMaterial)), "the message echoed the key material")
   }
 
+  test("duplicateEncryptionKeyIdsAreRejectedWithoutEchoingMaterial") {
+    val other = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHw=="
+    val yaml = ConfigFixtures.yaml(
+      s"""|kui:
+          |  store:
+          |    encryptionKeys: "k1:$keyMaterial,k1:$other"
+          |    encryptionKeyId: "k1"
+          |""".stripMargin
+    )
+    val found = problems(load(List(yaml)))
+    val message = found.find(_.key == "kui.store.encryptionKeys").map(_.problem)
+    assert(message.exists(_.contains("k1")), message.toString)
+    val rendered = found.map(_.render).mkString("\n")
+    assert(!rendered.contains(keyMaterial), rendered)
+    assert(!rendered.contains(other), rendered)
+  }
+
   test("encryptionKeysWithoutAnIdIsRejected") {
     val yaml = ConfigFixtures.yaml(
       s"""|kui:

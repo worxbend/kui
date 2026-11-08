@@ -980,10 +980,27 @@ object KuiConfigSource {
     val entries = raw.split(',').toList.map(_.trim).filter(_.nonEmpty)
     val parsed = entries.map(entry => entry.span(_ != ':'))
     val malformed = parsed.exists((id, rest) => id.isEmpty || rest.length <= 1)
+    val duplicates = parsed
+      .map(_._1)
+      .groupBy(identity)
+      .collect { case (id, occurrences) if id.nonEmpty && occurrences.sizeIs > 1 => id }
+      .toList
+      .sorted
+    val duplicateIds =
+      if duplicates.sizeIs == 1 then s"the id ${duplicates.mkString(", ")}"
+      else s"the ids ${duplicates.mkString(", ")}"
+
     if entries.isEmpty || malformed then
       ConfigProblem(
         "kui.store.encryptionKeys",
         "expected 'id:base64,id:base64'; one entry is missing its id or its material",
+        source
+      ).invalidNel
+    else if duplicates.nonEmpty then
+      ConfigProblem(
+        "kui.store.encryptionKeys",
+        s"lists $duplicateIds more than once; each id may appear only once. A repeated id would keep " +
+          "only the last material, and records encrypted under the earlier one would not decrypt",
         source
       ).invalidNel
     else parsed.map((id, rest) => id -> SecretRef.parse(rest.drop(1))).toMap.validNel
