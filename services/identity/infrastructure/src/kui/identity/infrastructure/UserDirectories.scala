@@ -1,5 +1,8 @@
 package kui.identity.infrastructure
 
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 import io.circe.{Json, JsonObject}
@@ -34,14 +37,21 @@ object ConfiguredUserDirectory {
     users
       .traverse(user =>
         Sync[F].fromEither(
-          PasswordHash
-            .parse(user.passwordHash)
-            .map(hash => UserRecord(UserName.unsafe(user.name), hash, user.groups, user.mustChangePassword))
-            .leftMap(problem =>
-              new IllegalArgumentException(
-                s"kui.auth.users '${user.name}' has an unusable passwordHash: ${problem.message}"
+          for {
+            // A name that cannot be a store id fails here, while the process is starting, and not
+            // on the first password change. The digest fallback makes that Left unreachable for any
+            // string `StoreKey.parse` accepts; it stays so a future key rule still fails closed.
+            _ <- StoredUserDirectory
+              .checkedKey(user.name)
+              .leftMap(message => new IllegalArgumentException(message))
+            hash <- PasswordHash
+              .parse(user.passwordHash)
+              .leftMap(problem =>
+                new IllegalArgumentException(
+                  s"kui.auth.users '${user.name}' has an unusable passwordHash: ${problem.message}"
+                )
               )
-            )
+          } yield UserRecord(UserName.unsafe(user.name), hash, user.groups, user.mustChangePassword)
         )
       )
       .flatTap(records =>
@@ -99,11 +109,58 @@ object ConfiguredUserDirectory {
   */
 object StoredUserDirectory {
 
-  /** The record id for an account. Prefixed, because `StoreSection.Rbac` will also hold role records (RB-004)
-    * and the two must not be able to collide.
+  /** The record id for an account.
+    *
+    * Prefixed with `user-`, because `StoreSection.Rbac` will also hold role records (RB-004) and the two must
+    * not be able to collide. A name that is already a store-key slug keeps `user-<name>`: that is the key an
+    * older KUI wrote, and a digest would orphan the override. Anything else — an email address, a space, a
+    * trailing punctuation mark — is not an id (`StoreKey.IdPattern`). Writing it makes the follower's
+    * `StoreKey.parse` report the record unreadable, the change is refused, and a forced first change can
+    * never finish. Those names are stored under `user-` plus a SHA-256 prefix, the same shape `UserStateKey`
+    * uses, which is a slug by construction.
+    *
+    * Built with `StoreKey.parse`. A name that still will not parse is refused at startup by
+    * [[ConfiguredUserDirectory.make]], not at the first password change.
     */
-  def keyFor(username: String): StoreKey =
-    StoreKey(StoreSection.Rbac, s"user-${ConfiguredUserDirectory.key(username)}")
+  def keyFor(username: String): StoreKey = {
+    val canonical = ConfiguredUserDirectory.key(username)
+    val legacyId = s"user-$canonical"
+    val digestId = s"user-${AccountKey.digest(canonical)}"
+    def parse(id: String): Option[StoreKey] = StoreKey.parse(s"${StoreSection.Rbac.name}/$id").toOption
+
+    // A slug keeps the legacy id. Anything parse still rejects falls through to the digest, which is a
+    // slug. The constructor is only reached when that digest is itself rejected; [[checkedKey]] then fails
+    // startup rather than letting a password change write an unreadable record.
+    val legacy = if AccountKey.Id.matches(legacyId) then parse(legacyId) else None
+    legacy.orElse(parse(digestId)).getOrElse(StoreKey(StoreSection.Rbac, digestId))
+  }
+
+  /** `Left` names the account and why its key is not a store id. Unreachable while the digest fallback holds;
+    * [[ConfiguredUserDirectory.make]] is what turns it into a startup failure.
+    */
+  private[infrastructure] def checkedKey(username: String): Either[String, StoreKey] = {
+    val key = keyFor(username)
+    StoreKey
+      .parse(key.render)
+      .leftMap(error => s"kui.auth.users '$username' cannot be keyed in the metadata store: ${error.message}")
+  }
+
+  /** SHA-256 prefix used when the login name is not itself a store id. Sixteen bytes, as `UserStateKey` does,
+    * so the id stays well inside `StoreKey`'s length bound.
+    */
+  private object AccountKey {
+    val Id: scala.util.matching.Regex = StoreKey.IdPattern.r
+
+    private val DigestBytes: Int = 16
+
+    def digest(canonical: String): String =
+      MessageDigest
+        .getInstance("SHA-256")
+        .digest(canonical.getBytes(StandardCharsets.UTF_8))
+        .take(DigestBytes)
+        .map(byte => f"${byte & 0xff}%02x")
+        .mkString
+  }
 
   private val HashField: String = "passwordHash"
 

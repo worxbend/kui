@@ -1,20 +1,26 @@
 package kui.identity.infrastructure
 
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 
 import cats.effect.{IO, Ref}
 import fs2.Stream
+import io.circe.syntax.*
 import io.circe.{Json, JsonObject}
 
+import kui.config.FormUserConfig
 import kui.config.store.{
   ConfigStore,
   SecretJson,
+  StoreApplied,
   StoreChange,
+  StoreError,
   StoreHealth,
   StoreKey,
   StoreRecord,
-  StoreSection
+  StoreSection,
+  StoreState
 }
 import kui.identity.domain.{PasswordAlgorithm, PasswordHash, UserDirectory, UserRecord}
 import kui.kernel.error.KuiError
@@ -179,6 +185,49 @@ final class UserDirectoriesSuite extends KuiIOSuite {
     }
   }
 
+  test("a slug login name keeps the legacy store key") {
+    // Existing overrides were written at rbac/user-<slug>. A digest-only key would orphan them.
+    assertEquals(StoredUserDirectory.keyFor("Admin").render, "rbac/user-admin")
+    assert(StoreKey.parse(StoredUserDirectory.keyFor("Admin").render).isRight)
+  }
+
+  test("an email login name is a store key, and a password change for it folds back") {
+    /*
+     * keyFor used to call the StoreKey constructor with user-<canonical name>. The follower's decode
+     * runs StoreKey.parse, whose id must be a slug, so rbac/user-alice@example.com comes back
+     * unreadable and the change is refused. The account stays on the configured hash, still forced
+     * to change, and the next sign-in never gets a session.
+     */
+    val username = "Alice@Example.com"
+    val record =
+      UserRecord(UserName.unsafe(username), hash, Set("operators"), mustChangePassword = true)
+    val directory = ConfiguredUserDirectory.fromRecords[IO](List(record))
+    val notSlugs = List("alice@example.com", "alice smith", "alice+tag", "o'brien", "alice_", "josé")
+
+    for {
+      logger <- FakeStructuredLogger[IO]
+      store <- FoldingStore.make
+      stored = StoredUserDirectory.make[IO](directory, store, logger)
+      written <- stored.update(record.withPassword(changed))
+      found <- stored.find("alice@example.com")
+      started <- ConfiguredUserDirectory.make[IO](
+        List(FormUserConfig(username, Secret(hash.encoded), Set("operators"), true)),
+        logger
+      )
+      fromConfig <- started.find(username)
+    } yield {
+      notSlugs.foreach { name =>
+        val rendered = StoredUserDirectory.keyFor(name).render
+        assert(StoreKey.parse(rendered).isRight, s"$rendered is not a store key")
+      }
+      assert(StoreKey.parse(StoredUserDirectory.keyFor(username).render).isRight)
+      assertEquals(written, Right(()))
+      assertEquals(found.map(_.hash), Some(changed))
+      assertEquals(found.map(_.mustChangePassword), Some(false))
+      assertEquals(fromConfig.map(_.name.value), Some(username))
+    }
+  }
+
   test("the stored password hash carries the secret marker, which is what makes the store encrypt it") {
     /*
      * Ungated until now: writing the hash as a bare `Json.fromString` left the suite at 79/79 green.
@@ -264,6 +313,92 @@ final class UserDirectoriesSuite extends KuiIOSuite {
       override def get(key: StoreKey): IO[Option[StoreRecord]] =
         IO.raiseError(new RuntimeException("the metadata store is not reachable"))
     }
+
+  /** A store whose writes take the same path as `KafkaConfigStore`: render the key, `StoreKey.parse` it the
+    * way `decode` does, and fold the result with `StoreState`. An id that is not a slug is marked unreadable
+    * under the placeholder key and refused, which is what a real read-back does.
+    */
+  final private class FoldingStore(state: Ref[IO, StoreState]) extends ConfigStore[IO] {
+    def get(key: StoreKey): IO[Option[StoreRecord]] = state.get.map(_.get(key))
+
+    def list(section: StoreSection): IO[List[StoreRecord]] = state.get.map(_.list(section))
+
+    def put(
+        key: StoreKey,
+        payload: Json,
+        baseVersion: Option[Long],
+        updatedBy: String
+    ): IO[Either[KuiError, StoreRecord]] =
+      IO.realTimeInstant.flatMap { at =>
+        state.modify { current =>
+          val offset = current.lastAppliedOffset + 1L
+          StoreKey.parse(key.render) match {
+            case Left(error) =>
+              val (next, _) = current.markUnreadable(
+                StoreKey(StoreSection.Other("unparseable"), "key"),
+                offset,
+                error.message
+              )
+              (next, Left(StoreError.toKuiError(StoreError.MalformedRecord(key.render, error.message))))
+            case Right(parsed) =>
+              val actual = current.get(parsed).map(_.version)
+              if actual != baseVersion then {
+                val why =
+                  s"version ${baseVersion.fold("none")(_.toString)} does not match " +
+                    actual.fold("none")(_.toString)
+                (current, Left(StoreError.toKuiError(StoreError.MalformedRecord(parsed.render, why))))
+              } else {
+                val candidate = StoreRecord(
+                  StoreRecord.CurrentEnvelopeVersion,
+                  parsed,
+                  current.nextVersion(parsed),
+                  at.truncatedTo(ChronoUnit.SECONDS),
+                  updatedBy,
+                  deleted = false,
+                  payload
+                )
+                StoreRecord.fromJsonWithKey(parsed.render, candidate.asJson) match {
+                  case Left(error) =>
+                    val (next, _) = current.markUnreadable(parsed, offset, error.message)
+                    (next, Left(StoreError.toKuiError(error)))
+                  case Right(decoded) =>
+                    val (next, applied) = current.apply(decoded, offset)
+                    applied match {
+                      case StoreApplied.Accepted(_) => (next, Right(decoded))
+                      case StoreApplied.Ignored(_, _, _) =>
+                        (
+                          next,
+                          Left(
+                            StoreError.toKuiError(StoreError.MalformedRecord(parsed.render, "ignored"))
+                          )
+                        )
+                      case StoreApplied.Unreadable(_, reason) =>
+                        (
+                          next,
+                          Left(StoreError.toKuiError(StoreError.MalformedRecord(parsed.render, reason)))
+                        )
+                    }
+                }
+              }
+          }
+        }
+      }
+
+    def delete(key: StoreKey, baseVersion: Long, updatedBy: String): IO[Either[KuiError, Unit]] =
+      IO.raiseError(new RuntimeException("not reached"))
+
+    def changes: Stream[IO, StoreChange] = Stream.empty
+
+    def health: IO[StoreHealth] =
+      state.get.map(current =>
+        StoreHealth.Healthy(current.lastAppliedOffset, Instant.EPOCH, current.unreadableKeys)
+      )
+  }
+
+  private object FoldingStore {
+    def make: IO[ConfigStore[IO]] =
+      Ref.of[IO, StoreState](StoreState.empty).map(state => new FoldingStore(state))
+  }
 
   abstract private class StubStore extends ConfigStore[IO] {
     def get(key: StoreKey): IO[Option[StoreRecord]] = IO.pure(None)
