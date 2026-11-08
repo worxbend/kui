@@ -40,7 +40,7 @@ import kui.gateway.application.capability.{
 import kui.gateway.application.client.{ServiceClient, ServiceClients}
 import kui.gateway.application.cluster.ClusterOverviewUseCase
 import kui.gateway.application.search.{SearchSource, SearchUseCase}
-import kui.gateway.application.session.{InMemorySessionStore, SessionConfig}
+import kui.gateway.application.session.{InMemorySessionStore, SessionConfig, SessionStore, SessionSweep}
 import kui.gateway.application.topic.{ConsumerGroupsSource, TopicOverviewUseCase}
 import kui.http.health.ReadinessCheck
 import kui.http.upstream.HttpTls
@@ -151,7 +151,7 @@ object GatewayWiring {
 
     for {
       _ <- Resource.eval(warnIfInsecureCookies[F](logger, config))
-      sessions <- InMemorySessionStore.resource[F](SessionConfig.Default)
+      sessions <- sweepingSessions[F](SessionConfig.Default)
       registry <- CapabilityRegistry.resource[F](RegistryConfig.Default, telemetry, logger)
       clients <- clients
       // The service list comes from the clients rather than from `config.gateway.services`, because those
@@ -275,6 +275,19 @@ object GatewayWiring {
         TopicOverviewUseCase.fillable[F](overviewSources, hasTopicClient = topicClient.isDefined)
     )
   }
+
+  /** The in-memory session store, plus the sweep [[SessionConfig.sweepInterval]] says this wiring runs.
+    *
+    * Expired sessions are not all removed by the next lookup: a session nobody asks about again stays until
+    * sweep, and it still counts toward the pool. The fiber is what makes that happen while the gateway is
+    * otherwise idle. `private[app]` so a suite can advance the clock past an expiry without also starting the
+    * readiness pollers.
+    */
+  private[app] def sweepingSessions[F[_]: Async](config: SessionConfig): Resource[F, SessionStore[F]] =
+    for {
+      store <- InMemorySessionStore.resource[F](config)
+      _ <- SessionSweep.resource[F](store, config.sweepInterval)
+    } yield store
 
   /** The prominent warning ADR-019 requires whenever `server.devInsecureCookies` strips `Secure` off the
     * session cookie. It is a `WARN` and not a `DEBUG` on purpose: it is the one line in a deployment's log

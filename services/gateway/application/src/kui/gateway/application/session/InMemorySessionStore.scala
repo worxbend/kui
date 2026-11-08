@@ -4,6 +4,8 @@ import java.security.SecureRandom
 import java.time.Instant
 import java.util.Base64
 
+import scala.collection.immutable.TreeMap
+
 import cats.effect.kernel.{Async, Resource, Sync}
 import cats.effect.std.AtomicCell
 import cats.syntax.all.*
@@ -32,16 +34,29 @@ object InMemorySessionStore {
 
   private val IdBytes: Int = 32
 
-  final private case class State(
+  /** One bounded pool.
+    *
+    * `byAge` is oldest-first, keyed by a monotonic sequence rather than `lastSeenAt`: two sessions touched in
+    * the same instant still have an order, and a later `get` may pass an earlier timestamp than the one
+    * already stored. A touch deletes one entry and inserts another, which is O(log n). Filtering a `Vector`
+    * of every id on every request was three linear passes under this cell's single mutex.
+    */
+  final private case class Pool(
       sessions: Map[SessionId, Session],
-      // Most recently touched first. A separate ordering rather than sorting `sessions` by `lastSeenAt` on
-      // every eviction, because eviction happens on every `create` once the store is full, and re-sorting a
-      // map of ten thousand entries on every request a flood sends is the cost this exists to avoid.
-      order: Vector[SessionId],
+      recency: Map[SessionId, Long],
+      byAge: TreeMap[Long, SessionId],
+      nextSeq: Long
+  )
+
+  final private case class State(
+      anonymous: Pool,
+      authenticated: Pool,
       retired: Vector[(SessionId, Instant)]
   )
 
-  private val EmptyState: State = State(Map.empty, Vector.empty, Vector.empty)
+  private val EmptyPool: Pool = Pool(Map.empty, Map.empty, TreeMap.empty, 0L)
+
+  private val EmptyState: State = State(EmptyPool, EmptyPool, Vector.empty)
 
   // Longer than the gateway's request timeout; bounded separately from both live-session pools.
   private val RetirementGrace: java.time.Duration = java.time.Duration.ofMinutes(5)
@@ -78,14 +93,15 @@ object InMemorySessionStore {
 
     def get(id: SessionId, now: Instant): F[Option[Session]] =
       cell.evalModify { state =>
-        state.sessions.get(id) match {
+        find(state, id) match {
           case Some(session) if !session.isExpired(now, idleTimeout) =>
             val touched = session.copy(lastSeenAt = now)
-            Sync[F].pure((touch(state, touched), Some(touched)))
+            Sync[F].pure((insert(state, touched), Some(touched)))
           case Some(_) =>
             // Expired, but not yet swept. Reported as absent — the caller must not be able to tell "expired"
-            // from "never existed", which is the same information a forged id would otherwise leak.
-            Sync[F].pure((state, None))
+            // from "never existed", which is the same information a forged id would otherwise leak — and
+            // dropped, so a dead entry cannot keep a live session's slot until the next sweep.
+            Sync[F].pure((remove(state, id), None))
           case None =>
             Sync[F].pure((state, None))
         }
@@ -94,7 +110,7 @@ object InMemorySessionStore {
     def rotate(id: SessionId, now: Instant): F[Option[Session]] =
       randomToken.flatMap { newId =>
         cell.evalModify { state =>
-          state.sessions.get(id) match {
+          find(state, id) match {
             case Some(existing) if !existing.isExpired(now, idleTimeout) =>
               val rotated = existing.copy(id = SessionId.unsafe(newId), lastSeenAt = now)
               Sync[F].pure((insert(retireState(state, id, now), rotated), Some(rotated)))
@@ -114,13 +130,14 @@ object InMemorySessionStore {
 
     def sweep(now: Instant): F[Int] =
       cell.evalModify { state =>
-        val (expired, alive) = state.sessions.partition((_, session) => session.isExpired(now, idleTimeout))
+        val (anonymous, anonRemoved) = sweepPool(state.anonymous, now)
+        val (authenticated, authRemoved) = sweepPool(state.authenticated, now)
         val next = state.copy(
-          sessions = alive,
-          order = state.order.filter(alive.contains),
+          anonymous = anonymous,
+          authenticated = authenticated,
           retired = state.retired.filter { case (_, until) => now.isBefore(until) }
         )
-        Sync[F].pure((next, expired.size))
+        Sync[F].pure((next, anonRemoved + authRemoved))
       }
 
     // -----------------------------------------------------------------------------------------------------
@@ -140,27 +157,60 @@ object InMemorySessionStore {
         absoluteExpiry = now.plusMillis(config.absoluteTimeout.toMillis)
       )
 
-    /** Adds a session, evicting the least-recently-touched entry first if the store is already at capacity.
+    /** Adds a session, evicting the least-recently-touched entry of the same pool first if that pool is
+      * already at capacity. Anonymous and authenticated sessions never share a pool.
       */
     private def insert(state: State, session: Session): State = {
-      val withoutOld = remove(state, session.id)
-      // Separate bounded pools: anonymous churn must never spend authenticated capacity.
-      val samePool = withoutOld.order.filter(id =>
-        (withoutOld.sessions(id).principal.kind == PrincipalKind.Anonymous) ==
-          (session.principal.kind == PrincipalKind.Anonymous)
-      )
-      val bounded =
-        if samePool.sizeIs >= config.maxSessions then
-          samePool.lastOption.fold(withoutOld)(remove(withoutOld, _))
-        else withoutOld
-      bounded.copy(sessions = bounded.sessions + (session.id -> session), order = session.id +: bounded.order)
+      val without = remove(state, session.id)
+      if session.principal.kind == PrincipalKind.Anonymous then
+        without.copy(anonymous = add(without.anonymous, session))
+      else without.copy(authenticated = add(without.authenticated, session))
     }
 
-    private def touch(state: State, session: Session): State =
-      insert(remove(state, session.id), session)
+    private def add(pool: Pool, session: Session): Pool = {
+      val without = removeFrom(pool, session.id)
+      val bounded =
+        if without.sessions.sizeIs >= config.maxSessions then
+          without.byAge.headOption.fold(without) { case (_, oldest) => removeFrom(without, oldest) }
+        else without
+      val seq = bounded.nextSeq
+      bounded.copy(
+        sessions = bounded.sessions.updated(session.id, session),
+        recency = bounded.recency.updated(session.id, seq),
+        byAge = bounded.byAge.updated(seq, session.id),
+        nextSeq = seq + 1
+      )
+    }
+
+    private def find(state: State, id: SessionId): Option[Session] =
+      state.anonymous.sessions.get(id).orElse(state.authenticated.sessions.get(id))
 
     private def remove(state: State, id: SessionId): State =
-      state.copy(sessions = state.sessions - id, order = state.order.filterNot(_ == id))
+      state.copy(
+        anonymous = removeFrom(state.anonymous, id),
+        authenticated = removeFrom(state.authenticated, id)
+      )
+
+    private def removeFrom(pool: Pool, id: SessionId): Pool =
+      pool.recency.get(id) match {
+        case None => pool
+        case Some(seq) =>
+          pool.copy(sessions = pool.sessions - id, recency = pool.recency - id, byAge = pool.byAge - seq)
+      }
+
+    private def sweepPool(pool: Pool, now: Instant): (Pool, Int) = {
+      val expired = pool.sessions.filter((_, session) => session.isExpired(now, idleTimeout))
+      if expired.isEmpty then (pool, 0)
+      else {
+        val gone = expired.keySet
+        val kept = pool.copy(
+          sessions = pool.sessions.filterNot((id, _) => gone.contains(id)),
+          recency = pool.recency.filterNot((id, _) => gone.contains(id)),
+          byAge = pool.byAge.filterNot((_, id) => gone.contains(id))
+        )
+        (kept, gone.size)
+      }
+    }
 
     private def retireState(state: State, id: SessionId, now: Instant): State = {
       val retained = state.retired.filter { case (key, until) => key != id && now.isBefore(until) }

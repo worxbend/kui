@@ -1801,6 +1801,9 @@ object services extends Module {
 
         def mvnDeps = super.mvnDeps() ++ Seq(
           mvn"org.typelevel::munit-cats-effect::${Versions.munitCatsEffect}",
+          // The session-sweep fiber is asserted under `TestControl`, the same way the store's own timeouts
+          // are: advancing past an idle timeout must not be a real minute.
+          mvn"org.typelevel::cats-effect-testkit::${Versions.catsEffect}",
           mvn"ch.qos.logback:logback-classic:${Versions.logback}",
           mvn"net.logstash.logback:logstash-logback-encoder:${Versions.logstash}"
         )

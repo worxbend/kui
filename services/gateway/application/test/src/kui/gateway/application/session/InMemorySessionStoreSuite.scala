@@ -208,6 +208,49 @@ final class InMemorySessionStoreSuite extends CatsEffectSuite {
     }
   }
 
+  test("touching a full store does not scan every session") {
+    // Three linear passes under the single cell lock — remove, remove again, then a filter of the
+    // whole order — made one valid-cookie request cost hundreds of microseconds once either pool
+    // was full. Twenty thousand gets then took well over two seconds, and every other request on
+    // the gateway waited behind that same lock.
+    val full = shortConfig.copy(maxSessions = 20_000)
+    val now = java.time.Instant.EPOCH
+
+    InMemorySessionStore.resource[IO](full).use { sessions =>
+      for {
+        created <- (1 to 20_000).toList.traverse(_ => sessions.create(Principal.Anonymous, now))
+        started <- IO.monotonic
+        _ <- created.traverse_(session => sessions.get(session.id, now).void)
+        elapsed <- IO.monotonic.map(_ - started)
+      } yield assert(
+        elapsed < 2.seconds,
+        s"20,000 gets took $elapsed; a touch must not be linear in the pool"
+      )
+    }
+  }
+
+  test("get drops an expired session instead of leaving it to evict a live one") {
+    // An absolutely expired session can still be the most recently touched entry. Leaving it in the
+    // pool made the next create evict a different, still-valid session.
+    val config = shortConfig.copy(absoluteTimeout = 2.minutes, maxSessions = 2)
+    val start = java.time.Instant.EPOCH
+
+    InMemorySessionStore.resource[IO](config).use { sessions =>
+      for {
+        doomed <- sessions.create(Principal.Anonymous, start)
+        live <- sessions.create(Principal.Anonymous, start.plusSeconds(30))
+        _ <- sessions.get(doomed.id, start.plusSeconds(31))
+        at = start.plusSeconds(121)
+        _ <- sessions.get(doomed.id, at)
+        _ <- sessions.create(Principal.Anonymous, at)
+        retained <- sessions.get(live.id, at)
+      } yield assert(
+        retained.isDefined,
+        "reading the expired session left it in the pool, and the next create evicted the live one"
+      )
+    }
+  }
+
   test("sessionIdIsNeverContainedInAnyToStringOrLogEntry") {
     val now = java.time.Instant.EPOCH
 

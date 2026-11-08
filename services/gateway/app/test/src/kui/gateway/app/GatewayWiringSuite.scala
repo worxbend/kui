@@ -7,7 +7,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 import cats.effect.IO
-import cats.effect.kernel.{Ref, Resource}
+import cats.effect.kernel.{Clock, Ref, Resource}
+import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import fs2.Stream
 import sttp.capabilities.fs2.Fs2Streams
@@ -16,6 +17,7 @@ import sttp.tapir.{Endpoint, PublicEndpoint}
 import kui.config.{GatewayConfig, ServerConfig, UpstreamServiceConfig, UrlPolicy}
 import kui.contracts.ErrorEnvelope
 import kui.gateway.application.client.{CallContext, ServiceClient, ServiceClients}
+import kui.gateway.application.session.SessionConfig
 import kui.gateway.contract.dto.TopicOverviewDto
 import kui.http.health.HealthEndpoints
 import kui.http.sse.SseEvent
@@ -213,6 +215,46 @@ final class GatewayWiringSuite extends KuiIOSuite {
           input: I
       )(ctx: CallContext): Stream[IO, SseEvent] = Stream.empty
     }
+
+  test("the sweep fiber removes an expired session before it can evict a live one") {
+    // Nothing used to call `SessionStore.sweep`. An absolutely expired session that was still the most
+    // recently touched entry kept its slot, and the next create evicted a different live session instead.
+    // The fiber is the one `GatewayWiring.over` starts; this case drives that same resource under
+    // `TestControl` so the minute between sweeps is not a real minute.
+    val config = SessionConfig(
+      idleTimeout = 30.minutes,
+      absoluteTimeout = 2.minutes,
+      maxSessions = 2,
+      sweepInterval = 1.minute
+    )
+    val program = GatewayWiring.sweepingSessions[IO](config).use { store =>
+      for {
+        start <- Clock[IO].realTimeInstant
+        doomed <- store.create(Principal.Anonymous, start)
+        _ <- IO.sleep(90.seconds)
+        createdLive <- Clock[IO].realTimeInstant
+        live <- store.create(Principal.Anonymous, createdLive)
+        _ <- IO.sleep(1.second)
+        touched <- Clock[IO].realTimeInstant
+        // Still inside doomed's absolute lifetime, so this touch makes it the newest entry.
+        _ <- store.get(doomed.id, touched)
+        // Sweeps fall on the minute. Doomed expires at two minutes; that tick is not strictly after the
+        // expiry, and the tick a minute later is. Live was created ninety seconds in, so it is still
+        // inside its own absolute lifetime then, and it has not been idle.
+        _ <- IO.sleep(90.seconds)
+        now <- Clock[IO].realTimeInstant
+        _ <- store.create(Principal.Anonymous, now)
+        retained <- store.get(live.id, now)
+      } yield retained
+    }
+
+    TestControl.executeEmbed(program).map { retained =>
+      assert(
+        retained.isDefined,
+        "the expired session was still occupying a slot, so LRU evicted the live one"
+      )
+    }
+  }
 
   test("theGatewayStartsWithNothingConfigured") {
     wire(GatewayServiceConfig.Default).map { gateway =>
