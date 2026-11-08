@@ -109,12 +109,12 @@ object ClusterConfig {
 
   /** Which raw property keys hold a secret.
     *
-    * Delegates to [[ClientPropertyOverrides.isSecretKey]] so that `kui.clusters.<n>.properties` and
-    * `kui.store.kafka.properties` cannot drift into redacting different things. Over-redaction is deliberate:
-    * a key wrongly treated as secret prints `***` in a diagnostic, and a key wrongly treated as public prints
-    * a password into `docker logs`.
+    * Delegates to [[ClientProperties.isSensitiveKey]], the classifier `ClientProperties.fromRaw` actually
+    * uses, so that `kui.clusters.<n>.properties` and `kui.store.kafka.properties` cannot drift. A key wrongly
+    * treated as secret prints `***` in a diagnostic, and a key wrongly treated as public prints a password
+    * into `docker logs` and stores it in the clear.
     */
-  def isSecretProperty(key: String): Boolean = ClientPropertyOverrides.isSecretKey(key)
+  def isSecretProperty(key: String): Boolean = ClientProperties.isSensitiveKey(key)
 
   private def isSlugCharacter(character: Char): Boolean =
     (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9')

@@ -200,6 +200,26 @@ final class ClusterConfigSuite extends KuiSuite {
     assert(!mtls.toString.contains("overridden-secret"), mtls.toString)
   }
 
+  test("aRawKeystoreKeyIsRedactedFromClusterToString") {
+    val pem = "-----BEGIN PRIVATE KEY-----hunter2"
+    val file = ConfigFixtures.yaml(
+      s"""kui:
+         |  clusters:
+         |    - name: One
+         |      bootstrapServers: broker:9092
+         |      properties:
+         |        ssl.keystore.key: "$pem"
+         |""".stripMargin
+    )
+
+    val cluster = loaded(load(List(file))).clusters.head
+
+    assertEquals(cluster.properties.get("ssl.keystore.key").map(_.unsafeValue), Some(pem))
+    assert(!cluster.toString.contains("BEGIN PRIVATE KEY"), cluster.toString)
+    assert(!cluster.toString.contains("hunter2"), cluster.toString)
+    assert(!cluster.connection.toString.contains("BEGIN PRIVATE KEY"), cluster.connection.toString)
+  }
+
   test("aClusterNameLongerThanTheLimitIsRejected") {
     val file = ConfigFixtures.yaml(
       s"""kui:

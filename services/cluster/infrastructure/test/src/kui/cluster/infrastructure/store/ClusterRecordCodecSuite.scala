@@ -243,6 +243,32 @@ final class ClusterRecordCodecSuite extends KuiSuite {
     )
   }
 
+  test("aRawKeystoreKeyIsWrittenAsASecretMarker") {
+    val pem = "-----BEGIN PRIVATE KEY-----\nkUiS3cr3t-keystore-key\n-----END PRIVATE KEY-----"
+    val profile = ClusterProfile
+      .from(
+        ClusterId.unsafe("local"),
+        "Local",
+        BootstrapServers.unsafe("localhost:9092"),
+        ClusterSecurity.Plaintext,
+        ClientProperties.fromRaw(Map("ssl.keystore.key" -> pem)),
+        AdminTuning.default,
+        readOnly = false,
+        colour = None,
+        version = ProfileVersion.Static,
+        origin = ProfileOrigin.Static
+      )
+      .fold(error => throw new IllegalStateException(error.message), identity)
+
+    val payload = ClusterRecordCodec.encode(profile)
+    val paths = SecretJson.plaintextPaths(payload)
+
+    assert(
+      paths.exists(_.contains("ssl.keystore.key")),
+      s"ssl.keystore.key was not stored under a $$secret marker: $paths ${payload.noSpaces}"
+    )
+  }
+
   private def withSecurity(security: ClusterSecurity): ClusterProfile =
     ClusterProfile
       .from(

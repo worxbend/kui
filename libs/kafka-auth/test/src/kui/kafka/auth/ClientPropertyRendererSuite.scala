@@ -219,6 +219,18 @@ final class ClientPropertyRendererSuite extends KuiSuite {
     assert(markedSensitive.subsetOf(ClientPropertyRenderer.sensitiveKeys))
   }
 
+  test("everyDocumentedSensitiveKeyIsClassifiedSensitiveFromRaw") {
+    val raw = ClientPropertyRenderer.sensitiveKeys.map(_ -> "kUiS3cr3t-raw").toMap
+    val properties = ClientProperties.fromRaw(raw)
+
+    ClientPropertyRenderer.sensitiveKeys.foreach { key =>
+      properties.get(key) match {
+        case Some(PropertyValue.Sensitive(_)) => ()
+        case other => fail(s"$key classified as $other")
+      }
+    }
+  }
+
   test("overrideLayerWinsOverTheKeysKuiComputesItself") {
     val overrides = ClientProperties.fromRaw(
       Map(

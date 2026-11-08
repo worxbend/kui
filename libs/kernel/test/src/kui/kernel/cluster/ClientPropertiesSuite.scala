@@ -35,6 +35,13 @@ final class ClientPropertiesSuite extends KuiSuite {
       "ssl.key.password",
       "ssl.keystore.password",
       "ssl.truststore.password",
+      "ssl.keystore.key",
+      "ssl.truststore.certificates",
+      "ssl.keystore.certificate.chain",
+      "ssl.key.passphrase",
+      "some.vendor.passwd",
+      "basic.auth.user.info",
+      "schema.registry.basic.auth.user.info",
       "some.vendor.secret",
       "vendor.credential.file",
       "sasl.oauthbearer.token.value"
@@ -42,6 +49,7 @@ final class ClientPropertiesSuite extends KuiSuite {
 
     val notSensitive = List(
       "ssl.truststore.location",
+      "ssl.keystore.location",
       "ssl.keystore.type",
       "bootstrap.servers",
       "client.dns.lookup",
@@ -56,6 +64,17 @@ final class ClientPropertiesSuite extends KuiSuite {
   test("theClassificationRulesAreReadableAndNonEmpty") {
     assert(ClientProperties.sensitiveKeyRules.nonEmpty)
     assert(ClientProperties.sensitiveKeyRules.contains("sasl.jaas.config"))
+  }
+
+  test("aRawKeystoreKeyIsSensitiveAndDoesNotRender") {
+    val pem = "-----BEGIN PRIVATE KEY-----\nhunter2\n-----END PRIVATE KEY-----"
+    val properties = ClientProperties.fromRaw(Map("ssl.keystore.key" -> pem))
+
+    assert(ClientProperties.isSensitiveKey("ssl.keystore.key"))
+    assertEquals(properties.get("ssl.keystore.key").map(_.unsafeValue), Some(pem))
+    assertEquals(properties.redactedValues("ssl.keystore.key"), "***")
+    assert(!properties.render.contains("BEGIN PRIVATE KEY"), properties.render)
+    assert(!properties.render.contains("hunter2"), properties.render)
   }
 
   test("aSensitiveValueIsAvailableThroughUnsafeValuesAndNowhereElse") {

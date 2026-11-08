@@ -69,17 +69,26 @@ object ClientProperties {
   val sensitiveKeyRules: List[String] = List(
     "sasl.jaas.config",
     "*.password",
+    "*.key",
     "*secret*",
     "*credential*",
-    "*token*"
+    "*token*",
+    "*passphrase*",
+    "*passwd*",
+    "*auth.user.info*",
+    "*certificate*"
   )
 
-  /** `true` for a key that names a secret: `sasl.jaas.config`, anything ending in `.password` (which is where
-    * `ssl.key.password` and `ssl.keystore.password` come from), and anything containing `secret`,
-    * `credential` or `token`.
+  /** `true` for a key that names a secret.
     *
-    * Deliberately *not* true for `ssl.truststore.location`: a path is what an operator needs to see in the
-    * error message that says the file is missing.
+    * That is `sasl.jaas.config`, anything ending in `.password` or `.key` (where `ssl.key.password`,
+    * `ssl.keystore.password` and the inline PEM `ssl.keystore.key` come from), and anything containing
+    * `secret`, `credential`, `token`, `passphrase`, `passwd`, `auth.user.info` or `certificate` (the last
+    * covers `ssl.truststore.certificates` and `ssl.keystore.certificate.chain`).
+    *
+    * Deliberately *not* true for `ssl.truststore.location`, `ssl.keystore.location` or `ssl.keystore.type`: a
+    * path or a store type is what an operator needs to see when the file is missing, and a substring match on
+    * `key` would hide both.
     */
   def isSensitiveKey(key: String): Boolean = {
     val lowered = key.toLowerCase(java.util.Locale.ROOT)

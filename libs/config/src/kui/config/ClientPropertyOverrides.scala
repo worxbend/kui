@@ -1,31 +1,25 @@
 package kui.config
 
-import scala.util.matching.Regex
+import kui.kernel.cluster.ClientProperties
 
 /** The raw Kafka client properties an operator may set alongside KUI's typed model, and the rule that keeps
   * them out of log lines.
   *
   * ADR-022's escape hatch: whatever KUI renders from the typed security ADT, these properties are applied
   * last and win. That is what lets a mechanism KUI has not modelled yet be used without waiting for a
-  * release. The cost is that KUI has no idea what is in the map, which is why the redaction here is by key
-  * *pattern* rather than by a list of known-sensitive keys — a list could not possibly be complete for a map
-  * whose whole purpose is to hold things KUI does not know about.
+  * release. The cost is that KUI has no idea what is in the map, which is why redaction follows
+  * [[ClientProperties.isSensitiveKey]] — the same rules `fromRaw` uses when the map is parsed. A second
+  * pattern here is how `ssl.keystore.key` was logged as a secret and still stored in the clear.
   *
   * Shared by the `kui.store.kafka.properties` slice (STORE-004) and the `kui.clusters[].properties` slice
   * (CFGOP-001), so that the two cannot drift into redacting different things.
   */
 object ClientPropertyOverrides {
 
-  /** Any key that looks like it names a credential. Deliberately broad: a false positive costs an operator
-    * one `***` in a diagnostic line, and a false negative costs them a password in a log aggregator.
-    *
-    * `jaas` is on the list for a specific reason: `sasl.jaas.config` is the single most credential-bearing
-    * property name in Kafka and it contains none of the obvious words. A property test over real Kafka
-    * property names is what found that, and it is why the list is a pattern rather than intuition.
+  /** Same decision as [[ClientProperties.isSensitiveKey]]. The rules live in one list, so a key classified
+    * secret at parse time is the key redacted at log time.
     */
-  val SecretKeyPattern: Regex = "(?i).*(password|secret|key|token|credential|jaas|passwd|auth).*".r
-
-  def isSecretKey(name: String): Boolean = SecretKeyPattern.matches(name)
+  def isSecretKey(name: String): Boolean = ClientProperties.isSensitiveKey(name)
 
   /** The map as it may be printed: sensitive values replaced, keys kept.
     *
