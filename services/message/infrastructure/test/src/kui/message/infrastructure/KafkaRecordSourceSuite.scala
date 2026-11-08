@@ -10,9 +10,20 @@ import cats.syntax.all.*
 
 import kui.kernel.browse.{Direction, PollBudget, SeekMode}
 import kui.kernel.error.KuiError
-import kui.kernel.{Offset, PartitionId, TopicName}
-import kui.message.application.{RawRecord, ScanCompletion, ScanEvent}
-import kui.message.domain.BrowseRequest
+import kui.kernel.serde.{PayloadKind, SerdeName, SerdeUse, Target}
+import kui.kernel.{ClusterId, Offset, PartitionId, Secret, TopicName}
+import kui.message.application.cursor.CursorCodec
+import kui.message.application.{
+  BrowseEnd,
+  BrowseEvent,
+  BrowseUseCase,
+  RawRecord,
+  RecordMasking,
+  ScanCompletion,
+  ScanEvent
+}
+import kui.message.domain.ports.{ClusterProfileSource, FilterSource, SerdeChoice, SerdeSource}
+import kui.message.domain.{BrowseRequest, Decoded}
 import kui.testkit.KuiIOSuite
 
 /** The browse arithmetic, and the promise that a cancelled browse closes its consumer.
@@ -340,6 +351,75 @@ final class KafkaRecordSourceSuite extends KuiIOSuite {
         .compile
         .toList
     } yield assertEquals(result.last, ScanEvent.Completed(ScanCompletion.Deadline))
+  }
+
+  test("a browse that runs out of time ends on the budget with no failure") {
+    // The scan still completes as Deadline — that is what the test above pins — but a browse is a page,
+    // and a page that spent its time budget is `done{reason:budget}`, not KUI-INVALID-STATE. The use
+    // case already classifies a spent deadline as BrowseEnd.Budget once the source stops instead of
+    // failing the element.
+    val deadline = PollBudget.unsafe(100, 10000, 20.millis)
+    val clusters: ClusterProfileSource[IO] = (id: ClusterId) =>
+      IO.pure(
+        Right(
+          kui.message.domain.ports.BrowseCluster(id, "Local", readOnly = false, java.time.Instant.EPOCH, false)
+        )
+      )
+    val serdes: SerdeSource[IO] = new SerdeSource[IO] {
+      def decode(
+          cluster: ClusterId,
+          topic: TopicName,
+          target: Target,
+          requested: Option[SerdeName],
+          bytes: Option[Array[Byte]]
+      ): IO[(Decoded, Option[String])] =
+        IO.pure((Decoded("", PayloadKind.Text, SerdeName.Fallback, Map.empty), None))
+
+      def serialize(
+          cluster: ClusterId,
+          topic: TopicName,
+          target: Target,
+          requested: Option[SerdeName],
+          properties: Map[String, String],
+          text: Option[String]
+      ): IO[Either[KuiError, Option[Array[Byte]]]] = IO.pure(Right(None))
+
+      def choices(
+          cluster: ClusterId,
+          topic: TopicName,
+          target: Target,
+          use: SerdeUse
+      ): IO[Either[KuiError, List[SerdeChoice]]] = IO.pure(Right(Nil))
+    }
+
+    for {
+      closed <- Ref.of[IO, Boolean](false)
+      source = new KafkaRecordSource[IO](
+        FakeBrowseConsumer
+          .openingSilentAtFirst(Map(FakeBrowseConsumer.partition(0, 2)), closed, Int.MaxValue),
+        BrowseTuning(pollTimeout = 1.milli, emptyPollsBeforeEnd = 0)
+      )
+      browse = BrowseUseCase.make[IO](
+        clusters,
+        serdes,
+        source,
+        CursorCodec.hmacSha256[IO](Secret("test-key".getBytes("UTF-8"))),
+        FilterSource.unsupported[IO],
+        RecordMasking.none[IO]
+      )
+      events <- browse
+        .browse(request(SeekMode.Beginning, Direction.Forward, 10), deadline)
+        .compile
+        .toList
+        .timeout(5.seconds)
+    } yield {
+      val failures = events.collect { case BrowseEvent.Failed(error) => error }
+      assertEquals(failures, Nil)
+      events.lastOption match {
+        case Some(BrowseEvent.Finished(BrowseEnd.Budget, _)) => ()
+        case other => fail(s"expected Finished(Budget, _), got $other")
+      }
+    }
   }
 
   test("transient empty polls never prove the captured range empty") {

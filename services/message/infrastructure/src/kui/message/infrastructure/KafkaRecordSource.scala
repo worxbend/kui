@@ -8,7 +8,7 @@ import cats.syntax.all.*
 import fs2.Stream
 
 import kui.kernel.browse.{Direction, IsolationLevel, PollBudget, SeekMode}
-import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
+import kui.kernel.error.KuiError
 import kui.kernel.{ClusterId, Offset, PartitionId, TopicName}
 import kui.message.application.{RawRecord, RecordSource, ScanCompletion, ScanEvent}
 import kui.message.domain.BrowseRequest
@@ -58,16 +58,13 @@ final class KafkaRecordSource[F[_]: Temporal](
   import KafkaRecordSource.*
 
   def browse(request: BrowseRequest, budget: PollBudget): Stream[F, Either[KuiError, RawRecord]] =
+    // A deadline is a spent time budget, not a broken scan. `scan` still ends with
+    // `Completed(Deadline)` so a caller that must not claim EOF can see it; dropping that
+    // completion here lets the browse use case report `BrowseEnd.Budget` and mint a cursor.
+    // Mapping it to `KUI-INVALID-STATE` threw the page away with nothing to resume from.
     scan(request, budget).collect {
       case ScanEvent.Record(record) => Right(record)
       case ScanEvent.Failed(error) => Left(error)
-      case ScanEvent.Completed(ScanCompletion.Deadline) =>
-        Left(
-          ApplicationError.Refused(
-            ErrorCode.InvalidState,
-            "the scan deadline expired before the captured end"
-          )
-        )
     }
 
   override def scan(
