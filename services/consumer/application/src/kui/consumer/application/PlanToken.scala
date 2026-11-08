@@ -52,10 +52,12 @@ object PlanToken {
 
   private val Algorithm: String = "HmacSHA256"
 
-  /** `v2` signs the committed offset beside each proposed one. A `v1` token has no such binding and is
-    * refused: its five-minute life is shorter than a deploy, and accepting it would re-open the stale write.
+  /** `v3` puts the cluster and the group in their own fields and base64url-encodes the group, and it signs
+    * the committed offset beside each proposed one. Earlier payloads joined `cluster/group` and separated
+    * fields with `|`, so a `/` in the group was truncated, a `|` added a field, and a token for `x/b`
+    * verified as `b`. Those payloads are refused: a token lives five minutes, which is shorter than a deploy.
     */
-  private val Version: String = "v2"
+  private val Version: String = "v3"
   private val Separator: Char = '.'
   private val Field: Char = '|'
   private val Entry: Char = ','
@@ -148,7 +150,8 @@ object PlanToken {
 
     List(
       Version,
-      qualify(cluster, plan.group),
+      cluster.value,
+      encode(plan.group.value.getBytes(StandardCharsets.UTF_8)),
       plan.scope.topic.value,
       plan.spec.target.wire,
       offsets,
@@ -156,24 +159,24 @@ object PlanToken {
     ).mkString(Field.toString)
   }
 
-  /** The cluster this token was minted for is carried in the group field's prefix, so that a plan for
-    * `orders` on staging cannot be applied to `orders` on production.
+  /** Field 1 is the cluster id alone. Equality, not a prefix: `pro` must not verify a token minted for
+    * `prod`, and the group id is no longer appended here where a `/` inside it could be truncated.
     */
   private def boundTo(payload: String, cluster: ClusterId): Boolean =
     payload
       .split(java.util.regex.Pattern.quote(Field.toString), -1)
       .lift(1)
-      .exists(_.startsWith(s"${cluster.value}/"))
+      .exists(_ == cluster.value)
 
   private def parse(payload: String): Option[(ResetPlan, Instant)] =
     // `split(String)` is a regex split and `|` is alternation, so the delimiter is quoted. Quoting
     // rather than using the `Char` overload keeps the `-1` limit, which is what preserves an empty
     // offsets field for a plan over no partitions.
     payload.split(java.util.regex.Pattern.quote(Field.toString), -1).toList match {
-      case version :: qualified :: topic :: target :: offsets :: expiry :: Nil if version == Version =>
+      case version :: _ :: encodedGroup :: topic :: target :: offsets :: expiry :: Nil
+          if version == Version =>
         for {
-          groupId <- qualified.split('/').lastOption
-          group <- GroupId.from(groupId).toOption
+          group <- decodeGroup(encodedGroup)
           topicName <- TopicName.from(topic).toOption
           expiresAt <- expiry.toLongOption.map(Instant.ofEpochMilli)
           planned <- parseOffsets(topicName, offsets)
@@ -218,6 +221,10 @@ object PlanToken {
           }
         }
 
+  /** The group id, base64url-encoded so `/` and `|` inside it stay one field. */
+  private def decodeGroup(raw: String): Option[GroupId] =
+    decode(raw).flatMap(bytes => GroupId.from(new String(bytes, StandardCharsets.UTF_8)).toOption)
+
   /** `Some(None)` is a partition that had no commit. `None` is a column this decoder does not understand. */
   private def parseCommit(raw: String): Option[Option[Offset]] =
     if raw == AbsentCommit then Some(None)
@@ -230,6 +237,4 @@ object PlanToken {
     case _ => ResetSpec.ToOffsets(Map.empty)
   }
 
-  /** The value the token binds to a cluster: the id and the group, joined. */
-  def qualify(cluster: ClusterId, group: GroupId): String = s"${cluster.value}/${group.value}"
 }

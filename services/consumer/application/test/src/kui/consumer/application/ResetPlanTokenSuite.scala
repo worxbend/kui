@@ -117,6 +117,36 @@ final class ResetPlanTokenSuite extends KuiIOSuite {
     }
   }
 
+  test("aGroupIdContainingASlashOrAPipeRoundTripsAndDoesNotBindTheSuffix") {
+    // Group ids may contain either character. The token used to join cluster and group with '/' and
+    // split the payload on '|', so `team/orders` came back as `orders`, `a|b` did not parse, and a
+    // token minted for `x/b` verified as group `b`.
+    val now = Instant.parse("2026-09-11T09:00:00Z")
+    val expiresAt = now.plusSeconds(60L)
+
+    def minted(id: String) =
+      tokens.mint(
+        ConsumerRig.Cluster,
+        planOf(List(plannedPartition(0, 10L))).copy(group = GroupId.unsafe(id)),
+        expiresAt
+      )
+
+    for {
+      slash <- minted("team/orders")
+      same <- tokens.verify(ConsumerRig.Cluster, GroupId.unsafe("team/orders"), slash, now)
+      pipe <- minted("a|b")
+      piped <- tokens.verify(ConsumerRig.Cluster, GroupId.unsafe("a|b"), pipe, now)
+      crossed <- minted("x/b")
+      asSuffix <- tokens.verify(ConsumerRig.Cluster, GroupId.unsafe("b"), crossed, now)
+      asWhole <- tokens.verify(ConsumerRig.Cluster, GroupId.unsafe("x/b"), crossed, now)
+    } yield {
+      assert(same.isRight, clue = same)
+      assert(piped.isRight, clue = piped)
+      assert(asWhole.isRight, clue = asWhole)
+      assertEquals(asSuffix.left.map(_.code), Left(kui.kernel.error.ErrorCode.Validation))
+    }
+  }
+
   test("aTokenMintedFromAnUnsortedPlanVerifiesToTheSortedOffsets") {
     val shuffled = List(plannedPartition(2, 30L), plannedPartition(0, 10L), plannedPartition(1, 20L))
     val now = Instant.parse("2026-09-11T09:00:00Z")

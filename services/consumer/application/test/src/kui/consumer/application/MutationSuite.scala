@@ -382,14 +382,10 @@ final class MutationSuite extends KuiIOSuite {
   }
 
   test("a cluster whose id only appears inside the binding is not the cluster the token was minted for") {
-    // W12-A1. The case above proves the binding exists; it does not prove the binding is a *prefix*.
-    // `PlanToken.boundTo`'s `_.startsWith(s"${cluster.value}/")` rewritten to `_.contains(cluster.value)`
-    // left all **1,390** tasks of `./mill services.consumer.__.test` SUCCESS, and under it the binding
-    // stops being a cluster identity and becomes a substring search over `"<cluster>/<group>"`. A plan
-    // computed against `prod`'s `orders-consumer` would then apply to a cluster called `orders` — or to
-    // `pro`, or to `d/orders`, whichever a deployment happens to have — which is the exact failure ADR-045
-    // binds the token to a cluster to prevent: the offsets on the screen were read from a different
-    // cluster's log ends.
+    // The cluster is its own field and has to be equal to the one verify was asked about. A search
+    // for the cluster id inside the payload would accept this token on a cluster called `orders`
+    // (that string is the topic field) or on `pro` (a prefix of `prod`). The offsets on the screen
+    // were read from a different cluster's log ends.
     val plan = ResetPlan(
       group,
       scope,
@@ -398,12 +394,13 @@ final class MutationSuite extends KuiIOSuite {
       Nil,
       ConsumerRig.At
     )
-    // `prod` + `orders-consumer` renders the binding `prod/orders-consumer`, which contains `orders`.
     val neighbour = kui.kernel.ClusterId.unsafe("orders")
+    val prefix = kui.kernel.ClusterId.unsafe("pro")
 
     for {
       token <- tokens.mint(ConsumerRig.Cluster, plan, ConsumerRig.At.plusSeconds(300))
       verified <- tokens.verify(neighbour, group, token, ConsumerRig.At)
+      prefixed <- tokens.verify(prefix, group, token, ConsumerRig.At)
       // The other direction, so a mutation that refuses everything fails here too.
       mine <- tokens.verify(ConsumerRig.Cluster, group, token, ConsumerRig.At)
     } yield {
@@ -412,6 +409,7 @@ final class MutationSuite extends KuiIOSuite {
         Left(ErrorCode.Validation),
         s"a token minted for ${ConsumerRig.Cluster.value} applied on ${neighbour.value}"
       )
+      assertEquals(prefixed.left.map(_.code), Left(ErrorCode.Validation))
       assert(mine.isRight, "the cluster the token was minted for was refused its own token")
     }
   }
