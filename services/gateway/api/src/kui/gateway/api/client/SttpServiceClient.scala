@@ -225,11 +225,13 @@ object SttpServiceClient {
       def build(token: SignedPrincipal): Request[DecodeResult[Either[ErrorEnvelope, O]]] =
         interpreter.toSecureRequest(endpoint, baseUri).apply(token).apply(input)
 
-      signed(build(Placeholder), ctx).flatMap { token =>
-        send(decorate(build(token), ctx)).map {
-          case Left(error) => Left(error)
-          case Right(response) => decoded(response.code.code, response.body)
-        }
+      signed(build(Placeholder), ctx).flatMap {
+        case Left(error) => Async[F].pure(Left(error))
+        case Right(token) =>
+          send(decorate(build(token), ctx)).map {
+            case Left(error) => Left(error)
+            case Right(response) => decoded(response.code.code, response.body)
+          }
       }
     }
 
@@ -283,50 +285,69 @@ object SttpServiceClient {
 
       Stream
         .eval(signed(build(Placeholder), ctx))
-        .flatMap { token =>
-          Stream
-            .eval(decorateStream(build(token), ctx).send(streaming))
-            .flatMap { response =>
-              response.body match {
-                case DecodeResult.Value(Right(bytes)) => bytes.through(SseWire.parse)
-                case DecodeResult.Value(Left(envelope)) =>
-                  Stream.raiseError[F](
-                    UpstreamRejection(errorOf(service, response.code.code, envelope))
-                  )
-                case failure: DecodeResult.Failure =>
-                  Stream.raiseError[F](
-                    UpstreamRejection(
-                      InfrastructureError.Unreachable(
-                        service.value,
-                        s"the stream could not be opened: $failure"
+        .flatMap {
+          case Left(error) => Stream.raiseError[F](UpstreamRejection(error))
+          case Right(token) =>
+            Stream
+              .eval(decorateStream(build(token), ctx).send(streaming))
+              .flatMap { response =>
+                response.body match {
+                  case DecodeResult.Value(Right(bytes)) => bytes.through(SseWire.parse)
+                  case DecodeResult.Value(Left(envelope)) =>
+                    Stream.raiseError[F](
+                      UpstreamRejection(errorOf(service, response.code.code, envelope))
+                    )
+                  case failure: DecodeResult.Failure =>
+                    Stream.raiseError[F](
+                      UpstreamRejection(
+                        InfrastructureError.Unreachable(
+                          service.value,
+                          s"the stream could not be opened: $failure"
+                        )
                       )
                     )
-                  )
+                }
               }
-            }
         }
     }
 
-    /** Mints a token whose audience is this service and whose digest covers this exact request. */
-    private def signed(request: GenericRequest[?, ?], ctx: CallContext): F[SignedPrincipal] =
-      Clock[F].realTimeInstant.flatMap { now =>
-        principals.sign(
-          PrincipalClaims(
-            subject = ctx.principal.name,
-            roles = ctx.principal.roles,
-            kind = ctx.principal.kind,
-            sessionRef = None,
-            issuedAt = now,
-            expiresAt = now.plusSeconds(TokenLifetimeSeconds),
-            audience = service,
-            requestDigest = RequestDigests.of(
-              request.method.method,
-              pathOf(request),
-              bodyBytes(request)
+    /** Mints a token whose audience is this service and whose digest covers this exact request.
+      *
+      * A signing failure is a typed infrastructure error, not an exception. `sign` raises when no configured
+      * key is active yet; leaving that to escape `call` turns every proxied request into an untyped 500 and
+      * skips the capability signal. The cause kept here is the exception's class name, the same rule as a
+      * transport failure, so it cannot carry a host or a credential.
+      */
+    private def signed(
+        request: GenericRequest[?, ?],
+        ctx: CallContext
+    ): F[Either[KuiError, SignedPrincipal]] =
+      Clock[F].realTimeInstant
+        .flatMap { now =>
+          principals
+            .sign(
+              PrincipalClaims(
+                subject = ctx.principal.name,
+                roles = ctx.principal.roles,
+                kind = ctx.principal.kind,
+                sessionRef = None,
+                issuedAt = now,
+                expiresAt = now.plusSeconds(TokenLifetimeSeconds),
+                audience = service,
+                requestDigest = RequestDigests.of(
+                  request.method.method,
+                  pathOf(request),
+                  bodyBytes(request)
+                )
+              )
             )
+            .attempt
+        }
+        .map(
+          _.leftMap(failure =>
+            InfrastructureError.Unreachable(service.value, UpstreamClient.safeFailureCause(failure))
           )
         )
-      }
 
     private def decorate[O](request: Request[O], ctx: CallContext): Request[O] =
       request.headers(edgeHeaders(ctx)*)

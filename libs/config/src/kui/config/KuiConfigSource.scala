@@ -719,16 +719,41 @@ object KuiConfigSource {
         sourceOfPrincipalKey(layers, name)
       )
     )
-    indices.sorted
-      .traverse(index => decodePrincipalKey[F](layers, index))
-      .map(_.sequence)
-      .map(decoded =>
-        misshapen match {
-          case Nil => decoded
-          case first :: rest => decoded *> NonEmptyList(first, rest).invalid
-        }
-      )
+    for {
+      decoded <- indices.sorted.traverse(index => decodePrincipalKey[F](layers, index))
+      now <- Async[F].realTimeInstant
+    } yield {
+      val shaped = misshapen match {
+        case Nil => decoded.sequence
+        case first :: rest => decoded.sequence *> NonEmptyList(first, rest).invalid
+      }
+      shaped.andThen(keys => refuseWhenNoneActive(keys, now, layers, indices))
+    }
   }
+
+  /** A key set whose every `notBefore` is still in the future cannot sign, and every proxied call would fail.
+    * An empty list stays valid: that is the all-in-one deployment, which does not sign. A future key beside
+    * one that is already active is the documented rotation and stays valid. The message names the earliest
+    * instant and never the key material.
+    */
+  private def refuseWhenNoneActive(
+      keys: List[KeyDraft],
+      now: Instant,
+      layers: Layers,
+      indices: List[Int]
+  ): Problems[List[KeyDraft]] =
+    if keys.isEmpty || keys.exists(key => !key.notBefore.isAfter(now)) then keys.validNel
+    else {
+      val earliest = keys.minBy(_.notBefore.toEpochMilli).notBefore
+      val source = indices.minOption
+        .map(index => sourceOfPrincipalKey(layers, index.toString))
+        .getOrElse(ConfigSourceName.Default)
+      ConfigProblem(
+        "kui.gateway.principalKeys",
+        s"no signing key is active yet; the earliest notBefore is $earliest",
+        source
+      ).invalidNel
+    }
 
   /** Where the operator wrote the misshapen entry, so the message can point at the right file. */
   private def sourceOfPrincipalKey(layers: Layers, name: String): ConfigSourceName = {

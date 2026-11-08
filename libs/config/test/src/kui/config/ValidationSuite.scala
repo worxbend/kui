@@ -143,6 +143,43 @@ final class ValidationSuite extends KuiSuite {
     assertEquals(found.map(_.key), List("kui.telemetry"))
   }
 
+  test("a principal key set with nothing active yet is refused") {
+    val material = "0123456789abcdef0123456789abcdef"
+    val file = ConfigFixtures.yaml(
+      s"""kui:
+         |  gateway:
+         |    principalKeys:
+         |      - kid: main
+         |        key: "$material"
+         |        notBefore: "2062-01-01T00:00:00Z"
+         |""".stripMargin
+    )
+
+    val found = problems(load(List(file)))
+    val rendered = found.map(_.render).mkString("\n")
+
+    assertEquals(found.map(_.key), List("kui.gateway.principalKeys"))
+    assert(found.head.problem.contains("no signing key is active yet"), found.head.problem)
+    assert(!rendered.contains(material), rendered)
+  }
+
+  test("a future signing key beside an active one still loads") {
+    val file = ConfigFixtures.yaml(
+      """kui:
+        |  gateway:
+        |    principalKeys:
+        |      - kid: current
+        |        key: "0123456789abcdef0123456789abcdef"
+        |      - kid: next
+        |        key: "abcdef0123456789abcdef0123456789"
+        |        notBefore: "2062-01-01T00:00:00Z"
+        |""".stripMargin
+    )
+
+    val loaded = load(List(file)).fold(errors => fail(errors.render), identity)
+    assertEquals(loaded.gateway.principalKeys.map(_.kid), List("current", "next"))
+  }
+
   test("a signing key written as a named child is reported, not silently dropped") {
     // An indentation slip turns the list `- kid: k1` into the map `k1:`. Those children used to be
     // filtered out for not being numbers, leaving an empty key list from a file with a key plainly

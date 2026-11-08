@@ -21,14 +21,38 @@ import kui.kernel.{Secret, ServiceId}
   */
 final case class SigningKey(kid: String, key: Secret[Array[Byte]], notBefore: Instant)
 
+/** Why [[JwsPrincipalCodec.make]] refused a key set, as a value rather than an exception. */
+sealed trait RejectedSigningKey {
+  def message: String
+}
+
 /** A signing key that HS256 cannot use.
   *
   * HMAC-SHA-256 requires a secret at least as long as its output — 256 bits — and a shorter one weakens the
   * signature rather than failing loudly. KUI refuses it at construction, as a value, so a misconfigured
   * deployment cannot start and then mint weak tokens.
   */
-final case class WeakSigningKey(kid: String, bits: Int) {
+final case class WeakSigningKey(kid: String, bits: Int) extends RejectedSigningKey {
   def message: String = s"signing key '$kid' is $bits bits; HS256 needs at least 256"
+}
+
+/** Two configured keys share a key id.
+  *
+  * Verification looks the token's `kid` up in a map, so a repeated id keeps only the last key, while signing
+  * still chooses by `notBefore` across every entry. A token signed with the earlier key then fails
+  * verification on every service. The id is reported; the key material is not.
+  */
+final case class DuplicateSigningKey(kids: NonEmptyList[String]) extends RejectedSigningKey {
+  def message: String = {
+    val distinct = kids.toList.distinct.sorted
+    val named = distinct.map(kid => s"'$kid'").mkString(", ")
+    if distinct.sizeIs == 1 then
+      s"signing key id $named is configured more than once; each id may appear only once. A repeated id " +
+        "would keep only the last key, and a token signed with the earlier one would not verify"
+    else
+      s"signing key ids $named are each configured more than once; each id may appear only once. A repeated " +
+        "id would keep only the last key, and a token signed with the earlier one would not verify"
+  }
 }
 
 /** The real principal codec: a compact JWS, HS256, with the key id in the header (ADR-020).
@@ -47,18 +71,27 @@ object JwsPrincipalCodec {
     *
     * Signing uses the newest key whose `notBefore` has passed; verification accepts any key in the set, which
     * is what lets the two sides of a rotation overlap. Construction fails — as a value, not an exception —
-    * when any key is too short for HS256.
+    * when any key is too short for HS256, or when two keys share a key id. A set whose every `notBefore` is
+    * still in the future is accepted here: that check needs a clock, and the config loader refuses it before
+    * a process starts. `sign` still fails closed if one is used anyway.
     */
   def make[F[_]: MonadThrow](
       keys: NonEmptyList[SigningKey],
       issuer: String
-  ): Either[WeakSigningKey, PrincipalCodec[F]] =
-    keys.toList
-      .collectFirst {
-        case key if key.key.value.length * 8 < MinimumKeyBits =>
-          WeakSigningKey(key.kid, key.key.value.length * 8)
-      }
+  ): Either[RejectedSigningKey, PrincipalCodec[F]] = {
+    val tooShort = keys.toList.collectFirst {
+      case key if key.key.value.length * 8 < MinimumKeyBits =>
+        WeakSigningKey(key.kid, key.key.value.length * 8)
+    }
+    val repeated = keys.toList
+      .groupBy(_.kid)
+      .collect { case (kid, group) if group.sizeIs > 1 => kid }
+      .toList
+      .sorted
+    tooShort
+      .orElse(NonEmptyList.fromList(repeated).map(DuplicateSigningKey.apply))
       .toLeft(new JwsCodec[F](keys, issuer))
+  }
 
   final private class JwsCodec[F[_]: MonadThrow](keys: NonEmptyList[SigningKey], issuer: String)
       extends PrincipalCodec[F] {

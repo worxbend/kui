@@ -169,11 +169,19 @@ final class JwsPrincipalCodecSuite extends ScalaCheckSuite {
     )
   }
 
+  test("two keys that share a kid are refused at construction") {
+    val earlier = key("k", 1, now.minusSeconds(3600))
+    val later = key("k", 2, now.plusSeconds(3600))
+    assert(
+      JwsPrincipalCodec.make[Attempt](NonEmptyList.of(earlier, later), "kui-gateway").isLeft
+    )
+  }
+
   test("a key that is too short for HS256 is refused at construction, as a value") {
     val weak = SigningKey("weak", Secret(Array.fill[Byte](16)(1)), now)
     assertEquals(
       JwsPrincipalCodec.make[Attempt](NonEmptyList.of(weak), "kui-gateway").left.toOption,
-      Some(WeakSigningKey("weak", 128))
+      Some[RejectedSigningKey](WeakSigningKey("weak", 128))
     )
   }
 

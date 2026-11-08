@@ -1,7 +1,10 @@
 package kui.gateway.api.client
 
+import java.time.Instant
+
 import scala.concurrent.duration.DurationInt
 
+import cats.data.NonEmptyList
 import cats.effect.IO
 import cats.syntax.all.*
 import io.circe.Json
@@ -13,9 +16,9 @@ import kui.cluster.contract.ClusterEndpoints
 import kui.config.{SafeUrl, UpstreamServiceConfig, UrlPolicy}
 import kui.gateway.api.client.ServiceClientFixture as Fixture
 import kui.kernel.error.{ApplicationError, ErrorCode, InfrastructureError}
-import kui.kernel.{BrokerId, ClusterId}
+import kui.kernel.{BrokerId, ClusterId, Secret}
 import kui.observability.{Correlation, Telemetry}
-import kui.security.{PrincipalClaims, PrincipalCodec, RequestDigests}
+import kui.security.{JwsPrincipalCodec, PrincipalClaims, PrincipalCodec, RequestDigests, SigningKey}
 
 /** That a call the gateway makes on another service's behalf carries exactly what ADR-020 and
   * `ARCHITECTURE.md` §5 say it carries, and that every failure comes back as a value.
@@ -115,6 +118,36 @@ final class SttpServiceClientSuite extends CatsEffectSuite {
     // And the two knobs an operator really does set travel with it, unchanged.
     assertEquals(SttpServiceClient.upstreamConfig(service, upstream).callTimeout, 1.second)
     assertEquals(SttpServiceClient.upstreamConfig(service, upstream).name, "cluster")
+  }
+
+  test("a signing key that is not active yet is an infrastructure error, not an exception") {
+    val future = SigningKey(
+      "main",
+      Secret(Array.fill[Byte](32)(7)),
+      Instant.now.plusSeconds(3600)
+    )
+    val codec = JwsPrincipalCodec
+      .make[IO](NonEmptyList.one(future), "kui-gateway")
+      .fold(rejected => fail(rejected.message), identity)
+
+    Fixture.stub(ServiceBehaviour.Ok(clusterBody)).flatMap { stub =>
+      kui.testkit.fakes.FakeStructuredLogger[IO].flatMap { logger =>
+        SttpServiceClient
+          .resource[IO](
+            Fixture.Cluster,
+            Fixture.config(),
+            codec,
+            Telemetry.noop[IO],
+            logger,
+            stub.backend
+          )
+          .use(client => client.call(getCluster, cluster)(Fixture.context()))
+          .map {
+            case Left(_: InfrastructureError) => ()
+            case other => fail(s"expected an infrastructure error, got $other")
+          }
+      }
+    }
   }
 
   test("sendsTheFourStandardHeaders") {
