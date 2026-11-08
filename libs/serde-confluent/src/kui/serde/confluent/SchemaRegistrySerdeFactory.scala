@@ -1,6 +1,11 @@
 package kui.serde.confluent
 
-import cats.effect.{Async, Resource}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+
+import scala.concurrent.duration.*
+
+import cats.effect.syntax.all.*
+import cats.effect.{Async, Clock, Resource}
 import cats.syntax.all.*
 import org.typelevel.log4cats.StructuredLogger
 import sttp.client4.Backend
@@ -25,6 +30,8 @@ import kui.serde.{Serde, SerdeDescription, SerdeFactory, SerdeName, SerdeProfile
   * is what turns "configured" into "working", and it is the difference between a picker that tells an
   * operator their registry URL has a typo in it and one that looks fine until the first record fails to
   * decode. The cost is one HTTP call per cluster per profile version, bounded by the upstream's own timeout.
+  * A failure is not kept for the life of the process: [[recheck]] asks again once [[RecheckAfter]] has
+  * passed, and a registry that was down at startup becomes the working serde without a restart.
   *
   * ==What the probe asks==
   *
@@ -38,6 +45,13 @@ object SchemaRegistrySerdeFactory {
 
   /** The subject the probe asks about. Nothing may ever register it; the 404 *is* the healthy answer. */
   val ProbeSubject: String = "kui-schema-registry-probe-subject"
+
+  /** How long a failed probe is trusted.
+    *
+    * Short enough that a registry which was restarting when KUI started is usable again without restarting
+    * KUI, and long enough that a registry which is still down is not asked on every record of a browse.
+    */
+  val RecheckAfter: FiniteDuration = 2.seconds
 
   private val Description: String =
     "Reads and writes payloads carrying a Confluent Schema Registry header, fetching each record's schema " +
@@ -84,8 +98,53 @@ object SchemaRegistrySerdeFactory {
           ttl = None,
           metrics
         )
+        serde = SchemaRegistrySerde[F](cached, parsed)
         reachable <- Resource.eval(probe(cached))
-      } yield reachable.as(SchemaRegistrySerde[F](cached, parsed))
+        _ <- Resource.eval(remember(cached, serde, reachable.isRight))
+      } yield reachable.as(serde)
+
+    /** The client and the serde `create` built, kept even when the probe failed so a later [[recheck]] can
+      * return the same serde without opening a second client.
+      */
+    private val open = new AtomicReference[Option[OpenRegistry]](None)
+
+    /** Stops two recovers from probing at once. The one that loses keeps the answer already published. */
+    private val rechecking = new AtomicBoolean(false)
+
+    final private case class OpenRegistry(
+        registry: SchemaRegistry[F],
+        serde: Serde[F],
+        checkedAt: FiniteDuration,
+        up: Boolean
+    )
+
+    private def remember(registry: SchemaRegistry[F], serde: Serde[F], up: Boolean): F[Unit] =
+      Clock[F].monotonic.flatMap { now =>
+        Async[F].delay(open.set(Some(OpenRegistry(registry, serde, now, up))))
+      }
+
+    def recheck(profile: SerdeProfile): F[Option[Either[String, Serde[F]]]] =
+      Async[F].delay(open.get).flatMap {
+        case Some(current) if !current.up => retry(current)
+        case _ => none[Either[String, Serde[F]]].pure[F]
+      }
+
+    private def retry(current: OpenRegistry): F[Option[Either[String, Serde[F]]]] =
+      Clock[F].monotonic.flatMap { now =>
+        if now - current.checkedAt < RecheckAfter || !rechecking.compareAndSet(false, true) then
+          none[Either[String, Serde[F]]].pure[F]
+        else
+          probe(current.registry)
+            .flatMap { result =>
+              Clock[F].monotonic.flatMap { finished =>
+                Async[F].delay {
+                  open.set(Some(current.copy(checkedAt = finished, up = result.isRight)))
+                  Some(result.as(current.serde))
+                }
+              }
+            }
+            .guarantee(Async[F].delay(rechecking.set(false)))
+      }
 
     /** `Right` when the registry answered anything at all, `Left` with a sentence when it did not.
       *

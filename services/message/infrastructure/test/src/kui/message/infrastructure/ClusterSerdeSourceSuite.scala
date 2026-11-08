@@ -43,6 +43,8 @@ final class ClusterSerdeSourceSuite extends KuiIOSuite {
       SerdeDescription(registry, "A registry that is not answering", coveredByIntegrationTest = false)
     def create(profile: SerdeProfile): Resource[IO, Either[String, Serde[IO]]] =
       Resource.pure(Left(Unreachable))
+
+    def recheck(profile: SerdeProfile): IO[Option[Either[String, Serde[IO]]]] = IO.pure(None)
   }
 
   /** `orders.v1`'s values are configured to use the registry serde; the cluster default is `Json`.

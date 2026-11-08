@@ -28,6 +28,8 @@ final class ClusterSerdesSuite extends KuiIOSuite {
       Resource
         .make(IO.unit)(_ => closed.traverse_(_.set(true)))
         .as(built.map(_ => Registry))
+
+    def recheck(profile: SerdeProfile): IO[Option[Either[String, Serde[IO]]]] = IO.pure(None)
   }
 
   /** A serde that stands in for the registry-backed one. It can read but not write, which is the real

@@ -323,9 +323,11 @@ object MessageWiring {
     * breaker, its own failover list — so one registry being down cannot take another cluster's decoding with
     * it. What is shared is the connection pool, which is what a pool is for.
     *
-    * A registry that cannot be reached does not fail this step. The factory probes it once, and a failure
-    * becomes a disabled `SchemaRegistry` row in the picker carrying the reason (ADR-032), while the rest of
-    * the cluster's serdes work normally.
+    * A registry that cannot be reached does not fail this step. The factory probes it, and a failure becomes
+    * a disabled `SchemaRegistry` row in the picker carrying the reason (ADR-032), while the rest of the
+    * cluster's serdes work normally. A later read probes again once that failure is older than the factory's
+    * recheck interval, so a registry that was down at startup does not stay disabled until the process
+    * restarts.
     */
   private def serdesFor[F[_]: Async](
       clusters: List[ClusterConfig],

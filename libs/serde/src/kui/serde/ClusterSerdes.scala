@@ -1,5 +1,8 @@
 package kui.serde
 
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+
+import cats.effect.syntax.all.*
 import cats.effect.{Resource, Sync}
 import cats.syntax.all.*
 
@@ -37,6 +40,15 @@ trait ClusterSerdes[F[_]] {
     */
   def unavailableChoice(topic: TopicName, target: Target): Option[(SerdeName, String)]
 
+  /** Ask a serde that failed to build whether it can work now.
+    *
+    * [[resolve]] and [[suggest]] do this themselves. A caller that reads [[all]] or [[unavailableChoice]]
+    * directly — auto-detection does, before it resolves — calls it first, so those reads see a registry that
+    * has come back rather than the answer from startup. A configured serde whose last failure is recent is
+    * left as it was, so a registry that is still down is not probed on every record.
+    */
+  def refresh: F[Unit]
+
   /** The terminal case. Always present, and the reason no browse can fail on a decode. */
   def fallback: Serde[F]
 }
@@ -57,6 +69,14 @@ trait SerdeFactory[F[_]] {
   def name: SerdeName
   def describe: SerdeDescription
   def create(profile: SerdeProfile): Resource[F, Either[String, Serde[F]]]
+
+  /** Try the build again after [[create]] failed.
+    *
+    * `None` means nothing has changed: the previous answer still stands, or this factory cannot recover on
+    * its own. `Some` replaces that answer, whether the retry worked or failed with a new reason. A factory
+    * that has nothing to retry returns `None` and the startup failure stays.
+    */
+  def recheck(profile: SerdeProfile): F[Option[Either[String, Serde[F]]]]
 }
 
 /** Everything the serde layer needs to know about a cluster.
@@ -108,10 +128,23 @@ object ClusterSerdes {
   /** One configured serde and whether it could be built. */
   final private case class Entry[F[_]](factory: SerdeFactory[F], built: Either[String, Serde[F]])
 
-  final private class Impl[F[_]: Sync](profile: SerdeProfile, extras: List[Entry[F]])
+  final private class Impl[F[_]: Sync](profile: SerdeProfile, initial: List[Entry[F]])
       extends ClusterSerdes[F] {
 
     private val builtIns: List[Serde[F]] = BuiltinSerdes.all[F]
+
+    /** The build results, replaced when [[refresh]] learns that a serde which failed can now be built.
+      *
+      * Read from every thread that decodes: [[all]] and [[unavailableChoice]] are synchronous, and a browse
+      * does not want to wait on a `Ref` for a list that changes once a minute. The reference is the
+      * publication; [[refresh]] is the only writer.
+      */
+    private val built = new AtomicReference(initial)
+
+    /** One refresh at a time. A second caller keeps the list it can already see rather than probing again or
+      * publishing a snapshot it took before the first refresh finished.
+      */
+    private val refreshing = new AtomicBoolean(false)
 
     val fallback: Serde[F] = FallbackSerde[F]
 
@@ -121,22 +154,40 @@ object ClusterSerdes {
       * primitive that is always there, so it sorts first in the picker. `Fallback` is in neither list: it is
       * where resolution ends, not something a user chooses.
       */
-    val all: List[Serde[F]] = extras.flatMap(_.built.toOption) ++ builtIns
+    def all: List[Serde[F]] = built.get.flatMap(_.built.toOption) ++ builtIns
 
     /** Names that `resolve` may pick, which is not the same as names that exist: a configured serde whose
       * registry is down exists and cannot be picked.
       */
-    private val usable: Set[SerdeName] = all.map(_.name).toSet
+    private def unavailable: Map[SerdeName, String] =
+      built.get.collect { case Entry(factory, Left(reason)) => factory.name -> reason }.toMap
 
-    private val unavailable: Map[SerdeName, String] =
-      extras.collect { case Entry(factory, Left(reason)) => factory.name -> reason }.toMap
+    private def usable: Set[SerdeName] = all.map(_.name).toSet
+
+    def refresh: F[Unit] =
+      if !refreshing.compareAndSet(false, true) then Sync[F].unit
+      else recheckDown.guarantee(Sync[F].delay(refreshing.set(false)))
+
+    private def recheckDown: F[Unit] =
+      Sync[F].delay(built.get).flatMap { current =>
+        current
+          .traverse {
+            case entry @ Entry(factory, Left(_)) =>
+              factory.recheck(profile).map {
+                case Some(updated) => entry.copy(built = updated)
+                case None => entry
+              }
+            case entry => Sync[F].pure(entry)
+          }
+          .flatMap(updated => Sync[F].delay(built.set(updated)))
+      }
 
     def resolve(
         topic: TopicName,
         target: Target,
         explicit: Option[SerdeName]
     ): F[Either[KuiError, Serde[F]]] =
-      Sync[F].pure {
+      refresh >> Sync[F].delay {
         // An explicit choice of a serde that exists but cannot work now is its own answer, distinct from a
         // name nobody configured. MSG-029 renders it as a 503 *before* the stream starts, which is the
         // difference between "the schema registry is down" and a page of mojibake.
@@ -158,30 +209,32 @@ object ClusterSerdes {
         .flatMap(name => unavailable.get(name).map(name -> _))
 
     def suggest(topic: TopicName, target: Target, use: SerdeUse): F[List[SerdeSuggestion]] =
-      for {
-        // Only serdes that say they can do the thing being asked about. A Schema-Registry serde can read a
-        // topic whose subject exists and cannot write to one whose subject does not, and offering the wrong
-        // half of that is offering a choice that fails on submit.
-        capable <- all.filterA(serde =>
-          use match {
-            case SerdeUse.Deserialize => serde.canDeserialize(topic, target)
-            case SerdeUse.Serialize => serde.canSerialize(topic, target)
-          }
-        )
-        preferredName <- preferred(capable, topic, target)
-        rows <- capable.traverse(serde => row(serde, topic, target, preferredName.contains(serde.name)))
-        disabled = extras.collect { case Entry(factory, Left(reason)) =>
-          SerdeSuggestion(
-            factory.name,
-            factory.describe.description,
-            preferred = false,
-            schema = None,
-            parameters = Nil,
-            available = false,
-            unavailableReason = Some(reason)
+      refresh >> {
+        for {
+          // Only serdes that say they can do the thing being asked about. A Schema-Registry serde can read a
+          // topic whose subject exists and cannot write to one whose subject does not, and offering the wrong
+          // half of that is offering a choice that fails on submit.
+          capable <- all.filterA(serde =>
+            use match {
+              case SerdeUse.Deserialize => serde.canDeserialize(topic, target)
+              case SerdeUse.Serialize => serde.canSerialize(topic, target)
+            }
           )
-        }
-      } yield disabled ++ rows
+          preferredName <- preferred(capable, topic, target)
+          rows <- capable.traverse(serde => row(serde, topic, target, preferredName.contains(serde.name)))
+          disabled = built.get.collect { case Entry(factory, Left(reason)) =>
+            SerdeSuggestion(
+              factory.name,
+              factory.describe.description,
+              preferred = false,
+              schema = None,
+              parameters = Nil,
+              available = false,
+              unavailableReason = Some(reason)
+            )
+          }
+        } yield disabled ++ rows
+      }
 
     /** Exactly one row is marked preferred, or none is.
       *

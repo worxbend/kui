@@ -1,7 +1,10 @@
 package kui.serde.confluent
 
+import scala.concurrent.duration.*
+
 import cats.data.NonEmptyList
-import cats.effect.IO
+import cats.effect.testkit.TestControl
+import cats.effect.{IO, Ref}
 import sttp.client4.Backend
 import sttp.client4.impl.cats.implicits.*
 import sttp.client4.testing.{BackendStub, ResponseStub, StubBody}
@@ -109,6 +112,53 @@ final class SchemaRegistrySerdeFactorySuite extends KuiIOSuite {
           case Left(error) => assertEquals(error.code.wire, "KUI-SERDE-UNAVAILABLE")
           case Right(serde) => fail(s"expected a refusal, got ${serde.name}")
         }
+    }
+  }
+
+  test("a registry that was down at startup is used once it answers") {
+    // Review R2 finding h-serde-untrusted-decode-3. The probe used to run once, inside `create`, and a 503
+    // at that moment left SchemaRegistry out of `all` until the process was restarted. A later 404 — the
+    // healthy answer for the probe subject — has to make `resolve` a working serde, and that serde has to
+    // decode a framed record.
+    val schemaId = 7
+    val schema = AvroPayload.parse("\"string\"").fold(why => fail(why), identity)
+    val body = AvroPayload.encode(schema, "\"hello\"").fold(why => fail(why), identity)
+    val framed = WireFormat.frame(schemaId, body)
+    val schemaDocument = """{"schema":"\"string\"","schemaType":"AVRO"}"""
+
+    val program = for {
+      probes <- Ref.of[IO, Int](0)
+      backend = BackendStub[IO](summon[sttp.monad.MonadError[IO]]).whenAnyRequest.thenRespondF { request =>
+        val path = "/" + request.uri.path.mkString("/")
+        if path.startsWith("/schemas/ids/") then
+          IO.pure(ResponseStub.adjust(schemaDocument, StatusCode.Ok): sttp.client4.Response[StubBody])
+        else
+          probes.modify { n =>
+            val status = if n == 0 then StatusCode.ServiceUnavailable else StatusCode.NotFound
+            (n + 1, ResponseStub.adjust("", status): sttp.client4.Response[StubBody])
+          }
+      }
+      built <- factory(backend)
+      outcome <- ClusterSerdes.resource[IO](profile, List(built)).use { serdes =>
+        for {
+          before <- serdes.resolve(topic, Target.Value, Some(SerdeName.SchemaRegistry))
+          _ <- IO.sleep(SchemaRegistrySerdeFactory.RecheckAfter + 1.millis)
+          after <- serdes.resolve(topic, Target.Value, Some(SerdeName.SchemaRegistry))
+          decoded <- after match {
+            case Left(error) => IO.pure(Left(error.message))
+            case Right(serde) =>
+              serde
+                .deserializer(topic, Target.Value)
+                .flatMap(_.deserialize(Nil, framed))
+                .map(_.left.map(_.cause).map(_.text))
+          }
+        } yield (before, decoded)
+      }
+    } yield outcome
+
+    TestControl.executeEmbed(program).map { (before, decoded) =>
+      assertEquals(before.left.map(_.code.wire), Left("KUI-SERDE-UNAVAILABLE"))
+      assertEquals(decoded, Right("\"hello\""))
     }
   }
 }
