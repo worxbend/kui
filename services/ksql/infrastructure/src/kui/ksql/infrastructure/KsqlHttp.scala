@@ -546,7 +546,9 @@ object KsqlHttp {
       results
         .collectFirst { case pending: StatementOutcome.Pending => pending }
         .orElse(results.lastOption)
-        .getOrElse(StatementOutcome.Pending("ksqlDB accepted the request without a completion status", None))
+        // A 200 with no entity is a statement that already finished and had nothing to describe
+        // (INSERT ... VALUES). QUEUED/RUNNING still arrive as a commandStatus and stay Pending above.
+        .getOrElse(statusFrom(Nil))
     )
   }
 

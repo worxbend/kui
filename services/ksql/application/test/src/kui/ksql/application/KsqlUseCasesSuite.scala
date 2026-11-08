@@ -381,6 +381,22 @@ final class KsqlUseCasesSuite extends CatsEffectSuite {
     }
   }
 
+  test("an insert ksqlDB completed with no entity is audited as succeeded") {
+    val done = StatementOutcome.Status(
+      "the ksqlDB cluster accepted the statement and said nothing about it",
+      None
+    )
+    rig(executeAnswer = Right(done)).flatMap { rig =>
+      for {
+        answer <- rig.useCases.execute(alice, cluster, "INSERT INTO s VALUES (1);", None)
+        outcomes <- rig.outcomes
+      } yield {
+        assertEquals(answer.map(_.outcome), Right(done))
+        assertEquals(outcomes, List(MutationOutcome.Succeeded))
+      }
+    }
+  }
+
   test("an accepted command still pending is audited as unknown, never succeeded") {
     rig(executeAnswer = Right(StatementOutcome.Pending("queued", Some("stream/X/create")))).flatMap { rig =>
       for {

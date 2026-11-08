@@ -323,6 +323,25 @@ final class KsqlHttpSuite extends KuiIOSuite {
     }
   }
 
+  test("an empty /ksql entity list is a completed status, not a pending command") {
+    // ksqlDB answers a successful INSERT ... VALUES with 200 []. The write already finished;
+    // there is no command id to poll. Pending would audit the write as unknown.
+    val statement = KsqlStatement.parse("INSERT INTO s VALUES (1);").toOption.get
+
+    server { case "/ksql" => (StatusCode.Ok, "[]") }.execute(statement).map { result =>
+      assertEquals(result.map(_.wire), Right("status"))
+      assertEquals(
+        result,
+        Right(
+          StatementOutcome.Status(
+            "the ksqlDB cluster accepted the statement and said nothing about it",
+            None
+          )
+        )
+      )
+    }
+  }
+
   test("a statement answers the server's own sentence and its command id") {
     val status =
       """[{"@type":"currentStatus","commandId":"stream/ORDERS/create",
