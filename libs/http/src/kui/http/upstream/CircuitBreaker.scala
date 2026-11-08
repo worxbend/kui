@@ -4,7 +4,7 @@ import java.time.Instant
 
 import scala.concurrent.duration.FiniteDuration
 
-import cats.effect.kernel.{Clock, Outcome, Ref, Resource, Temporal}
+import cats.effect.kernel.{Clock, Ref, Resource, Temporal}
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import fs2.Stream
@@ -147,10 +147,21 @@ object CircuitBreaker {
       failureThreshold: PositiveInt,
       resetTimeout: FiniteDuration
   ): F[CircuitBreaker[F]] =
-    for {
-      memory <- Ref.of[F, Memory](initial)
-      topic <- Topic[F, CircuitEvent]
-    } yield new Impl[F](upstream, failureThreshold.value, resetTimeout, memory, topic)
+    Topic[F, CircuitEvent].flatMap(make(upstream, failureThreshold, resetTimeout, _))
+
+  /** Same breaker, publishing on `topic`.
+    *
+    * The suite uses this to suspend the half-open announcement. Production callers use [[make]].
+    */
+  private[upstream] def make[F[_]: Temporal](
+      upstream: String,
+      failureThreshold: PositiveInt,
+      resetTimeout: FiniteDuration,
+      topic: Topic[F, CircuitEvent]
+  ): F[CircuitBreaker[F]] =
+    Ref.of[F, Memory](initial).map { memory =>
+      new Impl[F](upstream, failureThreshold.value, resetTimeout, memory, topic)
+    }
 
   final private class Impl[F[_]: Temporal](
       upstream: String,
@@ -172,19 +183,20 @@ object CircuitBreaker {
         countsAsFailure: Throwable => Boolean
     ): F[A] =
       Clock[F].realTimeInstant.flatMap { now =>
-        admit(now).flatMap {
-          case Left(openSince) => Temporal[F].raiseError[A](CircuitOpenException(upstream, openSince))
-          case Right(isProbe) =>
-            // `guaranteeCase` and not a plain `flatMap`: `attempt` sees a value or an error, but
-            // never a cancellation, and a cancelled probe that released nothing would leave the
-            // claim set with no path that could ever clear it. A call timeout cancels, and so does
-            // a client disconnect, so that is the *likeliest* fate of a probe at a hung upstream.
-            call.attempt
-              .guaranteeCase {
-                case Outcome.Canceled() => onCancelled(isProbe)
-                case _ => Temporal[F].unit
-              }
-              .flatMap {
+        // One mask covers the claim, the half-open announcement and the recording. `admit` sets
+        // `probeInFlight` before anything here is cancelable, and half-open with that flag refuses
+        // every later caller with no timer. A disconnect during the announcement, or after the call
+        // has returned and before its outcome is recorded, has to run `onCancelled` or finish the
+        // recording; either one is the only thing that can clear the claim.
+        Temporal[F].uncancelable { poll =>
+          admit(now).flatMap {
+            case Left(openSince) =>
+              Temporal[F].raiseError[A](CircuitOpenException(upstream, openSince))
+            case Right(isProbe) =>
+              val announce =
+                if isProbe then publish(CircuitState.HalfOpen, now, None) else Temporal[F].unit
+
+              poll(announce *> call).onCancel(onCancelled(isProbe)).attempt.flatMap {
                 case Right(value) if succeeded(value) => onSuccess() *> Temporal[F].pure(value)
                 case Right(value) =>
                   onFailure(isProbe, UnsuccessfulResponse) *> Temporal[F].pure(value)
@@ -192,6 +204,7 @@ object CircuitBreaker {
                   onFailure(isProbe, error) *> Temporal[F].raiseError[A](error)
                 case Left(error) => onIgnoredFailure(isProbe) *> Temporal[F].raiseError[A](error)
               }
+          }
         }
       }
 
@@ -202,29 +215,21 @@ object CircuitBreaker {
       * probe.
       */
     private def admit(now: Instant): F[Either[Instant, Boolean]] =
-      memory
-        .modify { current =>
-          current.state match {
-            case CircuitState.Closed => (current, Right(false))
+      memory.modify { current =>
+        current.state match {
+          case CircuitState.Closed => (current, Right(false))
 
-            case CircuitState.Open =>
-              val since = current.openedAt.getOrElse(now)
-              if now.toEpochMilli - since.toEpochMilli >= resetTimeout.toMillis then
-                (current.copy(state = CircuitState.HalfOpen, probeInFlight = true), Right(true))
-              else (current, Left(since))
+          case CircuitState.Open =>
+            val since = current.openedAt.getOrElse(now)
+            if now.toEpochMilli - since.toEpochMilli >= resetTimeout.toMillis then
+              (current.copy(state = CircuitState.HalfOpen, probeInFlight = true), Right(true))
+            else (current, Left(since))
 
-            case CircuitState.HalfOpen =>
-              if current.probeInFlight then (current, Left(current.openedAt.getOrElse(now)))
-              else (current.copy(probeInFlight = true), Right(true))
-          }
+          case CircuitState.HalfOpen =>
+            if current.probeInFlight then (current, Left(current.openedAt.getOrElse(now)))
+            else (current.copy(probeInFlight = true), Right(true))
         }
-        .flatMap { decision =>
-          // The transition into half-open is a transition like any other, and the registry needs it.
-          decision match {
-            case Right(true) => publish(CircuitState.HalfOpen, now, None).as(decision)
-            case _ => Temporal[F].pure(decision)
-          }
-        }
+      }
 
     /** A success clears everything: the failure run, the probe claim and the open timer.
       *

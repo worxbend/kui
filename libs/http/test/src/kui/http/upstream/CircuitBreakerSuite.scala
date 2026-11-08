@@ -3,9 +3,11 @@ package kui.http.upstream
 import scala.concurrent.duration.DurationInt
 
 import cats.effect.IO
-import cats.effect.kernel.Ref
+import cats.effect.kernel.{Deferred, Ref, Resource}
 import cats.effect.testkit.TestControl
 import cats.syntax.all.*
+import fs2.{Pipe, Stream}
+import fs2.concurrent.Topic
 import munit.CatsEffectSuite
 import sttp.capabilities.StreamMaxLengthExceededException
 
@@ -252,6 +254,36 @@ final class CircuitBreakerSuite extends CatsEffectSuite {
     }
   }
 
+  test("a probe cancelled while half-open is being announced releases the claim") {
+    // The claim is taken before this publish, and half-open with a claim refuses every later caller
+    // with no timer. Suspending the announcement is the gap a disconnect can land in: the call's
+    // own finaliser does not exist yet, so nothing else can put the claim back.
+    val program = for {
+      announced <- Deferred[IO, Unit]
+      release <- Deferred[IO, Unit]
+      b <- CircuitBreaker.make[IO](upstream, threshold, reset, new HoldingTopic(announced, release))
+      _ <- fail(b).replicateA_(3)
+      _ <- IO.sleep(reset + 1.second)
+      probe <- b.protect(IO.unit).start
+      _ <- announced.get
+      _ <- probe.cancel
+      afterCancel <- b.state
+      refused <- b.protect(IO.unit).attempt
+      _ <- release.complete(())
+      _ <- IO.sleep(reset + 1.second)
+      recovered <- b.protect(IO.pure(1)).attempt
+    } yield (afterCancel, refused, recovered)
+
+    TestControl.executeEmbed(program).map { (afterCancel, refused, recovered) =>
+      assertEquals(afterCancel, CircuitState.Open, "a cancelled announcement left the probe claim held")
+      assert(
+        refused.left.toOption.exists(_.isInstanceOf[CircuitOpenException]),
+        s"the reopened circuit admitted a second probe immediately: $refused"
+      )
+      assertEquals(recovered, Right(1), "the circuit never admitted a probe again after the leaked claim")
+    }
+  }
+
   test("publishing a transition never waits for a subscriber that stopped reading") {
     // `subscribe(n)` would give each subscriber a bounded, backpressuring queue: once full, the
     // publisher blocks. The publisher here is the request fiber that was calling the upstream,
@@ -278,4 +310,32 @@ final class CircuitBreakerSuite extends CatsEffectSuite {
     assertEquals(CircuitState.Open.code, 1L)
     assertEquals(CircuitState.HalfOpen.code, 2L)
   }
+}
+
+/** Publishes every transition immediately, except the half-open announcement, which waits.
+  *
+  * That announcement is the step `admit` runs after it has already taken the probe claim and before the
+  * call's finaliser exists.
+  */
+final private class HoldingTopic(announced: Deferred[IO, Unit], release: Deferred[IO, Unit])
+    extends Topic[IO, CircuitEvent] {
+
+  def publish: Pipe[IO, CircuitEvent, Nothing] = _ => Stream.empty
+
+  def publish1(event: CircuitEvent): IO[Either[Topic.Closed, Unit]] =
+    if event.state == CircuitState.HalfOpen then announced.complete(()).void *> release.get.as(Right(()))
+    else IO.pure(Right(()))
+
+  def subscribe(maxQueued: Int): Stream[IO, CircuitEvent] = Stream.empty
+
+  def subscribeAwait(maxQueued: Int): Resource[IO, Stream[IO, CircuitEvent]] =
+    Resource.pure(Stream.empty)
+
+  def subscribers: Stream[IO, Int] = Stream.empty
+
+  def close: IO[Either[Topic.Closed, Unit]] = IO.pure(Right(()))
+
+  def isClosed: IO[Boolean] = IO.pure(false)
+
+  def closed: IO[Unit] = IO.never
 }
