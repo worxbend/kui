@@ -2,13 +2,16 @@ package kui.consumer.application
 
 import java.time.Instant
 
+import scala.concurrent.duration.*
+
 import cats.effect.IO
 import cats.effect.kernel.{Deferred, Ref}
+import cats.syntax.all.*
 
 import kui.consumer.domain.*
 import kui.consumer.domain.fixtures.GroupFixtures
 import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
-import kui.kernel.group.GroupState
+import kui.kernel.group.{GroupState, ResetTarget}
 import kui.kernel.{GroupId, Offset, Secret, TopicPartition}
 import kui.security.Principal
 import kui.security.audit.{AuditPrincipal, MutationKind, MutationOutcome}
@@ -296,6 +299,31 @@ final class MutationSuite extends KuiIOSuite {
       assertEquals(records.head.after, Some("orders-0=0"))
       assertEquals(invalidated.size, 1)
     }
+  }
+
+  test("the apply receipt names the target that was planned, not OFFSET") {
+    // The token carries the target's wire name. Parsing it back used to keep only EARLIEST and LATEST
+    // and turn everything else into ToOffsets, so the receipt said OFFSET for a timestamp reset.
+    // `ConsumerMapping.appliedPlan` copies `plan.spec.target` onto the DTO; this module cannot see that
+    // mapping without a cycle, and the field it would copy is this one.
+    val partition = GroupFixtures.partition(0)
+    val cases = List(
+      ResetSpec.ToTimestamp(Instant.parse("2026-01-01T09:00:00Z")) -> ResetTarget.Timestamp,
+      ResetSpec.ShiftBy(-10L) -> ResetTarget.ShiftBy,
+      ResetSpec.ByDuration(1.hour) -> ResetTarget.Duration,
+      ResetSpec.ToOffsets(Map(partition -> Offset.unsafe(10L))) -> ResetTarget.Offset
+    )
+
+    cases.traverse { (spec, target) =>
+      for {
+        rigged <- rig(emptyGroup)
+        (port, _, guard, _) = rigged
+        reset <- resetUseCase(port, guard, readOnly = false)
+        planned <- reset.plan(ConsumerRig.Cluster, group, scope, spec)
+        token = planned.map(_.token).getOrElse(fail(s"no plan for $target: $planned"))
+        applied <- reset.apply(Caller, ConsumerRig.Cluster, group, token)
+      } yield assertEquals(applied.map(_.spec.target), Right(target))
+    }.void
   }
 
   test("the apply receipt says what each partition's offset was, not a dash") {

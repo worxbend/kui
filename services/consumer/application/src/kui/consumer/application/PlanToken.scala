@@ -7,6 +7,7 @@ import java.util.Base64
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
+import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
 import cats.effect.kernel.Sync
@@ -14,6 +15,7 @@ import cats.syntax.all.*
 
 import kui.consumer.domain.{PlannedPartition, ResetPlan, ResetScope, ResetSpec}
 import kui.kernel.error.{ApplicationError, KuiError}
+import kui.kernel.group.ResetTarget
 import kui.kernel.{ClusterId, GroupId, Offset, PartitionId, Secret, TopicName}
 
 /** The token that says "apply exactly the offsets the operator was shown" (ADR-045).
@@ -180,13 +182,14 @@ object PlanToken {
           topicName <- TopicName.from(topic).toOption
           expiresAt <- expiry.toLongOption.map(Instant.ofEpochMilli)
           planned <- parseOffsets(topicName, offsets)
+          // The name is what the receipt reports. The parameters are not in the token: what is
+          // applied is the offsets, and re-resolving a spec at apply time is what this token prevents.
+          spec <- specOf(target)
         } yield (
           ResetPlan(
             group = group,
             scope = ResetScope(topicName, planned.map(_.partition).toSet),
-            // The spec is carried by name only: what is applied is the offsets, and re-resolving a
-            // spec at apply time is precisely the thing this token exists to prevent.
-            spec = specOf(target),
+            spec = spec,
             partitions = planned,
             warnings = Nil,
             computedAt = Instant.EPOCH
@@ -230,11 +233,17 @@ object PlanToken {
     if raw == AbsentCommit then Some(None)
     else raw.toLongOption.flatMap(value => Offset.from(value).toOption).map(Some(_))
 
-  private def specOf(wire: String): ResetSpec = wire match {
-    case "EARLIEST" => ResetSpec.ToEarliest
-    case "LATEST" => ResetSpec.ToLatest
-    case "OFFSET" => ResetSpec.ToOffsets(Map.empty)
-    case _ => ResetSpec.ToOffsets(Map.empty)
-  }
+  /** The parameters are placeholders. Apply writes `partitions`, never this spec, and the receipt reads only
+    * `spec.target`. An unknown name fails the token rather than being reported as `OFFSET`.
+    */
+  private def specOf(wire: String): Option[ResetSpec] =
+    ResetTarget.from(wire).toOption.map {
+      case ResetTarget.Earliest => ResetSpec.ToEarliest
+      case ResetTarget.Latest => ResetSpec.ToLatest
+      case ResetTarget.Timestamp => ResetSpec.ToTimestamp(Instant.EPOCH)
+      case ResetTarget.Offset => ResetSpec.ToOffsets(Map.empty)
+      case ResetTarget.ShiftBy => ResetSpec.ShiftBy(0L)
+      case ResetTarget.Duration => ResetSpec.ByDuration(Duration.Zero)
+    }
 
 }
