@@ -5,7 +5,7 @@ import java.util.Locale
 
 import scala.util.Try
 
-import kui.kernel.ValidationError
+import kui.kernel.{Secret, ValidationError}
 
 /** What a URL is allowed to look like before KUI will call it.
   *
@@ -81,9 +81,10 @@ object UrlPolicy {
 /** A URL string that has been checked against a [[UrlPolicy]].
   *
   * It is an opaque type over `String` so that the check cannot be skipped: the only way to obtain one is
-  * [[SafeUrl.from]], and every function that takes a `SafeUrl` therefore knows the policy was applied.
-  * Nothing is normalised or rewritten — the value is the operator's own text, so that what appears in a log
-  * or an error message is what they wrote.
+  * [[SafeUrl.from]], and every function that takes a `SafeUrl` therefore knows the policy was applied. An
+  * accepted value is the operator's own text, not a rewritten URL. A refused value is different:
+  * [[SafeUrl.redacted]] strips user-info, the query and the fragment before a message may quote it, so a
+  * password or a token in the address cannot reach stderr.
   */
 opaque type SafeUrl = String
 
@@ -119,9 +120,43 @@ object SafeUrl {
   given Ordering[SafeUrl] = Ordering.String
   given CanEqual[SafeUrl, SafeUrl] = CanEqual.derived
 
+  /** The address as it may be quoted in an error.
+    *
+    * Scheme, host, port and path stay, because those are what an operator needs in order to see which
+    * upstream was refused. User-info, the query and the fragment do not: that is where a pasted password or a
+    * token lives, and a startup error is printed to stderr. A value that is not a URL is returned unchanged,
+    * so the same helper can sit in front of every `(found ...)` suffix.
+    */
+  private[config] def redacted(raw: String): String =
+    Try(new URI(raw)).toOption match {
+      case Some(uri) if Option(uri.getScheme).exists(_.nonEmpty) =>
+        withoutSecrets(uri).getOrElse(hiddenIfSensitive(raw))
+      case _ =>
+        if raw.contains("://") then hiddenIfSensitive(raw) else raw
+    }
+
+  /** Scheme, host, port and path, or nothing when that would still carry a secret. */
+  private def withoutSecrets(uri: URI): Option[String] = {
+    val scheme = Option(uri.getScheme).filter(_.nonEmpty)
+    val host = Option(uri.getHost).filter(_.nonEmpty)
+    (scheme, host) match {
+      case (Some(schemeName), Some(hostName)) =>
+        val port = if uri.getPort >= 0 then s":${uri.getPort}" else ""
+        val path = Option(uri.getRawPath).getOrElse("")
+        val rendered = s"$schemeName://$hostName$port$path"
+        if rendered.contains('@') || rendered.contains('?') || rendered.contains('#') then None
+        else Some(rendered)
+      case _ => None
+    }
+  }
+
+  /** A value we could not safely take apart. Show it only when it has nowhere to hide a credential. */
+  private def hiddenIfSensitive(raw: String): String =
+    if raw.contains('@') || raw.contains('?') || raw.contains('#') then Secret.Redacted else raw
+
   private def parse(raw: String): Either[ValidationError, URI] =
     Try(new URI(raw)).toEither.left.map(_ =>
-      ValidationError.Format(Field, "an absolute http or https URL", raw)
+      ValidationError.Format(Field, "an absolute http or https URL", redacted(raw))
     )
 
   private def schemeIsAllowed(
@@ -133,7 +168,7 @@ object SafeUrl {
       case Some(scheme) if policy.allowedSchemes.contains(scheme) => Right(())
       case _ =>
         val expected = policy.allowedSchemes.toList.sorted.mkString(" or ")
-        Left(ValidationError.Format(Field, expected, raw))
+        Left(ValidationError.Format(Field, expected, redacted(raw)))
     }
 
   private def noUserInfo(uri: URI): Either[ValidationError, Unit] =
@@ -150,7 +185,7 @@ object SafeUrl {
   private def hostOf(uri: URI, raw: String): Either[ValidationError, String] =
     Option(uri.getHost).filter(_.nonEmpty) match {
       case Some(host) => Right(host.toLowerCase(Locale.ROOT))
-      case None => Left(ValidationError.Format(Field, "a URL with a host name", raw))
+      case None => Left(ValidationError.Format(Field, "a URL with a host name", redacted(raw)))
     }
 
   private def hostIsAllowed(
@@ -162,14 +197,14 @@ object SafeUrl {
       Left(
         ValidationError.Invariant(
           Field,
-          s"'$raw' points at this machine; a loopback address is only allowed in development"
+          s"'${redacted(raw)}' points at this machine; a loopback address is only allowed in development"
         )
       )
     else if !isLoopback(host) && isNotPubliclyRoutable(host) && !policy.allowPrivate then
       Left(
         ValidationError.Invariant(
           Field,
-          s"'$raw' is a private, link-local or cloud-metadata address; those are refused so that " +
+          s"'${redacted(raw)}' is a private, link-local or cloud-metadata address; those are refused so that " +
             "a mistyped or hostile URL cannot make KUI read a network's internal endpoints"
         )
       )

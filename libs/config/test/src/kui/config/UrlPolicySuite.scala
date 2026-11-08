@@ -99,6 +99,23 @@ final class UrlPolicySuite extends KuiSuite {
     assert(!accepted("not-a-url", UrlPolicy.Dev))
   }
 
+  test("a refusal names the host and not the credentials or the query") {
+    val cases = List(
+      "https://u:hunter2@registry.example.com/v1",
+      "https://10.1.2.3/path?access_token=hunter2",
+      "ftp://files.example/get?access_token=hunter2"
+    )
+
+    cases.foreach { raw =>
+      SafeUrl.from(raw, UrlPolicy.Strict) match {
+        case Right(_) => fail(s"$raw was accepted")
+        case Left(error) =>
+          assert(!error.message.contains("hunter2"), error.message)
+          assert(!error.message.contains("u:hunter2"), error.message)
+      }
+    }
+  }
+
   test("the failure message names the field and does not echo an empty expectation") {
     SafeUrl.from("ftp://x/", UrlPolicy.Strict) match {
       case Right(_) => fail("ftp was accepted")

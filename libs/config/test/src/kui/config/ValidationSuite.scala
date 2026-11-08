@@ -290,6 +290,44 @@ final class ValidationSuite extends KuiSuite {
     assertEquals(found.map(_.key), List("kui.gateway.cors.origins"))
   }
 
+  test("a refused URL does not echo user-info or a query token") {
+    val credential = "https://u:hunter2@registry.example.com/"
+    val queried = "https://10.1.2.3/path?access_token=hunter2"
+    val file = ConfigFixtures.yaml(
+      s"""kui:
+         |  gateway:
+         |    services:
+         |      cluster:
+         |        url: "$credential"
+         |  telemetry:
+         |    otlpEndpoint: "$queried"
+         |  clusterProfiles:
+         |    url: "$credential"
+         |  clusters:
+         |    - name: One
+         |      bootstrapServers: broker:9092
+         |      schemaRegistry:
+         |        url: "$credential"
+         |        auth:
+         |          type: oauth
+         |          tokenEndpoint: "$credential"
+         |          clientId: kui
+         |          clientSecret: not-the-canary
+         |      connect:
+         |        - url: "$credential"
+         |      ksql:
+         |        url: "$credential"
+         |""".stripMargin
+    )
+
+    val found = problems(load(List(file), policy = UrlPolicy.Strict))
+    val rendered = found.map(_.render).mkString("\n")
+
+    assert(found.nonEmpty, "the credential-bearing URLs were accepted")
+    assert(!rendered.contains("hunter2"), rendered)
+    assert(rendered.contains("registry.example.com"), rendered)
+  }
+
   test("an upstream service without a url is a named, required-key problem") {
     val file = ConfigFixtures.yaml(
       "kui:\n  gateway:\n    services:\n      cluster:\n        timeout: \"3s\"\n"

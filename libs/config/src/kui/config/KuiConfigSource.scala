@@ -432,9 +432,10 @@ object KuiConfigSource {
   private def readUrl(policy: UrlPolicy)(raw: String): Either[String, SafeUrl] =
     SafeUrl.from(raw, policy).leftMap(_.message)
 
-  /** Metrics source addresses are never rendered in startup diagnostics. `SafeUrl` messages predate that
-    * stronger query-core rule and may include the rejected address for SSRF diagnostics, so this boundary
-    * deliberately collapses every failure to one value-free sentence.
+  /** Metrics source addresses are never rendered in startup diagnostics. [[SafeUrl.redacted]] already drops
+    * user-info and the query, and this boundary goes further: the path of a metrics URL is itself an operator
+    * choice that the query-core rule keeps out of startup errors, so every failure collapses to one
+    * value-free sentence.
     */
   private def readMetricsSourceUrl(policy: UrlPolicy)(raw: String): Either[String, SafeUrl] =
     SafeUrl.from(raw, policy).leftMap(_ => "is not an allowed http or https upstream URL")
@@ -487,7 +488,9 @@ object KuiConfigSource {
   private def problemFor[A](field: Field[A], layers: Layers): ConfigProblem =
     layers.first(field.key) match {
       case Some((source, raw)) =>
-        val shown = if field.secret then Secret.Redacted else s"'$raw'"
+        // `redacted` leaves an ordinary value untouched and strips user-info, the query and the fragment
+        // from a URL, so a password pasted into an address does not depend on the field being `secret`.
+        val shown = if field.secret then Secret.Redacted else s"'${SafeUrl.redacted(raw)}'"
         val detail = field.read(raw).fold(identity, _ => "could not be read")
         ConfigProblem(field.key, s"expected ${field.expectation}; $detail (found $shown)", source)
       case None =>
