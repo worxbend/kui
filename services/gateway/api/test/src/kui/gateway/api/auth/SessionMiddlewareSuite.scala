@@ -253,6 +253,25 @@ final class SessionMiddlewareSuite extends KuiIOSuite {
     }
   }
 
+  test("aForeignCookieWithANonTokenNameDoesNotHideTheSession") {
+    // `Cookie.parse` rejects the whole header when any name is not an RFC token, and `.toOption`
+    // then treats the request as cookie-less. Browsers still store those names: a sibling app's
+    // PHP array cookie `cart[item]` is the ordinary case. The next request mints a new session, so
+    // the CSRF token this browser already holds never matches again.
+    GatewayTestServer.resource().use { server =>
+      for {
+        first <- server.get(meUri)
+        session = cookieOf(first)
+        token = tokenOf(first)
+        again <- server.get(meUri, Map("Cookie" -> s"cart[item]=1; $session"))
+        body = decode[AuthMeResponse](again.body).fold(error => fail(s"${again.body} ($error)"), identity)
+      } yield {
+        assertEquals(body.csrfToken, token, "a non-token cookie name discarded kui_session")
+        assertEquals(again.header("Set-Cookie"), None, "a recognised session was replaced and restamped")
+      }
+    }
+  }
+
   test("theSessionCookieIsFoundByItsExactNameAndNotBySubstring") {
     // W10-A1: `_.find(_.name == CookieName)` had no case, and loosening it to `_.name.contains(...)` left
     // the whole gateway module green. A `Cookie` header carries every cookie for the domain, so a reverse

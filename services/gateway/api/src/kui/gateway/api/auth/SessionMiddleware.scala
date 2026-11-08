@@ -205,13 +205,27 @@ object SessionMiddleware {
 
   /** The `kui_session` cookie's value from the request's `Cookie` header, if present and well-formed.
     *
-    * Parsed with `sttp.model.headers.Cookie.parse` rather than read as a raw substring: a `Cookie` header can
-    * carry several cookies, `;`-separated, and a substring search would find the wrong one if a proxy or
-    * another application on the same domain set a cookie whose name happened to contain `kui_session`.
+    * Each `;`-separated pair is parsed on its own. `Cookie.parse` of the whole header returns `Left` when
+    * *any* name is not an RFC token, and browsers do send such names: a sibling application on the same
+    * domain can set `cart[item]`. One `Left` used to discard `kui_session` with it, so every later request
+    * looked cookie-less. Pairs this parser rejects are skipped; the name match stays exact, because a
+    * substring search would treat `kui_session_backup` as this session.
     */
   def cookieValue(request: ServerRequest): Option[String] =
     request.header("Cookie").flatMap { raw =>
-      Cookie.parse(raw).toOption.flatMap(_.find(_.name == CookieName)).map(_.value)
+      raw
+        .split(';')
+        .iterator
+        .map(_.trim)
+        .filter(_.nonEmpty)
+        .flatMap { pair =>
+          Cookie.parse(pair) match {
+            case Right(cookies) =>
+              cookies.collectFirst { case cookie if cookie.name == CookieName => cookie.value }
+            case Left(_) => None
+          }
+        }
+        .nextOption()
     }
 
   /** The `Set-Cookie` value for a session, exactly as ADR-019 specifies it.
