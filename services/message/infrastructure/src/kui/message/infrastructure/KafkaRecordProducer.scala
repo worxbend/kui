@@ -2,6 +2,8 @@ package kui.message.infrastructure
 
 import java.time.Instant
 
+import scala.jdk.CollectionConverters.*
+
 import cats.Parallel
 import cats.effect.kernel.{Async, Resource}
 import cats.syntax.all.*
@@ -9,9 +11,11 @@ import fs2.Chunk
 import fs2.io.file.Files
 import fs2.kafka.{Header, HeaderSerializer, Headers, KafkaProducer, ProducerRecord}
 import org.apache.kafka.clients.producer.RecordMetadata
+import org.apache.kafka.common.TopicCollection
+import org.apache.kafka.common.errors.{UnknownTopicIdException, UnknownTopicOrPartitionException}
 import org.typelevel.log4cats.StructuredLogger
 
-import kui.kafka.{KafkaErrorMapper, ProducerFactory}
+import kui.kafka.{AdminClientPool, KafkaErrorMapper, KafkaFutures, ProducerFactory}
 import kui.kernel.cluster.ClusterConnection
 import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
 import kui.kernel.{ClusterId, Offset, PartitionId, TopicName}
@@ -47,29 +51,45 @@ import kui.message.domain.ProducedAt
   * that fails halfway says which half — see [[RecordProducer.send]].
   */
 final class KafkaRecordProducer[F[_]: Async] private (
-    producer: KafkaProducer[F, Array[Byte], Array[Byte]]
+    producer: KafkaProducer[F, Array[Byte], Array[Byte]],
+    admin: AdminClientPool[F],
+    connection: ClusterConnection
 ) extends RecordProducer[F] {
 
+  /** How many partitions the topic has.
+    *
+    * This is an admin `describeTopics`, not `KafkaProducer.partitionsFor`. The producer call treats
+    * `UNKNOWN_TOPIC_OR_PARTITION` as retriable and blocks until `max.block.ms` (60s unless the cluster
+    * overrides it), then fails as a timeout — so a missing destination looks like a slow broker, and the
+    * `Right(0)` branch below it never runs. `describeTopics` returns that error as the answer. It also does
+    * not set `allowAutoTopicCreation`, so a broker with auto-create on does not gain a topic because somebody
+    * asked how many partitions it had.
+    */
   def partitionCount(topic: TopicName): F[Either[KuiError, Int]] =
-    producer
-      .partitionsFor(topic.value)
-      .map(_.size)
-      .attempt
-      .map {
-        case Left(failure) => KafkaErrorMapper.map("partitionsFor", failure).asLeft[Int]
-        // An empty partition list means the broker has no such topic, which is a 404 rather than a
-        // produce that silently goes nowhere.
-        //
-        // It is worth being honest about what this does *not* protect against. On a broker configured
-        // with `auto.create.topics.enable=true` — the quickstart's, and many a development cluster's —
-        // the metadata request itself creates the topic, so this check finds the partitions of a topic
-        // that did not exist a moment ago and the produce succeeds. No Kafka client can avoid that: any
-        // metadata lookup has the same effect, so there is nothing to ask that does not create it. The
-        // remedy is the broker setting, and KUI never creates a topic of its own accord.
-        case Right(0) =>
-          ApplicationError.NotFound("topic", topic.value, ErrorCode.TopicNotFound).asLeft[Int]
-        case Right(count) => count.asRight[KuiError]
+    admin
+      .run(connection, "describeTopics.partitionCount") { client =>
+        KafkaFutures.fromFuture(
+          Async[F].delay(
+            client
+              .describeTopics(TopicCollection.ofTopicNames(List(topic.value).asJava))
+              .topicNameValues
+              .get(topic.value)
+          )
+        )
       }
+      .map { described =>
+        val count = described.partitions.size()
+        if count == 0 then topicNotFound(topic) else count.asRight[KuiError]
+      }
+      .recover { failure =>
+        KafkaFutures.unwrap(failure) match {
+          case _: UnknownTopicOrPartitionException | _: UnknownTopicIdException => topicNotFound(topic)
+          case _ => KafkaErrorMapper.map("describeTopics", failure).asLeft[Int]
+        }
+      }
+
+  private def topicNotFound(topic: TopicName): Either[KuiError, Int] =
+    ApplicationError.NotFound("topic", topic.value, ErrorCode.TopicNotFound).asLeft[Int]
 
   def send(
       records: List[RawProducerRecord]
@@ -160,6 +180,7 @@ object KafkaRecordProducer {
     */
   def resource[F[_]: {Async, Parallel, Files}](
       connections: ClusterId => Option[ClusterConnection],
+      admin: AdminClientPool[F],
       logger: StructuredLogger[F]
   ): RecordProducers[F] =
     new RecordProducers[F] {
@@ -185,7 +206,7 @@ object KafkaRecordProducer {
                   .map(
                     _.bimap(
                       KafkaErrorMapper.map("openProducer", _),
-                      producer => new KafkaRecordProducer[F](producer)
+                      producer => new KafkaRecordProducer[F](producer, admin, connection)
                     )
                   )
             }

@@ -90,14 +90,15 @@ object KafkaFixture {
 
   def apply[F[_]: Async](
       topology: KafkaTopology,
-      startTimeout: FiniteDuration = 90.seconds
+      startTimeout: FiniteDuration = 90.seconds,
+      autoCreateTopics: Boolean = true
   ): Resource[F, RunningBroker] =
     for {
       directory <- temporaryDirectory[F](
         s"kui-kafka-${topology.securityProtocol.toLowerCase(Locale.ROOT)}"
       )
       materials <- Resource.eval(tlsMaterials[F](topology, directory))
-      container <- container[F](topology, materials.map(_._2), startTimeout)
+      container <- container[F](topology, materials.map(_._2), startTimeout, autoCreateTopics)
       broker <- Resource.eval(describe[F](topology, container, materials.map(_._1)))
       _ <- Resource.eval(provision[F](broker))
     } yield broker
@@ -109,9 +110,10 @@ object KafkaFixture {
   private def container[F[_]: Async](
       topology: KafkaTopology,
       broker: Option[BrokerTlsMaterials],
-      startTimeout: FiniteDuration
+      startTimeout: FiniteDuration,
+      autoCreateTopics: Boolean
   ): Resource[F, GenericContainer[?]] =
-    Resource.make(Async[F].blocking(started(topology, broker, startTimeout)))(container =>
+    Resource.make(Async[F].blocking(started(topology, broker, startTimeout, autoCreateTopics)))(container =>
       // Stopping is `blocking` and uncancellable by construction: `Resource.make`'s release runs even when
       // the acquiring fiber was cancelled, and a container that outlives its test run is a leak the next
       // developer discovers as a port already in use.
@@ -121,12 +123,13 @@ object KafkaFixture {
   private def started(
       topology: KafkaTopology,
       broker: Option[BrokerTlsMaterials],
-      startTimeout: FiniteDuration
+      startTimeout: FiniteDuration,
+      autoCreateTopics: Boolean
   ): GenericContainer[?] = {
     val container = HeldKafkaContainer(DockerImageName.parse(Image))
 
     val _ = container.withExposedPorts(Integer.valueOf(ClientPort))
-    val _ = container.withEnv(environment(topology).asJava)
+    val _ = container.withEnv(environment(topology, autoCreateTopics).asJava)
     val _ = container.withCommand(
       "sh",
       "-c",
@@ -183,7 +186,7 @@ object KafkaFixture {
     * broker's conversation with itself would add three more ways for the fixture to fail and would test
     * nothing KUI does.
     */
-  private def environment(topology: KafkaTopology): Map[String, String] = {
+  private def environment(topology: KafkaTopology, autoCreateTopics: Boolean): Map[String, String] = {
     val common = Map(
       "CLUSTER_ID" -> ClusterId,
       "KAFKA_NODE_ID" -> "1",
@@ -198,7 +201,7 @@ object KafkaFixture {
       "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR" -> "1",
       "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR" -> "1",
       "KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS" -> "0"
-    )
+    ) ++ Option.unless(autoCreateTopics)("KAFKA_AUTO_CREATE_TOPICS_ENABLE" -> "false")
 
     common ++ (topology match {
       case KafkaTopology.Plaintext => Map.empty

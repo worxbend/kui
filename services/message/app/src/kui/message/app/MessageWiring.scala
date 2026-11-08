@@ -150,22 +150,21 @@ object MessageWiring {
       // principal the gateway signed and the route verified (ADR-020), so an audit record names the
       // person who made the request rather than a constant this file chose.
       guard = MutationGuard.make[F](profiles, LoggingAuditSink.make[F](logger), logger)
-      producers = KafkaRecordProducer.resource[F](profiles.connectionFor, logger)
-      produce = ProduceUseCase.make[F](producers, serdeSource, guard)
-      // A resend reads through the same record source a browse does, so the seek arithmetic has one
-      // implementation, and it is bounded by the same budget a browse is — a copy of ten million
-      // records is refused by a ceiling rather than attempted.
-      resend = ResendUseCase.make[F](producers, source, guard, MessageRoutes.DefaultBudget)
-      // The purge (MS-008). It is the one operation in this service that takes data away, so it gets
-      // its own port and its own admin client rather than borrowing the browse consumer's: emptying a
-      // topic is a pair of admin calls — `listOffsets` for the plan, `deleteRecords` for the apply —
-      // and neither belongs on a consumer that exists to read records.
+      // The purge (MS-008) and the produce/resend partition check share this pool. Partition count is an
+      // admin `describeTopics`: the producer's own metadata request blocks for `max.block.ms` on a topic
+      // that is not there, and it can also create that topic when the broker auto-creates.
       //
       // The plan is signed with the same `kui.streaming.cursorKey` the browse cursor uses (ADR-026):
       // one secret and one rotation procedure, with the two uses kept apart by the operation name
       // inside the payload.
       adminMetrics <- Resource.eval(AdminMetrics.otel[F](telemetry))
       adminPool <- AdminClientPool.resource[F](adminMetrics, Some(logger))
+      producers = KafkaRecordProducer.resource[F](profiles.connectionFor, adminPool, logger)
+      produce = ProduceUseCase.make[F](producers, serdeSource, guard)
+      // A resend reads through the same record source a browse does, so the seek arithmetic has one
+      // implementation, and it is bounded by the same budget a browse is — a copy of ten million
+      // records is refused by a ceiling rather than attempted.
+      resend = ResendUseCase.make[F](producers, source, guard, MessageRoutes.DefaultBudget)
       deleter = new KafkaRecordDeleter[F](adminPool, profiles.connectionFor, logger)
       purge = PurgeUseCase.make[F](
         deleter,
