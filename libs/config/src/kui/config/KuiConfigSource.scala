@@ -1105,8 +1105,9 @@ object KuiConfigSource {
     *
     * `kui.clusterProfiles.url` being present is the on/off switch for the profile client: absent means the
     * process has none, which is the right answer for the gateway, the cluster service and the store. The
-    * topic service's composition root is what refuses to start without it, because it is the only process
-    * that can say so truthfully.
+    * topic process prefers this URL (or `kui.gateway.services.cluster.url`) and falls back to
+    * `kui.clusters[]` with a warning when neither is set. It starts either way: refusing to boot while the
+    * cluster service restarts would turn one restart into two outages.
     */
   private def decodeTopics[F[_]: Async](layers: Layers, policy: UrlPolicy): F[Problems[TopicsConfig]] =
     for {

@@ -27,6 +27,9 @@ import kui.topic.api.TopicApi
   *     service's by the operation name inside the payload. Running more than one replica without configuring
   *     it means a confirmation minted by one replica is refused by the other, and `TopicWiring` says so in
   *     the log rather than failing quietly.
+  *   - `kui.clusterProfiles.url`, or else `kui.gateway.services.cluster.url`. Either one is the cluster list.
+  *     With neither, the process still starts and serves the static `kui.clusters[]` list, and the log says
+  *     that clusters created in the cluster service will not appear here.
   */
 object Main extends IOApp {
 
@@ -36,16 +39,7 @@ object Main extends IOApp {
       args,
       (config, telemetry, principals, logger) =>
         TopicWiring
-          .make[IO](
-            config.clusters,
-            config.rbac,
-            config.topics.refreshInterval,
-            config.topics.internalPrefix,
-            config.streaming.cursorKey,
-            telemetry,
-            principals,
-            logger
-          )
+          .standalone[IO](config, telemetry, principals, logger)
           .map(service => ServiceMain.Serving(service.routes, service.interceptors))
     )
 }

@@ -11,16 +11,19 @@ import cats.effect.kernel.{Async, Clock, Resource}
 import cats.syntax.all.*
 import fs2.io.file.Files
 import org.typelevel.log4cats.StructuredLogger
+import sttp.model.Uri
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.interceptor.Interceptor
 
 import kui.cache.CacheMetrics
-import kui.config.ClusterConfig
+import kui.cluster.client.{ClusterProfile, ClusterProfiles, ClusterProfilesConfig, HttpClusterProfiles}
+import kui.config.{ClusterConfig, HttpTlsConfig, KuiConfig, SafeUrl, UrlPolicy}
 import kui.contracts.capability.ServiceCapabilities
 import kui.http.health.ReadinessCheck
 import kui.http.principal.{PrincipalVerification, RbacGuard}
+import kui.http.upstream.HttpTls
 import kui.kafka.{AdminClientPool, AdminMetrics}
-import kui.kernel.Secret
+import kui.kernel.{Secret, ServiceId, UserName}
 import kui.observability.Telemetry
 import kui.observability.audit.LoggingAuditSink
 import kui.security.PrincipalCodec
@@ -70,12 +73,133 @@ object TopicWiring {
   /** The instrumentation scope this service's tracer and meter are named after. */
   val Instrumentation: String = "kui.topic"
 
+  /** The account the distributed topic process signs profile calls as. */
+  val ProfileIdentity: UserName = UserName.unsafe("kui-topic")
+
+  /** `kui.clusterProfiles.url`, or else the gateway's cluster upstream.
+    *
+    * `None` means the process has no profile client and [[standalone]] serves `kui.clusters[]`.
+    */
+  private[app] def profileTarget(config: KuiConfig): Option[SafeUrl] = {
+    val configured = config.topics.clusterProfiles.map(_.url)
+    val gateway = config.gateway.services.get(ServiceId.unsafe("cluster")).map(_.url)
+    configured.orElse(gateway)
+  }
+
+  /** The distributed process: a profile client when a URL is configured, otherwise the static list.
+    *
+    * The client is held for the life of the server and its first fetch runs during acquisition, but this
+    * wiring copies that snapshot once. A cluster created or edited after start is not applied here. Serde,
+    * schema registry, Connect, ksql and masking are not on the profile and stay at [[ClusterConfig]]'s
+    * defaults. Missing both URLs does not refuse startup: the static list is served and the gap is logged.
+    */
+  def standalone[F[_]: {Async, Parallel, Files}](
+      config: KuiConfig,
+      telemetry: Telemetry[F],
+      principals: PrincipalCodec[F],
+      logger: StructuredLogger[F],
+      policy: UrlPolicy = UrlPolicy.fromEnv(sys.env)
+  ): Resource[F, TopicServer[F]] =
+    profileTarget(config) match {
+      case None =>
+        Resource.eval(
+          logger.warn(
+            "no kui.clusterProfiles.url (or kui.gateway.services.cluster.url) is configured; the topic " +
+              "service is using the static kui.clusters list and will not see clusters created in the " +
+              "cluster service"
+          )
+        ) >> make(
+          config.clusters,
+          config.rbac,
+          config.topics.refreshInterval,
+          config.topics.internalPrefix,
+          config.streaming.cursorKey,
+          telemetry,
+          principals,
+          logger
+        )
+      case Some(target) =>
+        val configured = config.topics.clusterProfiles
+        val settings = configured.fold(ClusterProfilesConfig.default)(value =>
+          ClusterProfilesConfig(
+            value.pollInterval,
+            value.requestTimeout,
+            value.reconnectBackoff,
+            value.maxReconnectBackoff
+          )
+        )
+        for {
+          backend <- HttpTls.resource[F](HttpTlsConfig.Default, policy)
+          profiles <- HttpClusterProfiles.resource[F](
+            Uri.unsafeParse(target.value),
+            backend,
+            principals,
+            ProfileIdentity,
+            settings,
+            telemetry,
+            logger
+          )
+          server <- fromResolved(
+            profiles,
+            config.rbac,
+            config.topics.refreshInterval,
+            config.topics.internalPrefix,
+            config.streaming.cursorKey,
+            telemetry,
+            principals,
+            logger
+          )
+        } yield server
+    }
+
+  /** One startup snapshot of a profile client, then the same wiring [[make]] builds from a static list.
+    *
+    * Later profile changes are not applied. The fields the profile does not carry — serde, schema registry,
+    * Connect, ksql, masking — stay at [[ClusterConfig]]'s defaults.
+    */
+  def fromResolved[F[_]: {Async, Parallel, Files}](
+      profiles: ClusterProfiles[F],
+      rbac: RbacPolicy,
+      scrapeInterval: FiniteDuration,
+      internalPrefix: String,
+      cursorKey: Option[Secret[String]],
+      telemetry: Telemetry[F],
+      principals: PrincipalCodec[F],
+      logger: StructuredLogger[F]
+  ): Resource[F, TopicServer[F]] =
+    Resource.eval(profiles.all).flatMap { resolved =>
+      val clusters = resolved.values.toList.sortBy(_.id.value).map(configOf)
+      make(
+        clusters,
+        rbac,
+        scrapeInterval,
+        internalPrefix,
+        cursorKey,
+        telemetry,
+        principals,
+        logger
+      )
+    }
+
+  /** Copies the fields a profile actually carries. */
+  private[app] def configOf(profile: ClusterProfile): ClusterConfig = {
+    val connection = profile.connection
+    ClusterConfig(
+      profile.id,
+      profile.name,
+      connection.bootstrapServers,
+      connection.security,
+      connection.overrides,
+      profile.readOnly,
+      connection.admin
+    )
+  }
+
   /** Builds everything except the listener.
     *
     * @param clusters
-    *   the configured clusters, from `kui.clusters[]`. In the all-in-one deployment this is the same list the
-    *   cluster service was given, read once from the same file — see [[ConfiguredClusterProfiles]] for why
-    *   this shape does not go through the HTTP profile client.
+    *   the clusters this process will scrape. Callers pass `kui.clusters[]`, or the list [[fromResolved]]
+    *   copied from the cluster service. See [[ConfiguredClusterProfiles]] for the static adapter underneath.
     * @param rbac
     *   the deployment's roles. This service re-runs the same decision the gateway already took, from the
     *   principal the gateway signed, because the gateway is a door and not a wall: anything that can reach
@@ -138,8 +262,9 @@ object TopicWiring {
       readiness = List.empty[ReadinessCheck[F]]
 
       // The permission check this service runs for itself, over the same declaration on the same
-      // endpoints the gateway read. Read-only comes from the very `kui.clusters[]` entries above, so a
-      // read-only cluster is refused here whether or not the request came through the gateway.
+      // endpoints the gateway read. Read-only comes from the cluster list this wiring was given — the
+      // static `kui.clusters[]` entries, or the resolved profile snapshot — so a read-only cluster is
+      // refused here whether or not the request came through the gateway.
       permissions = RbacGuard.fromPolicy[F](
         rbac,
         cluster => ClusterFlags(clusters.find(_.id == cluster).exists(_.readOnly)),

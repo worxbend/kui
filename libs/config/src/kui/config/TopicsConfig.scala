@@ -7,10 +7,11 @@ import kui.kernel.search.SearchMode
 
 /** Where the topic service finds the cluster service, and how patiently it waits for it.
   *
-  * This is the `kui.clusterProfiles.*` section. It is the topic service's *only* source of clusters: it holds
-  * no `kui.clusters[]` of its own, because two lists of clusters in two processes are two lists that will
-  * eventually disagree, and the disagreement would show as "that cluster exists on the dashboard but its
-  * topics 404" (DEVPLAN §10 D1, risk R-7; ADR-046).
+  * This is the `kui.clusterProfiles.*` section. When a URL is set, it is the topic service's source of
+  * clusters: a second list that drifted from the cluster service shows up as "that cluster exists on the
+  * dashboard but its topics 404" (DEVPLAN §10 D1, risk R-7; ADR-046). This type still holds no cluster list
+  * of its own. A process with neither this URL nor `kui.gateway.services.cluster.url` falls back to
+  * `KuiConfig.clusters` and says so in the log.
   *
   * The values here are the wire configuration. Turning them into the shared profile client's own
   * `kui.cluster.client.ClusterProfilesConfig` happens in the topic service's composition root, which is the
@@ -79,7 +80,8 @@ object ProfileClientConfig {
   *
   * What is deliberately *not* here:
   *
-  *   - **no cluster list.** See [[ProfileClientConfig]].
+  *   - **no cluster list of its own.** Resolved clusters come from [[ProfileClientConfig]] when a URL is set.
+  *     The static `kui.clusters[]` list lives on [[KuiConfig]] and is only the topic process's fallback.
   *   - **no store settings.** The topic service is not a metadata-store client; it never opens the store.
   *   - **no admin chunk sizes.** They live in `AdminTuning`, per cluster, and arrive in the profile — the
   *     right chunk size depends on the broker being scraped, not on which KUI process is scraping it
@@ -106,8 +108,8 @@ object ProfileClientConfig {
   * @param clusterProfiles
   *   the cluster-service endpoint, when one is configured. `None` is legal in this type because [[KuiConfig]]
   *   is loaded by every KUI process and the gateway, the cluster service and the store have no profile client
-  *   at all; the topic service's composition root is what refuses to start without it, and it is the only
-  *   process that can say so truthfully
+  *   at all. The topic process prefers this URL, then `kui.gateway.services.cluster.url`, and serves the
+  *   static `kui.clusters[]` list when neither is set
   */
 final case class TopicsConfig(
     refreshInterval: FiniteDuration,

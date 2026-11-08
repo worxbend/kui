@@ -219,29 +219,27 @@ object AllInOneWiring {
       clusterService <- ClusterWiring.make[F](cluster, telemetry, principals, logger)
       collectorProfiles <- InProcessClusterProfiles.resource(clusterService, telemetry, principals, logger)
       collectorConfig = KuiConfig.Default.copy(metrics = metrics, alerts = alerts, store = store, rbac = rbac)
-      // The topic service reads the same `kui.clusters[]` this process already loaded rather than
-      // asking the cluster service for it over HTTP (ADR-046's profile client). One process calling
-      // itself over a socket to read a list it is holding in memory would add a listener, a timeout
-      // and a failure mode to a lookup that cannot fail; see `ConfiguredClusterProfiles`.
+      // The topic service snapshots the cluster service's resolved profiles, including stored
+      // overlays, through the same in-process client metrics and alerts keep. The copy is taken once
+      // at startup: a later edit is not applied, and serde, schema registry, Connect, ksql and
+      // masking are not on the profile, so those services still read `clusters`.
       //
       // It takes `kui.streaming.cursorKey` for the same reason the consumer service does: M5's topic
       // deletion and partition increase are confirmed against a signed plan (ADR-045), and the key
       // that signs one is the key ADR-026 already made an operator configure. One secret, one
       // rotation procedure.
-      topicService <- TopicWiring
-        .make[F](
-          clusters,
-          rbac,
-          topics.refreshInterval,
-          topics.internalPrefix,
-          streaming.cursorKey,
-          telemetry,
-          principals,
-          logger
-        )
-      // The consumer service reads the same `kui.clusters[]`, for the same reason the topic service
-      // does: this process is already holding the list, and calling itself over a socket to read it
-      // would add a listener, a timeout and a failure mode to a lookup that cannot fail.
+      topicService <- TopicWiring.fromResolved[F](
+        collectorProfiles,
+        rbac,
+        topics.refreshInterval,
+        topics.internalPrefix,
+        streaming.cursorKey,
+        telemetry,
+        principals,
+        logger
+      )
+      // The consumer service still reads the static `kui.clusters[]` this process loaded. The topic
+      // service above does not.
       //
       // Its refresh interval comes from `kui.consumers.refreshInterval` and not from
       // `kui.topics.refreshInterval`. Describing every consumer group on a cluster and describing its

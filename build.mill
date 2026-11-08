@@ -1994,8 +1994,16 @@ object services extends Module {
       * take its routes and serve them beside every other service's over one port (ADR-010).
       */
     object app extends KuiJvmModule {
-      def moduleDeps =
-        Seq(api, infrastructure, libs.cache, libs.config, libs.kafka, libs.observability, libs.http)
+      def moduleDeps = Seq(
+        api,
+        infrastructure,
+        libs.cache,
+        libs.config,
+        libs.kafka,
+        libs.observability,
+        libs.http,
+        services.cluster.client
+      )
 
       def mvnDeps = Seq(
         mvn"org.typelevel::cats-core::${Versions.cats}",

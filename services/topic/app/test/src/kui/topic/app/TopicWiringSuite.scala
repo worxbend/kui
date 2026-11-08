@@ -4,7 +4,15 @@ import java.nio.charset.StandardCharsets
 
 import cats.effect.IO
 
-import kui.kernel.Secret
+import kui.config.{
+  GatewayConfig,
+  KuiConfig,
+  ProfileClientConfig,
+  SafeUrl,
+  TopicsConfig,
+  UpstreamServiceConfig
+}
+import kui.kernel.{Secret, ServiceId}
 import kui.testkit.KuiIOSuite
 import kui.testkit.fakes.FakeStructuredLogger
 
@@ -64,6 +72,26 @@ final class TopicWiringSuite extends KuiIOSuite {
     }
   }
 
+  test("a profile url outranks the gateway cluster url") {
+    val profiles = SafeUrl.unsafe("http://kui-cluster:8081")
+    val gateway = SafeUrl.unsafe("http://gateway-cluster:8081")
+    val config = KuiConfig.Default.copy(
+      topics = TopicsConfig.Default.copy(clusterProfiles = Some(profileClient(profiles))),
+      gateway = gatewayCluster(gateway)
+    )
+    IO(assertEquals(TopicWiring.profileTarget(config).map(_.value), Some(profiles.value)))
+  }
+
+  test("the gateway cluster url is the profile target when no profile url is set") {
+    val gateway = SafeUrl.unsafe("http://gateway-cluster:8081")
+    val config = KuiConfig.Default.copy(gateway = gatewayCluster(gateway))
+    IO(assertEquals(TopicWiring.profileTarget(config).map(_.value), Some(gateway.value)))
+  }
+
+  test("neither url means the topic process keeps the static cluster list") {
+    IO(assertEquals(TopicWiring.profileTarget(KuiConfig.Default), None))
+  }
+
   test("the service and its instrumentation are named the same thing everywhere") {
     // A dashboard filtering on the meter's scope and a log search filtering on `service.name` have to
     // agree; nothing else in this repository compares them.
@@ -71,4 +99,25 @@ final class TopicWiringSuite extends KuiIOSuite {
     assertEquals(kui.topic.api.TopicApi.ServiceName, "kui-topic")
     assertEquals(kui.topic.api.TopicApi.Id.value, "topic")
   }
+
+  private def profileClient(url: SafeUrl): ProfileClientConfig =
+    ProfileClientConfig(
+      url,
+      ProfileClientConfig.DefaultPollInterval,
+      ProfileClientConfig.DefaultRequestTimeout,
+      ProfileClientConfig.DefaultReconnectBackoff,
+      ProfileClientConfig.DefaultMaxReconnectBackoff,
+      ProfileClientConfig.DefaultStartupTimeout
+    )
+
+  private def gatewayCluster(url: SafeUrl): GatewayConfig =
+    GatewayConfig.Default.copy(services =
+      Map(
+        ServiceId.unsafe("cluster") -> UpstreamServiceConfig(
+          url,
+          UpstreamServiceConfig.DefaultTimeout,
+          UpstreamServiceConfig.DefaultMaxConcurrent
+        )
+      )
+    )
 }
