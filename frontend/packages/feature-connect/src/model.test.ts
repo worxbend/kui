@@ -38,6 +38,21 @@ function listing(document: unknown): ConnectorListing {
   return decoded;
 }
 
+/** One worker that answered, so a voice-line case can name states without a fixture file. */
+function voiceListing(
+  items: readonly Connector[],
+  unreadable: readonly string[] = [],
+): ConnectorListing {
+  return {
+    workers: [
+      {
+        connect: "payments",
+        page: { kind: "ok", page: { items, unreadable } },
+      },
+    ],
+  };
+}
+
 function connector(overrides: Partial<Connector> = {}): Connector {
   return {
     connect: "payments",
@@ -319,5 +334,53 @@ describe("the voice line", () => {
     const line = connectVoice(listing(emptyDocument));
     expect(line).toContain("No connectors are deployed");
     expect(line).not.toContain("0");
+  });
+
+  it("does not call a cluster healthy when a connector is not running", () => {
+    const paused = connectVoice(
+      voiceListing([
+        connector({ name: "orders-source", state: "RUNNING" }),
+        connector({ name: "archive-sink", state: "PAUSED", kind: "sink" }),
+      ]),
+    );
+    expect(paused).not.toContain("all running");
+    expect(paused).toContain("paused");
+
+    for (const [state, word] of [
+      ["UNASSIGNED", "unassigned"],
+      ["RESTARTING", "restarting"],
+      ["UNKNOWN", "unknown"],
+    ] as const) {
+      const line = connectVoice(
+        voiceListing([
+          connector({ name: "orders-source", state: "RUNNING" }),
+          connector({ name: "other", state }),
+        ]),
+      );
+      expect(line, state).not.toContain("all running");
+      expect(line, state).toContain(word);
+    }
+  });
+
+  it("says all running when every described connector is running", () => {
+    const line = connectVoice(
+      voiceListing([
+        connector({ name: "orders-source", state: "RUNNING" }),
+        connector({ name: "archive-sink", state: "RUNNING", kind: "sink" }),
+      ]),
+    );
+    expect(line).toContain("all running");
+  });
+
+  it("does not say nothing is deployed when the only connectors are undescribed", () => {
+    const one = connectVoice(voiceListing([], ["a"]));
+    expect(one).not.toContain("No connectors are deployed");
+    expect(one).toContain("a");
+    expect(one).toContain("would not describe");
+
+    const two = connectVoice(voiceListing([], ["a", "b"]));
+    expect(two).not.toContain("No connectors are deployed");
+    expect(two).toContain("a");
+    expect(two).toContain("b");
   });
 });

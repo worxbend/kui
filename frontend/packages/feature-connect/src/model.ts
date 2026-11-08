@@ -286,16 +286,25 @@ function pageOf(worker: WorkerRow) {
  * has a connector whose own state is `RUNNING` and whose task 1 has failed, and a voice line that
  * counted state words would call that cluster healthy.
  *
- * Where a worker did not answer, the line says the count is partial rather than stating it flat: a
- * confident "3 connectors" over a cluster whose second worker is down is a smaller number in the
- * reassuring direction.
+ * "All running" is the other direction of that lie. It is used only when every described connector's
+ * state is `RUNNING`. `PAUSED`, `UNASSIGNED`, `RESTARTING` and `UNKNOWN` are not a connector doing
+ * work, and {@link pillState} already refuses to draw them as running. They are counted by the state
+ * word only after the `failed` flag has been applied, so a running connector with a failed task is
+ * still "failed and sulking" and not "1 paused".
+ *
+ * A worker that named connectors and would not describe them did deploy something. The zero-item
+ * branch says those names rather than "nothing is deployed", which is what the empty grid says when
+ * `unreadable` is empty. Where a worker did not answer, the line says the count is partial rather
+ * than stating it flat: a confident "3 connectors" over a cluster whose second worker is down is a
+ * smaller number in the reassuring direction.
  */
 export function connectVoice(listing: ConnectorListing): string {
   const connectors = allConnectors(listing);
   const silent = workersThatDidNotAnswer(listing).length;
-  const undescribed = allNotDescribed(listing).length;
+  const undescribed = allNotDescribed(listing);
 
   if (connectors.length === 0) {
+    if (undescribed.length > 0) return nothingDescribed(undescribed, silent);
     return silent > 0
       ? "No connectors, from the workers that answered — and some did not."
       : "No connectors are deployed. A quiet pipeline is a happy pipeline.";
@@ -305,12 +314,87 @@ export function connectVoice(listing: ConnectorListing): string {
   const partial = silent > 0 ? ", from the workers that answered" : "";
   const failed = connectors.filter((one) => one.failed).length;
   if (failed > 0) return `${noun}${partial} · ${failed} failed and sulking`;
-  if (undescribed > 0) {
+  if (undescribed.length > 0) {
     const word =
-      undescribed === 1
+      undescribed.length === 1
         ? "one more it would not describe"
-        : `${undescribed} more it would not describe`;
+        : `${undescribed.length} more it would not describe`;
     return `${noun}${partial} · and ${word}`;
   }
+  const resting = nonRunningPhrase(connectors);
+  if (resting !== undefined) return `${noun}${partial} · ${resting}`;
   return `${noun}${partial} · all running, which is how it should look.`;
+}
+
+/**
+ * What to say when every worker that answered named connectors and described none of them.
+ *
+ * The names are the fact the cards below repeat. Leaving them out of this sentence is how the
+ * header used to say nothing was deployed above a row of "would not describe" cards.
+ */
+function nothingDescribed(
+  undescribed: readonly { readonly connect: string; readonly name: string }[],
+  silent: number,
+): string {
+  const list = quotedList(undescribed.map((one) => one.name));
+  const who =
+    new Set(undescribed.map((one) => one.connect)).size === 1 ? "The worker" : "The workers";
+  const named =
+    undescribed.length === 1
+      ? `${who} named ${list} and would not describe it`
+      : `${who} named ${list} and would not describe them`;
+  const base = `No connectors were described. ${named}.`;
+  return silent > 0 ? `${base} Some workers did not answer.` : base;
+}
+
+/** `'a'`, `'a' and 'b'`, or `'a', 'b', and 'c'`. */
+function quotedList(names: readonly string[]): string {
+  const quoted = names.map((name) => `'${name}'`);
+  const [first, second] = quoted;
+  if (quoted.length === 1) return first ?? "";
+  if (quoted.length === 2) return `${first} and ${second}`;
+  const last = quoted[quoted.length - 1];
+  return `${quoted.slice(0, -1).join(", ")}, and ${last}`;
+}
+
+/**
+ * The non-`RUNNING` states on this page, or `undefined` when every connector is running.
+ *
+ * Order is fixed so two clusters in the same mix read the same sentence. A state this build does
+ * not name still counts: dropping it would fall through to "all running".
+ */
+function nonRunningPhrase(connectors: readonly Connector[]): string | undefined {
+  const counts = new Map<string, number>();
+  for (const connector of connectors) {
+    const word = healthWord(connector.state);
+    if (word === undefined) continue;
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  if (counts.size === 0) return undefined;
+  const order = ["paused", "unassigned", "restarting", "failed", "unknown"];
+  const known = order.filter((word) => counts.has(word));
+  const extra = [...counts.keys()].filter((word) => !order.includes(word));
+  return [...known, ...extra].map((word) => `${counts.get(word)} ${word}`).join(", ");
+}
+
+/** The voice-line word for a state, or `undefined` when that state is `RUNNING`. */
+function healthWord(state: ConnectorRunState): string | undefined {
+  switch (state) {
+    case "RUNNING":
+      return undefined;
+    case "PAUSED":
+      return "paused";
+    case "UNASSIGNED":
+      return "unassigned";
+    case "RESTARTING":
+      return "restarting";
+    case "FAILED":
+      return "failed";
+    case "UNKNOWN":
+      return "unknown";
+    default: {
+      const unexpected: never = state;
+      return String(unexpected).toLowerCase();
+    }
+  }
 }
