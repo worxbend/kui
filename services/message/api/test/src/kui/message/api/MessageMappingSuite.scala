@@ -9,6 +9,7 @@ import munit.FunSuite
 
 import kui.contracts.message.{DecodeErrorDto, DecodedPayloadDto}
 import kui.contracts.sse.DoneReason
+import kui.http.sse.{SseConfig, SseOverflow}
 import kui.kernel.browse.PollBudget
 import kui.kernel.serde.{PayloadKind, SerdeName, Target}
 import kui.kernel.{Offset, PartitionId}
@@ -202,6 +203,13 @@ final class MessageMappingSuite extends FunSuite {
     assertEquals(consumed.name, MessageMapping.EventNames.Consumed)
     // Three frames, three names: the set is what a client's three handlers bind to.
     assertEquals(Set(phase.name, message.name, consumed.name).size, 3)
+  }
+
+  test("a bounded browse blocks on a slow reader and a live tail does not") {
+    val base = SseConfig.default.copy(bufferSize = 8)
+    assertEquals(MessageRoutes.streamConfig(live = false, base).overflow, SseOverflow.Block)
+    assertEquals(MessageRoutes.streamConfig(live = true, base).overflow, SseOverflow.DropOldest)
+    assertEquals(MessageRoutes.streamConfig(live = false, base).bufferSize, 8)
   }
 
   /** The frame the browser actually receives, so these assertions read the encoder's own output. */

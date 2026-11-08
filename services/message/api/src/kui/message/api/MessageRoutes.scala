@@ -9,7 +9,7 @@ import sttp.capabilities.fs2.Fs2Streams
 import sttp.tapir.server.ServerEndpoint
 
 import kui.http.principal.RbacGuard
-import kui.http.sse.{Sse, SseConfig, SseEvent}
+import kui.http.sse.{Sse, SseConfig, SseEvent, SseOverflow}
 import kui.kernel.browse.PollBudget
 import kui.kernel.error.{DomainError, FieldError, KuiError}
 import kui.message.application.{BrowseEvent, BrowseUseCase}
@@ -81,7 +81,7 @@ object MessageRoutes {
                   .encode(
                     Sse.stream(
                       Sse.withErrorEvent(events(browse, request, budget, correlationId), correlationId),
-                      sse,
+                      streamConfig(request.live, sse),
                       StreamName,
                       telemetry,
                       logger
@@ -93,6 +93,12 @@ object MessageRoutes {
       }
     )
   }
+
+  /** Bounded pages block when the reader falls behind. A live tail keeps drop-oldest: the screen
+    * already discards rows it cannot show, and waiting would pin a Kafka consumer on a stalled tab.
+    */
+  private[api] def streamConfig(live: Boolean, sse: SseConfig): SseConfig =
+    if live then sse else sse.copy(overflow = SseOverflow.Block)
 
   /** The use case's events as frames, with the one event that needs a clock given one. */
   private def events[F[_]: Async](

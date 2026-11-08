@@ -275,6 +275,32 @@ final class SseSuite extends CatsEffectSuite {
     }
   }
 
+  test("a finite page delivers every event to a reader slower than the producer") {
+    // Browse pages use this buffer. A slow socket must not discard records the cursor will
+    // then skip. One millisecond per event is enough for a 256-deep queue to overflow.
+    val source = Stream.emits(1.to(1000).toList).map(n => SseEvent.data("message", Json.fromInt(n))) ++
+      Stream.emit(SseEvent.done(DoneReason.Limit, None))
+
+    FakeStructuredLogger[IO].flatMap { logger =>
+      Sse
+        .stream[IO](
+          source,
+          SseConfig.default.copy(bufferSize = 256, overflow = SseOverflow.Block),
+          streamName,
+          Telemetry.noop[IO],
+          logger
+        )
+        .evalTap(_ => IO.sleep(1.milli))
+        .compile
+        .toList
+        .map { events =>
+          val rows = events.filter(_.name == "message")
+          assertEquals(rows.size, 1000)
+          assertEquals(events.lastOption.map(_.name), Some(SseEventName.Done))
+        }
+    }
+  }
+
   test("a consumer that goes away never leaves the producer blocked on a full buffer") {
     // The client disconnect, in miniature. The consumer stops after two events while the producer
     // still has hundreds queued behind a four-deep buffer, so `concurrently` interrupts the
@@ -294,6 +320,26 @@ final class SseSuite extends CatsEffectSuite {
     }
 
     TestControl.executeEmbed(program).map(events => assertEquals(events.size, 2))
+  }
+
+  test("a blocking buffer unblocks when the reader goes away") {
+    val source = Stream.emits(1.to(1000).toList).map(n => SseEvent.data("row", Json.fromInt(n)))
+
+    val program = FakeStructuredLogger[IO].flatMap { logger =>
+      Sse
+        .stream[IO](
+          source,
+          SseConfig.default.copy(bufferSize = 4, overflow = SseOverflow.Block),
+          streamName,
+          Telemetry.noop[IO],
+          logger
+        )
+        .take(2)
+        .compile
+        .toList
+    }
+
+    program.timeout(5.seconds).map(events => assertEquals(events.size, 2))
   }
 
   test("a buffer size of zero is treated as one rather than deadlocking") {

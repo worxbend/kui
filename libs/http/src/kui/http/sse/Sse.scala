@@ -19,6 +19,22 @@ import kui.kernel.CorrelationId
 import kui.kernel.error.ErrorCode
 import kui.observability.{MetricNames, Telemetry}
 
+/** What happens when the bounded hand-off between producer and writer is full. */
+enum SseOverflow {
+
+  /** A live view: the newest event is the one worth showing, and the producer must not wait. */
+  case DropOldest
+
+  /** A finite page: wait for the reader. A cursor minted from produced records must not skip one
+    * that the buffer threw away.
+    */
+  case Block
+}
+
+object SseOverflow {
+  given CanEqual[SseOverflow, SseOverflow] = CanEqual.derived
+}
+
 /** How a stream behaves, everywhere.
   *
   * @param heartbeatInterval
@@ -26,15 +42,19 @@ import kui.observability.{MetricNames, Telemetry}
   *   inside the idle timeout of every proxy KUI is likely to sit behind, and inside the browser's own
   *   patience.
   * @param bufferSize
-  *   how many events may be waiting for a slow reader before the oldest start being dropped
+  *   how many events may be waiting for a slow reader. What happens at that bound is [[overflow]]
   * @param rateLimit
   *   events per second, when the stream would otherwise produce faster than a person can read. Unused in M0;
   *   message tailing sets it in M3.
+  * @param overflow
+  *   [[SseOverflow.DropOldest]] for a live view, [[SseOverflow.Block]] for a finite page whose cursor has to
+  *   cover every record the producer already counted
   */
 final case class SseConfig(
     heartbeatInterval: FiniteDuration = 15.seconds,
     bufferSize: Int = 256,
-    rateLimit: Option[Int] = None
+    rateLimit: Option[Int] = None,
+    overflow: SseOverflow = SseOverflow.DropOldest
 )
 
 object SseConfig {
@@ -56,8 +76,9 @@ object SseConfig {
   *   - **it stops consuming resources the moment the browser goes away.** The cancellation chain is browser
   *     abort → gateway stream cancelled → service fiber cancelled → consumer closed. That first link was
   *     measured at 8 ms on this server, which is why no idle-timeout guard is needed here.
-  *   - **a slow reader cannot exhaust the server.** The buffer is bounded and overflow drops the oldest event
-  *     with a counter, never buffers without limit (PLAN §28).
+  *   - **a slow reader cannot exhaust the server.** The buffer is bounded either way (PLAN §28). A live view
+  *     drops the oldest event and counts it. A finite page waits, so the bound is backpressure rather than
+  *     loss; the producer's own deadline and a disconnect still end the wait.
   */
 object Sse {
 
@@ -69,8 +90,9 @@ object Sse {
     * together. Buffering then absorbs a slow reader, and heartbeats come last so that an idle stream still
     * produces them and the terminal event is never held up behind one.
     *
-    * Dropping the oldest on overflow is what makes this safe in that order: the terminal event is the newest
-    * thing in the queue, so it is never the one thrown away.
+    * On a live view, dropping the oldest is what keeps the terminal event: it is the newest thing in the
+    * queue, so it is never the one thrown away. A finite page never drops, so the terminal event simply
+    * waits its turn.
     *
     * @param streamName
     *   the stream's name in `kui.stream.active` and `kui.stream.events`, e.g. `capabilities`
@@ -212,13 +234,14 @@ object Sse {
       case Some(perSecond) => source.metered(1.second / perSecond.toLong)
     }
 
-  /** A bounded hand-off between the producer and the writer, dropping the oldest on overflow.
+  /** A bounded hand-off between the producer and the writer.
     *
-    * Dropping rather than blocking is PLAN §28's rule, and the reason is what unbounded buffering does
-    * instead: a browser tab that stopped reading holds a growing buffer on the server for as long as the
-    * connection is open, and a hundred such tabs is an out-of-memory error. Dropping the *oldest* is right
-    * for a live view — the newest state is the one worth showing — and the drop is counted rather than
-    * silent, because a stream that is dropping events is telling you something about its consumer.
+    * The queue is always bounded. Unbounded buffering is a browser tab that stopped reading turning into an
+    * out-of-memory error, which is PLAN §28's rule. What the bound *does* depends on the page. A live view
+    * drops the oldest event — the newest state is the one worth showing — and counts the drop. A finite page
+    * waits instead: its cursor is minted from records the producer has already counted, so dropping one
+    * skips it on this page and the next. Waiting is safe there because the page is finite and the producer's
+    * deadline still bounds the work. The finaliser never waits forever; see `terminate`.
     */
   private def buffered[F[_]: Temporal](
       source: Stream[F, SseEvent],
@@ -251,14 +274,18 @@ object Sse {
             )
         }
 
-      val producer = source
-        .evalMap { event =>
+      def enqueue(event: SseEvent): F[Unit] = config.overflow match {
+        case SseOverflow.DropOldest =>
           queue.tryOffer(Some(event)).flatMap {
             case true => Temporal[F].unit
             case false => queue.tryTake *> instruments.dropped *> queue.offer(Some(event))
           }
-        }
-        .onFinalize(terminate)
+        // `offer` waits, and it is cancelled when the reader goes away, so a disconnect does not
+        // stick on a full queue. The finaliser below is what must not block unboundedly.
+        case SseOverflow.Block => queue.offer(Some(event))
+      }
+
+      val producer = source.evalMap(enqueue).onFinalize(terminate)
 
       Stream.fromQueueNoneTerminated(queue).concurrently(producer)
     }
