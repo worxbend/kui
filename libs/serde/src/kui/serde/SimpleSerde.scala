@@ -54,15 +54,32 @@ abstract class SimpleSerde[F[_]](using F: Applicative[F]) extends Serde[F] with 
       def deserialize(
           headers: List[RawHeader],
           bytes: Array[Byte]
-      ): F[Either[DeserializeFailure, DeserializeResult]] = decode(headers, bytes).pure[F]
+      ): F[Either[DeserializeFailure, DeserializeResult]] =
+        unlessOverflowing(decode(headers, bytes))(failure(Overflowed)).pure[F]
     }: Deserializer[F]).pure[F]
 
   final def serializer(topic: TopicName, target: Target, params: Map[String, String]): F[Serializer[F]] =
     (new Serializer[F] {
       val serde: SerdeName = name
       def serialize(input: String, headers: List[RawHeader]): F[Either[SerializeFailure, Array[Byte]]] =
-        encode(input, headers).pure[F]
+        unlessOverflowing(encode(input, headers))(encodeFailure(Overflowed)).pure[F]
     }: Serializer[F]).pure[F]
+
+  /** The one failure a pure codec can raise that nothing above it can turn into a `Left`.
+    *
+    * A `StackOverflowError` is a `VirtualMachineError`. `Deserializers.attempt` runs a decode inside
+    * `Sync.defer(...).handleError(...)`, and Cats Effect never hands a fatal error to `handleError`: it shuts
+    * its runtime down and the process halts. A codec that recurses over a payload's structure overflows on a
+    * payload nested deeply enough, so this catches exactly that error, here, where the codec has already
+    * unwound and nothing is half-done: a pure function over bytes has no state to leave inconsistent. The
+    * built-in codecs bound their depth themselves (`JsonNesting`); this is for any codec that does not.
+    */
+  private def unlessOverflowing[A](body: => A)(overflowed: => A): A =
+    try body
+    catch { case _: StackOverflowError => overflowed }
+
+  private val Overflowed: String =
+    "this payload is too deeply nested for this serde: processing it exhausted the stack"
 
   /** Convenience for the common failure, so that every serde's `Left` names itself the same way. */
   final protected def failure(cause: String): Either[DeserializeFailure, DeserializeResult] =

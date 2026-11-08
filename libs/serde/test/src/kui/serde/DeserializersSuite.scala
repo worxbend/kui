@@ -6,6 +6,7 @@ import org.scalacheck.Prop.forAll
 import org.scalacheck.{Arbitrary, Gen}
 
 import kui.kernel.TopicName
+import kui.serde.builtin.JsonSerde
 import kui.testkit.KuiSuite
 
 /** That no way of failing escapes.
@@ -66,6 +67,39 @@ final class DeserializersSuite extends KuiSuite {
       Deserializers.attempt(returnsLeft, Nil, Some(Array[Byte](1))).unsafeRunSync(),
       Left(DeserializeFailure(name, "not my format"))
     )
+  }
+
+  test("a JSON document nested thousands deep is a failure under IO, not a fatal error") {
+    // `Deserializers.attempt` runs the decode inside `Sync.defer(...).handleError`. A `StackOverflowError`
+    // is fatal, so `handleError` never sees it and Cats Effect halts the runtime. The JSON serde has to
+    // return a `Left` before that can happen. Review R2 finding h-serde-untrusted-decode-1.
+    val deep = ("{\"a\":" * 3000) + "0" + ("}" * 3000)
+    val outcome = new java.util.concurrent.atomic.AtomicReference[Either[
+      Throwable,
+      Either[DeserializeFailure, DeserializeResult]
+    ]]()
+    val thread = new Thread(
+      null,
+      () =>
+        outcome.set(
+          try
+            Right(
+              JsonSerde[IO]
+                .deserializer(topic, Target.Value)
+                .flatMap(d => Deserializers.attempt(d, Nil, Some(deep.getBytes("UTF-8"))))
+                .unsafeRunSync()
+            )
+          catch { case thrown: Throwable => Left(thrown) }
+        ),
+      "deserializers-small-stack",
+      256L * 1024L
+    )
+    thread.start()
+    thread.join()
+    outcome.get() match {
+      case Left(thrown) => fail(s"decoding threw $thrown instead of returning a Left")
+      case Right(decoded) => assert(decoded.left.exists(_.cause.contains("256 levels")), decoded)
+    }
   }
 
   test("a null payload is the empty string, not a failure: a tombstone is a record") {

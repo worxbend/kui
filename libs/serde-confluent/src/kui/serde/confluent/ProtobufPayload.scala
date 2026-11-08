@@ -108,9 +108,22 @@ object ProtobufPayload {
       val resolved = file.resolved
       resolved
         .messageAt(path)
-        .flatMap(declared => decodeMessage(resolved, declared, message, 0, message.length))
+        .flatMap(declared => decodeMessage(resolved, declared, message, 0, message.length, depth = 1))
         .map(_.spaces2)
     }
+
+  /** How many messages deep a record may nest: Protobuf's own default recursion limit
+    * (`CodedInputStream.DEFAULT_RECURSION_LIMIT`), so a record every other Protobuf reader accepts is one
+    * this reader accepts too.
+    *
+    * A recursive message type (`message Node { Node child = 1; }`) is legal and lets a producer nest a record
+    * as deep as its bytes allow, roughly two bytes a level. Decoding recurses once per level and printing the
+    * result once more, and the `StackOverflowError` that ends an unbounded recursion is fatal to Cats Effect:
+    * it halts the process instead of failing one record. Each level becomes at most two levels of JSON (a
+    * repeated field's array, then the message's object), which keeps the output inside `JsonNesting.MaxDepth`
+    * for masking and filtering as well.
+    */
+  private val MaxMessageDepth: Int = ProtoSchema.MaxNesting
 
   /** Decodes one message body into a JSON object.
     *
@@ -124,7 +137,8 @@ object ProtobufPayload {
       message: ProtoMessage,
       bytes: Array[Byte],
       from: Int,
-      until: Int
+      until: Int,
+      depth: Int
   ): Either[String, Json] = {
 
     @tailrec
@@ -139,13 +153,18 @@ object ProtobufPayload {
             if number <= 0 then
               Left(s"the record contains field number $number, and Protobuf numbers start at 1")
             else
-              readValue(file, message.byNumber.get(number), wireType, bytes, afterTag, until) match {
+              readValue(file, message.byNumber.get(number), wireType, bytes, afterTag, until, depth) match {
                 case Left(problem) => Left(problem)
                 case Right((value, next)) => loop(next, (number -> value) :: collected)
               }
         }
 
-    loop(from, Nil).map(entries => assemble(file, message, entries))
+    if depth > MaxMessageDepth then
+      Left(
+        s"the record nests messages more than $MaxMessageDepth levels deep, which is Protobuf's own limit " +
+          "and deeper than KUI reads a record"
+      )
+    else loop(from, Nil).map(entries => assemble(file, message, entries))
   }
 
   /** Wire entries as one JSON object, grouped by field and ordered by the schema. */
@@ -215,7 +234,8 @@ object ProtobufPayload {
       wireType: Int,
       bytes: Array[Byte],
       offset: Int,
-      until: Int
+      until: Int,
+      depth: Int
   ): Either[String, (Json, Int)] =
     wireType match {
       case VarintWire =>
@@ -236,7 +256,7 @@ object ProtobufPayload {
             )
           else {
             val end = afterLength + length.toInt
-            lengthDelimited(file, declared, bytes, afterLength, end).map(value => (value, end))
+            lengthDelimited(file, declared, bytes, afterLength, end, depth).map(value => (value, end))
           }
         }
 
@@ -250,13 +270,17 @@ object ProtobufPayload {
         Left(s"the record contains wire type $other, and Protobuf defines 0, 1, 2, 3, 4 and 5")
     }
 
-  /** A length-delimited run: a string, some bytes, a nested message, or a packed run of numbers. */
+  /** A length-delimited run: a string, some bytes, a nested message, or a packed run of numbers.
+    *
+    * `depth` is the enclosing message's; a nested message is one deeper.
+    */
   private def lengthDelimited(
       file: ProtoFile,
       declared: Option[ProtoField],
       bytes: Array[Byte],
       from: Int,
-      until: Int
+      until: Int,
+      depth: Int
   ): Either[String, Json] =
     declared match {
       case Some(field) =>
@@ -267,7 +291,7 @@ object ProtobufPayload {
             packed(file, field, bytes, from, until)
           case ProtoType.Named(reference) =>
             resolve(file, field, reference) match {
-              case Right(nested) => decodeMessage(file, nested, bytes, from, until)
+              case Right(nested) => decodeMessage(file, nested, bytes, from, until, depth + 1)
               case Left(problem) => Left(problem)
             }
           case scalar if field.label == ProtoLabel.Repeated && scalar.isPackable =>

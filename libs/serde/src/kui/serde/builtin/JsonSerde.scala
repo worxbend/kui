@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets
 import cats.Applicative
 import io.circe.parser
 
+import kui.kernel.serde.JsonNesting
 import kui.serde.*
 
 /** JSON, and only JSON that is an object or an array.
@@ -28,7 +29,13 @@ object JsonSerde {
 
   def apply[F[_]: Applicative]: Serde[F] = new Impl[F]
 
-  /** Whether these bytes parse as a JSON object or array. Shared with `claims` so the two cannot disagree. */
+  /** Whether these bytes parse as a JSON object or array. Shared with `claims` so the two cannot disagree.
+    *
+    * Depth is part of "is this a document". The parse itself is safe at any depth jawn accepts, but printing
+    * the result (`noSpaces`, below) and everything downstream that walks it recurse once per level, and a
+    * `StackOverflowError` there is fatal to Cats Effect rather than a failure on one record. A document past
+    * `JsonNesting.MaxDepth` is therefore not this serde's, in either direction.
+    */
   private def parseDocument(bytes: Array[Byte]): Either[String, io.circe.Json] =
     Payloads.asUtf8(bytes) match {
       case None => Left("the payload is not valid UTF-8, so it cannot be JSON")
@@ -36,16 +43,22 @@ object JsonSerde {
         parser.parse(text) match {
           case Left(failure) => Left(explain(text, failure))
           case Right(json) =>
-            if json.isObject || json.isArray then Right(json)
-            else
+            if !(json.isObject || json.isArray) then
               Left(
                 "this is valid JSON but not a JSON document: it is a single value, and this serde accepts " +
                   "only an object (starting with `{`) or an array (starting with `[`). To send a bare " +
                   "number or a bare piece of text, choose a different serde - String, or one of the number " +
                   "formats"
               )
+            else if JsonNesting.exceeds(text, JsonNesting.MaxDepth) then Left(TooDeep)
+            else Right(json)
         }
     }
+
+  private val TooDeep: String =
+    s"this JSON nests objects and arrays more than ${JsonNesting.MaxDepth} levels deep, and KUI reads and " +
+      "writes JSON documents only up to that depth: every level costs a stack frame wherever the document " +
+      "is processed, so a deeper one is handled as text rather than as JSON"
 
   /** What to tell a person when their text is not JSON.
     *

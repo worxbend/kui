@@ -3,7 +3,7 @@ package kui.security.masking
 import io.circe.{parser, Json, JsonObject}
 
 import kui.kernel.TopicName
-import kui.kernel.serde.{PayloadKind, Target}
+import kui.kernel.serde.{JsonNesting, PayloadKind, Target}
 
 /** The masking rules, applied. Pure functions over `Json` and `String`, with no effect and no failure path.
   *
@@ -85,6 +85,13 @@ object MaskingEngine {
   ): String =
     kind match {
       case PayloadKind.Text => maskText(rules, topic, target, text)
+      // Deeper than any serde emits is treated exactly like "will not parse", and for the same reason: the
+      // walk in `maskJson` and the printer after it recurse once per level, and a `StackOverflowError` is
+      // fatal to Cats Effect, so a document nested a few thousand levels deep would halt the service rather
+      // than mask one record. The serdes refuse such documents themselves; this is the last walk before the
+      // screen and must not rely on every serde, a third-party one included, having done so.
+      case PayloadKind.Json if JsonNesting.exceeds(text, JsonNesting.MaxDepth) =>
+        maskText(rules, topic, target, text)
       case PayloadKind.Json =>
         parser.parse(text) match {
           case Right(json) => maskJson(rules, topic, target, json).noSpaces

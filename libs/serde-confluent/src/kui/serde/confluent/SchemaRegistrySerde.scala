@@ -148,18 +148,15 @@ object SchemaRegistrySerde {
           parseAndCache(found).map {
             case Left(why) => fail(why)
             case Right(ParsedSchema.Avro(schema)) =>
-              AvroPayload
-                .decode(schema, framed.body)
+              bounded(AvroPayload.decode(schema, framed.body))
                 .map(text => enrich(DeserializeResult.json(text), found, topic, target))
                 .leftFlatMap(fail)
             case Right(ParsedSchema.Json(_)) =>
-              JsonSchemaPayload
-                .decode(framed.body)
+              bounded(JsonSchemaPayload.decode(framed.body))
                 .map(text => enrich(DeserializeResult.json(text), found, topic, target))
                 .leftFlatMap(fail)
             case Right(ParsedSchema.Protobuf(schema)) =>
-              ProtobufPayload
-                .decode(schema, framed.body)
+              bounded(ProtobufPayload.decode(schema, framed.body))
                 .map(text => enrich(DeserializeResult.json(text), found, topic, target))
                 .leftFlatMap(fail)
           }
@@ -211,9 +208,13 @@ object SchemaRegistrySerde {
       parseAndCache(found).map {
         case Left(why) => encodeFail(why)
         case Right(ParsedSchema.Avro(schema)) =>
-          AvroPayload.encode(schema, input).map(WireFormat.frame(found.id, _)).leftFlatMap(encodeFail)
+          bounded(AvroPayload.encode(schema, input))
+            .map(WireFormat.frame(found.id, _))
+            .leftFlatMap(encodeFail)
         case Right(ParsedSchema.Json(schema)) =>
-          JsonSchemaPayload.encode(schema, input).map(WireFormat.frame(found.id, _)).leftFlatMap(encodeFail)
+          bounded(JsonSchemaPayload.encode(schema, input))
+            .map(WireFormat.frame(found.id, _))
+            .leftFlatMap(encodeFail)
         case Right(ParsedSchema.Protobuf(_)) => encodeFail(protobufWriteUnsupported(found.id))
       }
 
@@ -250,6 +251,17 @@ object SchemaRegistrySerde {
       s"schema $id is a Protobuf schema, and KUI can read Protobuf records but cannot yet write one. " +
         "Produce this record with a Protobuf-aware producer, or use a topic whose schema is Avro or " +
         "JSON Schema"
+
+    /** A codec is a pure function, but the third-party ones recurse, and a `StackOverflowError` from inside
+      * `F.map` is fatal: Cats Effect shuts its runtime down instead of failing the record. Each codec bounds
+      * its own depth; this is what remains when one of them still overflows.
+      */
+    private def bounded[A](body: => Either[String, A]): Either[String, A] =
+      try body
+      catch {
+        case _: StackOverflowError =>
+          Left("this payload is too deeply nested for this serde: processing it exhausted the stack")
+      }
 
     private def fail(cause: String): Either[DeserializeFailure, DeserializeResult] =
       Left(DeserializeFailure(name, cause))

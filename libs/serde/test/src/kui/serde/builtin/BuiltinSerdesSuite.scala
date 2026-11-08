@@ -118,6 +118,70 @@ final class BuiltinSerdesSuite extends KuiSuite {
     assert(encode(JsonSerde[IO], "123").isLeft)
   }
 
+  // ---------------------------------------------------------------- JSON nesting depth
+
+  /** `{"a":` `depth` times, `0`, then the braces: valid JSON, `depth` levels deep, about five bytes a level.
+    */
+  private def nestedObjects(depth: Int): String = ("""{"a":""" * depth) + "0" + ("}" * depth)
+
+  private def nestedArrays(depth: Int): String = ("[" * depth) + ("]" * depth)
+
+  /** The JSON serde over `Id`, so that decoding runs on the calling thread instead of a runtime's pool. */
+  private val syncJson: Serde[cats.Id] = JsonSerde[cats.Id]
+
+  private def decodeSync(text: String): Either[DeserializeFailure, DeserializeResult] =
+    syncJson.deserializer(topic, Target.Value).deserialize(Nil, text.getBytes(StandardCharsets.UTF_8))
+
+  /** Runs `body` on a fresh thread with a 256 KiB stack and returns whatever it threw, fatal errors included.
+    *
+    * The small stack is what makes the overflow deterministic. Whether printing three thousand levels fits in
+    * the default 1 MiB depends on how far the JIT has compiled circe's printer — it overflows on a cold JVM
+    * and fits on a warm one — and a regression test whose outcome depends on JIT state proves nothing.
+    */
+  private def onSmallStack[A](body: => A): Either[Throwable, A] = {
+    val outcome = new java.util.concurrent.atomic.AtomicReference[Either[Throwable, A]]()
+    val thread = new Thread(
+      null,
+      () =>
+        outcome.set(try Right(body)
+        catch { case thrown: Throwable => Left(thrown) }),
+      "json-nesting-small-stack",
+      256L * 1024L
+    )
+    thread.start()
+    thread.join()
+    outcome.get()
+  }
+
+  test("a JSON document nested thousands of levels deep is refused rather than overflowing the stack") {
+    // A StackOverflowError is fatal to Cats Effect: escaping a decode it halts the whole process, and the
+    // record halts it again on every later read. Review R2 finding h-serde-untrusted-decode-1.
+    List(nestedObjects(3000), nestedArrays(3500)).foreach { document =>
+      onSmallStack(decodeSync(document)) match {
+        case Left(thrown) => fail(s"decoding threw $thrown instead of returning a Left")
+        case Right(Right(result)) => fail(s"decoded ${result.text.length} characters as JSON")
+        case Right(Left(failure)) => assert(failure.cause.contains("256 levels"), failure.cause)
+      }
+    }
+  }
+
+  test("a document deeper than the limit is not claimed by auto-detection, nor produced to a topic") {
+    val deep = nestedObjects(3000)
+    JsonSerde[IO] match {
+      case detector: SampleDetector => assert(!detector.claims(deep.getBytes(StandardCharsets.UTF_8)))
+      case other => fail(s"${other.name.value} is not a sample detector")
+    }
+    onSmallStack(syncJson.serializer(topic, Target.Value, Map.empty).serialize(deep, Nil)) match {
+      case Left(thrown) => fail(s"encoding threw $thrown instead of returning a Left")
+      case Right(written) => assert(written.left.exists(_.cause.contains("256 levels")), written)
+    }
+  }
+
+  test("a document exactly at the limit still decodes, compact, even on a small stack") {
+    val document = nestedObjects(kui.kernel.serde.JsonNesting.MaxDepth)
+    assertEquals(onSmallStack(decodeSync(document)).map(_.map(_.text)), Right(Right(document)))
+  }
+
   // The refusal a person reads. The publish drawer shows `cause` verbatim beside the field, and it used to
   // show circe's own words — `expected null got 'not js...' (line 1, column 1)`, which describes one branch
   // the parser tried and reads as though KUI had wanted `null`. These four cases pin the sentences instead.

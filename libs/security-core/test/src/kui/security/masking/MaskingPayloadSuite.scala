@@ -84,6 +84,32 @@ final class MaskingPayloadSuite extends FunSuite {
     assertEquals(MaskingEngine.maskText(List(removeEverything), orders, Target.Value, "secret"), "")
   }
 
+  // A document labelled JSON is re-parsed, walked and re-printed here, all three recursively. One nested a few
+  // thousand levels deep overflowed the stack, and StackOverflowError is fatal to Cats Effect: the process
+  // halted. The serdes refuse such documents now, but this is the last walker before the screen and must not
+  // depend on every serde, including a third-party one, having done so. Review R2 finding
+  // h-serde-untrusted-decode-1.
+  test("a payload labelled JSON nested past the limit is masked as text instead of overflowing the stack") {
+    val depth = 3000
+    val deep = ("""{"card":""" * depth) + "\"4111\"" + ("}" * depth)
+    val outcome = new java.util.concurrent.atomic.AtomicReference[Either[Throwable, String]]()
+    // A 256 KiB stack, so that the overflow does not depend on how far the JIT has compiled the walk.
+    val thread = new Thread(
+      null,
+      () =>
+        outcome.set(
+          try Right(mask(List(onField(stars, "card")), PayloadKind.Json, deep))
+          catch { case thrown: Throwable => Left(thrown) }
+        ),
+      "masking-small-stack",
+      256L * 1024L
+    )
+    thread.start()
+    thread.join()
+
+    assertEquals(outcome.get().left.map(_.toString), Right("*" * deep.length))
+  }
+
   test("no rule in scope leaves both forms exactly as they arrived") {
     val keyScoped = MaskingRule(stars, None, None, Some("orders".r), None)
 

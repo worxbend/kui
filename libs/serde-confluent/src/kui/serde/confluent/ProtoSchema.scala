@@ -228,6 +228,15 @@ final case class ProtoField(
 
 object ProtoSchema {
 
+  /** How deeply message declarations may nest in a schema, and how deeply messages may nest in a record.
+    *
+    * One number for both because it is Protobuf's own: `CodedInputStream`'s default recursion limit is 100.
+    * The parser below and the decoder in `ProtobufPayload` recurse once per level, a schema and a record both
+    * come from somebody else, and the `StackOverflowError` an unbounded recursion ends in is fatal to Cats
+    * Effect. No schema a person writes nests declarations anywhere near this deep.
+    */
+  private[confluent] val MaxNesting: Int = 100
+
   /** Parses `.proto` source text, or says what stopped it.
     *
     * The failure text is written for the operator looking at a record that would not decode, so it names the
@@ -238,6 +247,14 @@ object ProtoSchema {
     try Right(new Parser(Lexer.tokenize(source)).file())
     catch {
       case failure: ParseFailure => Left(failure.explanation)
+      // The counter in `message` refuses past `MaxNesting`. A schema that still overflows — the counter is
+      // one frame late, or the lexer meets something the counter does not see — must not escape as a fatal
+      // `StackOverflowError`, which Cats Effect answers by halting the process.
+      case _: StackOverflowError =>
+        Left(
+          s"the schema nests message declarations more than $MaxNesting levels deep, which is Protobuf's " +
+            "own limit and deeper than KUI reads a schema"
+        )
     }
 
   final private class ParseFailure(val explanation: String) extends Exception(explanation)
@@ -320,6 +337,9 @@ object ProtoSchema {
   final private class Parser(initial: List[String]) {
 
     private var tokens: List[String] = initial
+
+    /** How many `message` declarations enclose the one being read. */
+    private var nesting: Int = 0
 
     private def peek: Option[String] = tokens.headOption
 
@@ -405,6 +425,12 @@ object ProtoSchema {
 
     private def message(): ProtoMessage = {
       val name = next()
+      nesting += 1
+      if nesting > MaxNesting then
+        fail(
+          s"the schema nests message declarations more than $MaxNesting levels deep, which is Protobuf's " +
+            "own limit and deeper than KUI reads a schema"
+        )
       expect("{")
       val fields = List.newBuilder[ProtoField]
       val nested = List.newBuilder[ProtoMessage]
@@ -457,6 +483,7 @@ object ProtoSchema {
           case None => fail(s"the schema text ended inside message '$name'")
         }
 
+      nesting -= 1
       ProtoMessage(name, fields.result(), nested.result() ++ mapEntries.result(), enums.result())
     }
 

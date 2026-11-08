@@ -13,6 +13,8 @@ import com.networknt.schema.{
 }
 import io.circe.parser
 
+import kui.kernel.serde.JsonNesting
+
 /** JSON Schema payloads: the bytes are JSON, and the schema decides whether they are *allowed*.
   *
   * The asymmetry between the two directions is deliberate and is the whole content of this file.
@@ -52,17 +54,20 @@ object JsonSchemaPayload {
         Left(s"the registry's JSON Schema could not be parsed: ${message(failure)}")
     }
 
-  /** The payload, as text, with no judgement passed on it beyond "is this JSON at all". */
+  /** The payload, as text, with no judgement passed on it beyond "is this JSON at all" — and "is it shallow
+    * enough to walk", because the text is marked JSON and masking, filtering and the browser all walk it
+    * recursively afterwards (`JsonNesting`).
+    */
   def decode(body: Array[Byte]): Either[String, String] = {
     val text = new String(body, StandardCharsets.UTF_8)
     parser
       .parse(text)
-      .map(_ => text)
       .left
       .map(failure =>
         "the payload after the Schema Registry header is not valid JSON, although the record claims a " +
           s"JSON Schema: ${failure.message}"
       )
+      .flatMap(_ => Either.cond(!JsonNesting.exceeds(text, JsonNesting.MaxDepth), text, tooDeep("payload")))
   }
 
   /** Text to bytes, refused unless the schema accepts it.
@@ -71,14 +76,31 @@ object JsonSchemaPayload {
     * five submits to fill in, and the validator already knows all of them.
     */
   def encode(schema: JsonSchemaDocument, json: String): Either[String, Array[Byte]] =
-    try {
-      val problems = schema.validate(json, InputFormat.JSON).asScala.toList.map(_.getMessage)
-      if problems.isEmpty then Right(json.getBytes(StandardCharsets.UTF_8))
-      else Left(s"this does not match the topic's JSON Schema: ${problems.mkString("; ")}")
-    } catch {
-      case NonFatal(failure) =>
-        Left(s"this could not be checked against the topic's JSON Schema: ${message(failure)}")
-    }
+    if JsonNesting.exceeds(json, JsonNesting.MaxDepth) then Left(tooDeep("document"))
+    else
+      try {
+        val problems = schema.validate(json, InputFormat.JSON).asScala.toList.map(_.getMessage)
+        if problems.isEmpty then Right(json.getBytes(StandardCharsets.UTF_8))
+        else Left(s"this does not match the topic's JSON Schema: ${problems.mkString("; ")}")
+      } catch {
+        // The validator follows `$ref`s as it meets them, so a schema that refers to itself on a path every
+        // document takes (`{"$ref": "#"}` is the smallest) recurses until the stack runs out, whatever the
+        // input. A `StackOverflowError` is fatal to Cats Effect and would halt the process, so it is caught
+        // by name here, once the validator has unwound: validation is a pure function and leaves nothing
+        // half-done behind it.
+        case _: StackOverflowError =>
+          Left(
+            "this could not be checked against the topic's JSON Schema: validating it recursed without end, " +
+              "which almost always means the schema refers to itself (a `$ref` to an enclosing schema) on a " +
+              "path every document takes. Fix the schema in the registry"
+          )
+        case NonFatal(failure) =>
+          Left(s"this could not be checked against the topic's JSON Schema: ${message(failure)}")
+      }
+
+  private def tooDeep(what: String): String =
+    s"the $what nests objects and arrays more than ${JsonNesting.MaxDepth} levels deep, and KUI reads and " +
+      "writes JSON only up to that depth: every level costs a stack frame wherever the document is processed"
 
   private def message(failure: Throwable): String =
     Option(failure.getMessage).filter(_.nonEmpty).getOrElse(failure.getClass.getSimpleName)

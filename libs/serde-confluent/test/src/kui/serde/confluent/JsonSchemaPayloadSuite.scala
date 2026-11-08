@@ -83,4 +83,34 @@ final class JsonSchemaPayloadSuite extends FunSuite {
   test("schema text that is not a schema fails at parse time with a message naming the failure") {
     assert(JsonSchemaPayload.parse("not a schema").left.exists(_.contains("could not be parsed")))
   }
+
+  // -------------------------------------------------------------------------------------------
+  // Nesting. Review R2 finding h-serde-untrusted-decode-1: a StackOverflowError is fatal to Cats Effect, so a
+  // payload or a schema that recursed without bound halted the process instead of failing one record.
+  // -------------------------------------------------------------------------------------------
+
+  private def nestedObjects(depth: Int): String = ("""{"a":""" * depth) + "0" + ("}" * depth)
+
+  test("a schema that refers to itself on every path is refused at the produce form, not overflowed") {
+    // `{"$ref":"#"}` parses and is a valid schema; validating anything against it recurses without end.
+    val cyclic = JsonSchemaPayload.parse("""{"$ref":"#"}""").fold(why => fail(why), identity)
+    Isolated.onSmallStack(JsonSchemaPayload.encode(cyclic, "{}")) match {
+      case Left(thrown) => fail(s"encoding threw $thrown instead of returning a Left")
+      case Right(encoded) => assert(encoded.left.exists(_.contains("refers to itself")), encoded)
+    }
+  }
+
+  test("a payload nested past the limit is refused on read, so nothing downstream has to walk it") {
+    val decoded = JsonSchemaPayload.decode(nestedObjects(3000).getBytes("UTF-8"))
+    assert(decoded.left.exists(_.contains("256 levels")), decoded.map(_.length))
+  }
+
+  test("a document nested past the limit is refused at the produce form before it is validated") {
+    val permissive = JsonSchemaPayload.parse("{}").fold(why => fail(why), identity)
+    Isolated.onSmallStack(JsonSchemaPayload.encode(permissive, nestedObjects(3000))) match {
+      case Left(thrown) => fail(s"encoding threw $thrown instead of returning a Left")
+      case Right(encoded) => assert(encoded.left.exists(_.contains("256 levels")), encoded.map(_.length))
+    }
+    assert(JsonSchemaPayload.encode(permissive, nestedObjects(50)).isRight)
+  }
 }

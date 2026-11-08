@@ -355,6 +355,60 @@ final class ProtobufPayloadSuite extends FunSuite {
     malformed.foreach(bytes => assert(ProtobufPayload.decode(schema, bytes).isLeft, bytes.toList))
   }
 
+  // -------------------------------------------------------------------------------------------
+  // Nesting. Review R2 finding h-serde-untrusted-decode-1: a recursive message type, or a schema that
+  // nests declarations deeply enough, recursed once per level with no floor, and the StackOverflowError
+  // that ended it is fatal to Cats Effect and halts the process.
+  // -------------------------------------------------------------------------------------------
+
+  private val recursive: ProtoFile =
+    ProtoSchema.parse("""syntax = "proto3"; message Node { Node child = 1; }""").fold(fail(_), identity)
+
+  /** A `Node` with `levels` nested `child` fields, the innermost one empty, behind a "first message" index.
+    *
+    * Built from the inside out by length alone: every level is a tag and its body's length, and the bodies
+    * are exactly the levels that follow, so the bytes are the tags and lengths in order with nothing between.
+    */
+  private def nestedNodes(levels: Int): Array[Byte] = {
+    def varintSize(value: Int): Int = if value < 0x80 then 1 else 1 + varintSize(value >>> 7)
+    val lengths = (1 until levels).scanLeft(0)((inner, _) => 1 + varintSize(inner) + inner)
+    val out = new ByteArrayOutputStream()
+    out.write(0)
+    lengths.reverseIterator.foreach { length =>
+      out.write(0x0a)
+      writeVarint(out, length.toLong)
+    }
+    out.toByteArray
+  }
+
+  test("a recursive message nested thousands of levels deep is refused instead of overflowing the stack") {
+    Isolated.onSmallStack(ProtobufPayload.decode(recursive, nestedNodes(10000))) match {
+      case Left(thrown) => fail(s"decoding threw $thrown instead of returning a Left")
+      case Right(decoded) => assert(decoded.left.exists(_.contains("100 levels")), decoded)
+    }
+  }
+
+  test("a recursive message within the nesting limit still decodes") {
+    val json = ProtobufPayload
+      .decode(recursive, nestedNodes(50))
+      .flatMap(text => parser.parse(text).left.map(_.getMessage))
+      .fold(fail(_), identity)
+    val innermost =
+      (1 to 50).foldLeft(json.hcursor: io.circe.ACursor)((cursor, _) => cursor.downField("child"))
+    assertEquals(innermost.focus, Some(io.circe.Json.obj()))
+  }
+
+  test("a schema that nests message declarations past the limit is refused instead of overflowing") {
+    val levels = 100000
+    val source = ("message M { " * levels) + ("}" * levels)
+    Isolated.onSmallStack(ProtoSchema.parse(source)) match {
+      case Left(thrown) => fail(s"parsing threw $thrown instead of returning a Left")
+      case Right(parsed) => assert(parsed.left.exists(_.contains("100 levels")), parsed.map(_.messages.size))
+    }
+    val shallow = ("message M { " * 20) + ("}" * 20)
+    assert(ProtoSchema.parse(shallow).isRight)
+  }
+
   private def hex(text: String): Array[Byte] =
     text.grouped(2).map(pair => Integer.parseInt(pair, 16).toByte).toArray
 

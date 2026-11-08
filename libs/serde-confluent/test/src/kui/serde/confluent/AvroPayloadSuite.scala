@@ -86,4 +86,42 @@ final class AvroPayloadSuite extends FunSuite {
     assertEquals(cursor.downField("shipping").downField("city").as[String], Right("Prague"))
     assertEquals(cursor.downField("shipping").downField("cost").as[Double], Right(9.5))
   }
+
+  // -------------------------------------------------------------------------------------------
+  // Schemas written by somebody else. Review R2 finding h-serde-untrusted-decode-1: a recursive record used to
+  // end in a StackOverflowError, which `NonFatal` does not catch and which Cats Effect answers by halting
+  // the process.
+  // -------------------------------------------------------------------------------------------
+
+  private def parsed(definition: String): org.apache.avro.Schema =
+    AvroPayload.parse(definition).fold(why => fail(why), identity)
+
+  /** A linked list: legal, common in tree-shaped data, and recursive. */
+  private val recursive: org.apache.avro.Schema =
+    parsed("""{"type":"record","name":"Node","fields":[{"name":"next","type":["null","Node"]}]}""")
+
+  /** `levels` nodes: union branch 1 (zig-zag `0x02`) per level, then branch 0, `null`, to end the list. */
+  private def linkedList(levels: Int): Array[Byte] = Array.fill(levels)(0x02.toByte) :+ 0.toByte
+
+  test("a recursive record nested far deeper than any stack is refused instead of overflowing it") {
+    Isolated.onSmallStack(AvroPayload.decode(recursive, linkedList(100000))) match {
+      case Left(thrown) => fail(s"decoding threw $thrown instead of returning a Left")
+      case Right(decoded) => assert(decoded.left.exists(_.contains("256 levels")), decoded)
+    }
+  }
+
+  test("a recursive record within the nesting limit still decodes and encodes back") {
+    val bytes = linkedList(100)
+    val json = AvroPayload.decode(recursive, bytes).fold(why => fail(why), identity)
+    assert(json.startsWith("""{"next":{"Node":{"next":"""), json.take(60))
+    assertEquals(AvroPayload.encode(recursive, json).map(_.toList), Right(bytes.toList))
+  }
+
+  test("JSON for a recursive schema nested past the limit is refused at the produce form") {
+    val deep = ("""{"next":{"Node":""" * 2000) + """{"next":null}""" + ("}}" * 2000)
+    Isolated.onSmallStack(AvroPayload.encode(recursive, deep)) match {
+      case Left(thrown) => fail(s"encoding threw $thrown instead of returning a Left")
+      case Right(encoded) => assert(encoded.left.exists(_.contains("256 levels")), encoded.map(_.length))
+    }
+  }
 }
