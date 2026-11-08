@@ -98,6 +98,25 @@ final class ResetPlanTokenSuite extends KuiIOSuite {
     }
   }
 
+  test("aTokenBindsTheCommittedOffsetEachPartitionWasPlannedAgainst") {
+    // `none` has to round-trip as absence. Encoding it as `0` would let a later commit of zero pass the
+    // staleness check, which is the partition the group had never committed for.
+    val withCommit =
+      PlannedPartition(GroupFixtures.partition(0), Some(Offset.unsafe(40L)), Offset.unsafe(10L), Some(-30L))
+    val without = PlannedPartition(GroupFixtures.partition(1), None, Offset.unsafe(0L), None)
+    val now = Instant.parse("2026-09-11T09:00:00Z")
+
+    for {
+      token <- tokens.mint(ConsumerRig.Cluster, planOf(List(withCommit, without)), now.plusSeconds(60L))
+      verified <- tokens.verify(ConsumerRig.Cluster, group, token, now)
+    } yield verified match {
+      case Right(plan) =>
+        assertEquals(plan.partitions.map(_.current.map(_.value)), List(Some(40L), None))
+        assertEquals(plan.partitions.map(_.proposed.value), List(10L, 0L))
+      case Left(error) => fail(s"the token did not verify: $error")
+    }
+  }
+
   test("aTokenMintedFromAnUnsortedPlanVerifiesToTheSortedOffsets") {
     val shuffled = List(plannedPartition(2, 30L), plannedPartition(0, 10L), plannedPartition(1, 20L))
     val now = Instant.parse("2026-09-11T09:00:00Z")

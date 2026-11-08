@@ -84,8 +84,9 @@ object ConsumerMutationRoutes {
     *
     * It answers with the plan that was applied so the wizard can show what happened without asking again —
     * and so that what it shows is what was written, rather than a second resolution of the same request
-    * against a cluster that has moved on. The token is echoed back and the expiry recomputed from now,
-    * because the plan it named has already been spent: the document is a receipt, not an offer.
+    * against a cluster that has moved on. The token is echoed back with an expiry of now because the document
+    * is a receipt, not an offer. The signature itself stays valid until its own TTL; apply refuses it once
+    * the commits it was planned against have moved, which a successful write does.
     */
   private def applyReset[F[_]: Async](
       reset: OffsetResetUseCase[F],
@@ -126,7 +127,11 @@ object ConsumerMutationRoutes {
 
   // -----------------------------------------------------------------------------------------------
 
-  /** How long an applied plan's receipt claims to be valid for. Zero: it is already spent. */
+  /** How long an applied plan's receipt claims to be valid for. Zero, because the body is a receipt.
+    *
+    * This does not mark the signature spent. Apply does that by refusing a token whose bound commits no
+    * longer match the group.
+    */
   private val AppliedTokenTtl: FiniteDuration = scala.concurrent.duration.Duration.Zero
 
   private def expiryOf(now: Instant): Instant = now.plusMillis(AppliedTokenTtl.toMillis)

@@ -170,6 +170,62 @@ final class MutationSuite extends KuiIOSuite {
     }
   }
 
+  test("reset apply refuses when committed offsets moved since the plan") {
+    // SHIFT_BY is resolved from the committed offset the operator was shown. A token that binds only
+    // the proposed absolute offsets will still write them after the group has consumed and stopped
+    // again, which is a different rewind from the one on the screen.
+    val partition = GroupFixtures.partition(0)
+    val plannedAgainst = window.copy(
+      end = Map(partition -> Offset.unsafe(10_000L)),
+      committed = Map(partition -> Offset.unsafe(1_000L))
+    )
+
+    for {
+      rigged <- rig(emptyGroup)
+      (port, _, guard, _) = rigged
+      reset <- resetUseCase(port, guard, readOnly = false)
+      _ <- port.state.update(_.copy(window = Right(plannedAgainst)))
+      planned <- reset.plan(ConsumerRig.Cluster, group, scope, ResetSpec.ShiftBy(-100L))
+      token = planned.map(_.token).getOrElse(fail(s"no plan: $planned"))
+      _ <- port.state.update(
+        _.copy(window = Right(plannedAgainst.copy(committed = Map(partition -> Offset.unsafe(5_000L)))))
+      )
+      result <- reset.apply(Caller, ConsumerRig.Cluster, group, token)
+      state <- port.state.get
+    } yield {
+      assertEquals(result.left.map(_.code), Left(ErrorCode.InvalidState))
+      assert(
+        result.left.exists(_.message.contains("committed offsets moved")),
+        clue = result
+      )
+      assertEquals(state.applied, Nil)
+    }
+  }
+
+  test("a reset token cannot be applied again after the write moved the commits") {
+    val partition = GroupFixtures.partition(0)
+
+    for {
+      rigged <- rig(emptyGroup)
+      (port, _, guard, _) = rigged
+      reset <- resetUseCase(port, guard, readOnly = false)
+      planned <- reset.plan(ConsumerRig.Cluster, group, scope, ResetSpec.ToEarliest)
+      token = planned.map(_.token).getOrElse(fail(s"no plan: $planned"))
+      first <- reset.apply(Caller, ConsumerRig.Cluster, group, token)
+      // The broker's committed offset is now the one just written. A second tab re-sending the
+      // same token inside its five-minute life must not rewind the group again.
+      _ <- port.state.update(
+        _.copy(window = Right(window.copy(committed = Map(partition -> Offset.unsafe(0L)))))
+      )
+      second <- reset.apply(Caller, ConsumerRig.Cluster, group, token)
+      state <- port.state.get
+    } yield {
+      assert(first.isRight, clue = first)
+      assertEquals(second.left.map(_.code), Left(ErrorCode.InvalidState))
+      assertEquals(state.applied.map(_._2.values.map(_.value).toList), List(List(0L)))
+    }
+  }
+
   test("a plan resolves the spec against live offsets and returns what would be written") {
     for {
       rigged <- rig(emptyGroup)
@@ -243,10 +299,9 @@ final class MutationSuite extends KuiIOSuite {
   }
 
   test("the apply receipt says what each partition's offset was, not a dash") {
-    // The plan token carries the offsets that will be *written* and nothing else, so a plan read back
-    // out of one has no `current` in it. The receipt is the document the wizard renders after the
-    // write, and its whole job is to say "partition 0 moved from 40 to 0" — which it cannot do from
-    // the token alone. The offsets the apply step already reads for the audit record are what fill it.
+    // The receipt is the document the wizard renders after the write, and its whole job is to say
+    // "partition 0 moved from 40 to 0". That "from" is the pre-write reading the audit record uses,
+    // not a zero invented for a partition the group had never committed.
     for {
       rigged <- rig(emptyGroup)
       (port, _, guard, _) = rigged

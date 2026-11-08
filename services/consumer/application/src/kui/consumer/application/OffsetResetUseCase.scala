@@ -142,6 +142,9 @@ object OffsetResetUseCase {
           _ <- requireEmpty(port, group)
           window <- EitherTLike(port.offsetWindow(group, plan.scope, None))
           _ <- EitherTLike(Temporal[F].pure(requireRetainedTargets(plan, window)))
+          // After the range check, and before the write: a target still inside the log can still be a
+          // different reset from the one the operator confirmed, once the commits it was planned from moved.
+          _ <- EitherTLike(Temporal[F].pure(requireCommitsUnmoved(plan, window)))
           before = window.committed.view.filterKeys(plan.offsets.contains).toMap
           _ <- EitherTLike(
             guard.guard(
@@ -153,10 +156,8 @@ object OffsetResetUseCase {
               AuditOffsets.of(plan.offsets)
             )(port.applyOffsets(group, plan.offsets))
           )
-          // The receipt says what each partition's offset *was*, and this is the only place that
-          // knows: the token carries the proposed offsets and nothing else, so a plan read back out
-          // of one has no `current` in it. Without this the wizard's receipt renders an em dash in
-          // every "from" cell, on the one screen whose entire job is to say what moved where.
+          // The receipt repeats the pre-write reading the audit record uses, which `requireCommitsUnmoved`
+          // has just required to be the commits the token bound.
         } yield plan.withCurrent(before)).value
       }
 
@@ -199,6 +200,20 @@ object OffsetResetUseCase {
                   }
               }
           }
+        )
+
+      /** The commits the plan was computed from. Compared per planned partition, so a commit outside the
+        * scope does not make the plan stale, and a missing commit stays missing rather than becoming zero.
+        */
+      private def requireCommitsUnmoved(plan: ResetPlan, window: OffsetWindow): Either[KuiError, Unit] =
+        Either.cond(
+          plan.partitions.forall { planned =>
+            window.committed.get(planned.partition).map(_.value) == planned.current.map(_.value)
+          },
+          (),
+          ApplicationError.InvalidState(
+            "the group's committed offsets moved since the plan; preview again"
+          )
         )
 
       /** Never clamp an approved target again: retention requires a new preview, not a different reset. */

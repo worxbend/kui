@@ -23,6 +23,11 @@ import kui.kernel.{ClusterId, GroupId, Offset, PartitionId, Secret, TopicName}
   * plan, or because a second tab planned something else five minutes ago. The apply endpoint takes only a
   * token and never a raw spec, so there is no path by which an unshown offset can be written.
   *
+  * The payload also binds the committed offset each partition had when the plan was computed (`none` when it
+  * had none). Apply refuses when those have moved, so a shift planned against one position is not written
+  * after the group has consumed further, and a token cannot be replayed once the write itself moved the
+  * commits.
+  *
   * The wire form is `base64url(payload) "." base64url(HMAC-SHA256(payload))`, and the payload is a
   * hand-written delimited line rather than a derived encoding, for the same reason the browse cursor's is: it
   * is a compatibility surface, and a renamed field must not silently invalidate every token in flight.
@@ -46,11 +51,18 @@ trait PlanToken[F[_]] {
 object PlanToken {
 
   private val Algorithm: String = "HmacSHA256"
-  private val Version: String = "v1"
+
+  /** `v2` signs the committed offset beside each proposed one. A `v1` token has no such binding and is
+    * refused: its five-minute life is shorter than a deploy, and accepting it would re-open the stale write.
+    */
+  private val Version: String = "v2"
   private val Separator: Char = '.'
   private val Field: Char = '|'
   private val Entry: Char = ','
   private val Pair: Char = ':'
+
+  /** Explicit, not an empty field: an empty third column is a truncated entry, and `0` is a real offset. */
+  private val AbsentCommit: String = "none"
 
   /** Uses the existing cursor key (ADR-026): no new secret, and no new configuration for an operator to get
     * wrong. The two uses are separated by the payload's own version prefix and by the binding it carries.
@@ -128,7 +140,10 @@ object PlanToken {
   private def render(plan: ResetPlan, cluster: ClusterId, expiresAt: Instant): String = {
     val offsets = plan.partitions
       .sortBy(_.partition.partition.value)
-      .map(one => s"${one.partition.partition.value}$Pair${one.proposed.value}")
+      .map { one =>
+        val committed = one.current.fold(AbsentCommit)(_.value.toString)
+        s"${one.partition.partition.value}$Pair${one.proposed.value}$Pair$committed"
+      }
       .mkString(Entry.toString)
 
     List(
@@ -186,16 +201,27 @@ object PlanToken {
         .toList
         .traverse { entry =>
           entry.split(Pair) match {
-            case Array(partition, offset) =>
+            case Array(partition, offset, committed) =>
               for {
                 number <- partition.toIntOption
                 at <- offset.toLongOption
                 id <- PartitionId.from(number).toOption
                 value <- Offset.from(at).toOption
-              } yield PlannedPartition(kui.kernel.TopicPartition(topic, id), None, value, None)
+                current <- parseCommit(committed)
+              } yield PlannedPartition(
+                kui.kernel.TopicPartition(topic, id),
+                current,
+                value,
+                current.map(seen => value.value - seen.value)
+              )
             case _ => None
           }
         }
+
+  /** `Some(None)` is a partition that had no commit. `None` is a column this decoder does not understand. */
+  private def parseCommit(raw: String): Option[Option[Offset]] =
+    if raw == AbsentCommit then Some(None)
+    else raw.toLongOption.flatMap(value => Offset.from(value).toOption).map(Some(_))
 
   private def specOf(wire: String): ResetSpec = wire match {
     case "EARLIEST" => ResetSpec.ToEarliest

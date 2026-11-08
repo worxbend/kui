@@ -174,21 +174,13 @@ final case class ResetPlan(
   def offsets: Map[TopicPartition, Offset] =
     partitions.map(planned => planned.partition -> planned.proposed).toMap
 
-  /** The same plan, with each partition's `current` — and therefore its `delta` — filled in from a reading of
-    * the group's committed offsets.
+  /** The same plan, with each partition's `current` — and therefore its `delta` — taken from a reading of the
+    * group's committed offsets immediately before the write.
     *
-    * It exists because a plan that came back out of a [[kui.consumer.application.PlanToken]] has no `current`
-    * in it. The token carries the offsets that will be *written*, which is the whole of what it has to
-    * guarantee, and carrying the ones that were already there would make the token bigger for a value that
-    * changes nothing about what the apply step does.
-    *
-    * That left the apply *receipt* — the document the wizard renders after the write — reporting `null` for
-    * every partition's current offset, so a screen whose whole job is to say "partition 3 moved from 9 to 16"
-    * could only say "partition 3 moved from — to 16". The apply step already reads those offsets immediately
-    * before the write, for the audit record; this puts the same reading into the answer.
-    *
-    * A partition the reading did not cover keeps its `None`, because "nobody knows" is a true statement and
-    * `0` is not.
+    * The plan token already carries those commits, so apply can refuse when they have moved. The receipt
+    * still copies this reading rather than trusting the token alone: it is the reading the audit record uses,
+    * and the two answers have to name the same offsets. A partition the reading did not cover keeps its
+    * `None`, because "nobody knows" is a true statement and `0` is not.
     */
   def withCurrent(committed: Map[TopicPartition, Offset]): ResetPlan =
     copy(partitions = partitions.map { planned =>
