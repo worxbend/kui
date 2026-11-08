@@ -34,7 +34,11 @@ trait ClusterAdminClients[F[_]] {
     */
   def connectionFor(profile: ClusterProfile): F[ClusterConnection]
 
-  /** Hold the profile generation through pool acquisition and use. */
+  /** Hold the profile generation through pool acquisition and use.
+    *
+    * Calls on the same generation run together. A different generation waits until they have finished and
+    * only then evicts, so an older call cannot rebuild the client that eviction just closed.
+    */
   def withConnection[A](profile: ClusterProfile)(call: ClusterConnection => F[A]): F[A]
 
   /** Closes and forgets this cluster's client. The next call builds a new one.
@@ -55,6 +59,19 @@ trait ClusterAdminClients[F[_]] {
 
 object ClusterAdminClients {
 
+  /** How many calls on one cluster may hold a lease at once.
+    *
+    * A generation change acquires every permit, so this is also the overlap bound. The snapshot refresh fans
+    * out to three reads and a page talks to one cluster at a time; past this a call waits instead of the
+    * semaphore overflowing.
+    */
+  private val ShareCapacity = 1024L
+
+  /** `shares` is the lease taken for the whole of a call. `decision` is held only while `known` is read and
+    * updated, never across the call.
+    */
+  final private case class Gate[F[_]](shares: Semaphore[F], decision: Semaphore[F])
+
   /** Registered clusters are evicted from the pool when the resource closes.
     *
     * The pool closes its own clients when *it* closes, so this matters only when the registry is scoped more
@@ -69,7 +86,7 @@ object ClusterAdminClients {
     Resource.make(
       for {
         known <- cats.effect.Ref.of[F, Map[ClusterId, ClusterProfile]](Map.empty)
-        gates <- cats.effect.Ref.of[F, Map[ClusterId, Semaphore[F]]](Map.empty)
+        gates <- cats.effect.Ref.of[F, Map[ClusterId, Gate[F]]](Map.empty)
         closed <- cats.effect.Ref.of[F, Boolean](false)
       } yield new Impl[F](pool, logger, known, gates, closed, resolve)
     )(_.releaseAll)
@@ -78,63 +95,139 @@ object ClusterAdminClients {
       pool: AdminClientPool[F],
       logger: StructuredLogger[F],
       known: cats.effect.Ref[F, Map[ClusterId, ClusterProfile]],
-      gates: cats.effect.Ref[F, Map[ClusterId, Semaphore[F]]],
+      gates: cats.effect.Ref[F, Map[ClusterId, Gate[F]]],
       closed: cats.effect.Ref[F, Boolean],
       resolve: Option[ClusterId => F[Option[ClusterProfile]]]
   ) extends ClusterAdminClients[F] {
 
-    private def gateFor(id: ClusterId): F[Semaphore[F]] =
-      Semaphore[F](1L).flatMap(fresh =>
-        gates.modify(current =>
-          (current.updated(id, current.getOrElse(id, fresh)), current.getOrElse(id, fresh))
-        )
-      )
+    private def gateFor(id: ClusterId): F[Gate[F]] =
+      gates.get.flatMap {
+        case current if current.contains(id) => current(id).pure[F]
+        case _ =>
+          for {
+            shares <- Semaphore[F](ShareCapacity)
+            decision <- Semaphore[F](1L)
+            stored <- gates.modify { current =>
+              val gate = current.getOrElse(id, Gate(shares, decision))
+              (current.updated(id, gate), gate)
+            }
+          } yield stored
+      }
 
     def connectionFor(profile: ClusterProfile): F[ClusterConnection] =
       withConnection(profile)(_.pure[F])
 
     def withConnection[A](profile: ClusterProfile)(call: ClusterConnection => F[A]): F[A] =
-      gateFor(profile.id).flatMap(
-        _.permit.use(_ =>
-          closed.get.flatMap {
-            case true => Async[F].raiseError(new IllegalStateException("cluster admin clients are closed"))
-            case false =>
-              resolve match {
-                case None => select(profile, authoritative = false).flatMap(call)
-                case Some(current) =>
-                  current(profile.id).flatMap {
-                    case Some(latest) => select(latest, authoritative = true).flatMap(call)
-                    case None => Async[F].raiseError(new IllegalStateException("cluster profile was removed"))
-                  }
+      gateFor(profile.id).flatMap { gate =>
+        // One share for the whole call when the generation does not have to move. `None` means it
+        // does: the share is released before the change is taken, or the call would wait for itself.
+        gate.shares.permit
+          .use(_ =>
+            prepared(gate, profile).flatMap {
+              case Some(connection) => call(connection).map(_.asRight[Unit])
+              case None => ().asLeft[A].pure[F]
+            }
+          )
+          .flatMap {
+            case Right(value) => value.pure[F]
+            case Left(_) => changed(gate, profile)(call)
+          }
+      }
+
+    /** `Some` when this generation can be used now. `None` when a different profile has to be published
+      * first, which takes every share and so cannot be done while this one is held.
+      */
+    private def prepared(gate: Gate[F], profile: ClusterProfile): F[Option[ClusterConnection]] =
+      ensureOpen >> resolveProfile(profile).flatMap {
+        case None => removed
+        case Some((latest, authoritative)) =>
+          gate.decision.permit.use { _ =>
+            known.get.flatMap { current =>
+              if classify(current, latest, authoritative)._2 then Option.empty[ClusterConnection].pure[F]
+              else select(latest, authoritative).map(Some(_))
+            }
+          }
+      }
+
+    /** Publish a different generation, then keep a single share for the call so the calls that were waiting
+      * on this change enter on the new profile instead of queueing behind this one.
+      */
+    private def changed[A](gate: Gate[F], profile: ClusterProfile)(
+        call: ClusterConnection => F[A]
+    ): F[A] =
+      cats.effect.Ref.of[F, Boolean](false).flatMap { downgraded =>
+        // Which permits are still held depends on whether the downgrade below has run. The finaliser
+        // is installed only after `acquireN` succeeds: cancelling a waiter that is still queued must
+        // not release permits it never took, and must not go on to evict.
+        def releaseHeld: F[Unit] =
+          downgraded.get.flatMap {
+            case true => gate.shares.releaseN(1L)
+            case false => gate.shares.releaseN(ShareCapacity)
+          }
+
+        // `bracketFull` so a waiter cancelled while queued leaves the queue instead of acquiring
+        // every share later and evicting. The release runs only after the acquire has succeeded.
+        Async[F].bracketFull[Unit, A](poll => poll(gate.shares.acquireN(ShareCapacity)))(_ =>
+          ensureOpen >> resolveProfile(profile).flatMap {
+            case None => removed
+            case Some((latest, authoritative)) =>
+              // Every share is held, so no other call is inside `select`. Drop back to one before
+              // the call so the waiters enter on the new profile instead of queueing behind it.
+              select(latest, authoritative).flatMap { connection =>
+                Async[F].uncancelable(_ =>
+                  gate.shares.releaseN(ShareCapacity - 1L) >> downgraded.set(true)
+                ) >> call(connection)
               }
           }
-        )
-      )
+        )((_, _) => releaseHeld)
+      }
+
+    private def ensureOpen: F[Unit] =
+      closed.get.flatMap {
+        case true => Async[F].raiseError(new IllegalStateException("cluster admin clients are closed"))
+        case false => Async[F].unit
+      }
+
+    /** `None` when the authoritative registry no longer has this id. The boolean is `authoritative`. */
+    private def resolveProfile(profile: ClusterProfile): F[Option[(ClusterProfile, Boolean)]] =
+      resolve match {
+        case None => Some((profile, false)).pure[F]
+        case Some(current) => current(profile.id).map(_.map(latest => (latest, true)))
+      }
+
+    private def removed[A]: F[A] =
+      Async[F].raiseError(new IllegalStateException("cluster profile was removed"))
+
+    private def classify(
+        current: Map[ClusterId, ClusterProfile],
+        profile: ClusterProfile,
+        authoritative: Boolean
+    ): (ClusterProfile, Boolean) =
+      current.get(profile.id) match {
+        case Some(seen)
+            if (!authoritative && seen.version.value > profile.version.value) || seen == profile =>
+          (seen, false)
+        case Some(_) => (profile, true)
+        case None => (profile, false)
+      }
 
     private def select(profile: ClusterProfile, authoritative: Boolean): F[ClusterConnection] =
-      // The gate spans selection, eviction and use. Evict before publishing the generation;
-      // a failed eviction must be retried. The live registry also handles removal/recreation,
-      // whose store version can restart rather than being globally monotonic.
-      Async[F]
-        .uncancelable { _ =>
-          known.get.flatMap { current =>
-            val (selected, stale) = current.get(profile.id) match {
-              case Some(seen)
-                  if (!authoritative && seen.version.value > profile.version.value) || seen == profile =>
-                (seen, false)
-              case Some(_) => (profile, true)
-              case None => (profile, false)
-            }
-            (if stale then
-               logger.info(
-                 s"cluster ${profile.id.value} moved to profile version ${profile.version.value}; " +
-                   "its admin client will be rebuilt"
-               ) >> pool.evict(profile.id)
-             else Async[F].unit) >> known
-              .update(_.updated(profile.id, selected))
-              .as(ClusterProfileConnection.of(selected))
-          }
+      // Evict before publishing the generation, and do both uncancellably. A cancellation between
+      // them would leave `known` on the new profile while the pool still held the old client. The
+      // live registry also handles removal and recreation, whose store version can restart.
+      Async[F].uncancelable { _ =>
+        known.get.flatMap { current =>
+          val (selected, stale) = classify(current, profile, authoritative)
+          (if stale then
+             logger.info(
+               s"cluster ${profile.id.value} moved to profile version ${profile.version.value}; " +
+                 "its admin client will be rebuilt"
+             ) >> pool.evict(profile.id)
+           else Async[F].unit) >> known
+            .update(_.updated(profile.id, selected))
+            .as(ClusterProfileConnection.of(selected))
         }
+      }
 
     def invalidate(id: ClusterId): F[Unit] =
       Async[F].uncancelable(_ => pool.invalidate(id))
@@ -145,7 +238,9 @@ object ClusterAdminClients {
     def releaseAll: F[Unit] =
       Async[F].uncancelable { _ =>
         closed.set(true) >> gates.get.flatMap(_.toList.traverse_ { (id, gate) =>
-          gate.permit.use(_ => pool.evict(id))
+          Resource
+            .make(gate.shares.acquireN(ShareCapacity))(_ => gate.shares.releaseN(ShareCapacity))
+            .use(_ => pool.evict(id))
         }) >> known.set(Map.empty)
       }
   }

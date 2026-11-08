@@ -24,6 +24,33 @@ final class ClusterAdminClientsSuite extends KuiIOSuite {
       result <- ClusterAdminClients.resource[IO](pool, logger).use(clients => use(clients, pool))
     } yield result
 
+  test("callsForTheSameGenerationOverlap") {
+    // The gate has to keep a profile change from evicting underneath a call that is still using the
+    // old client. It does not have to run every call on that cluster one at a time: the snapshot
+    // refresh starts the version, quorum and log-dir reads together, and a sweep must not make a
+    // broker-config read wait out the whole of describeTopics.
+    registry { (clients, _) =>
+      for {
+        entered <- cats.effect.Ref.of[IO, Int](0)
+        both <- cats.effect.Deferred[IO, Unit]
+        release <- cats.effect.Deferred[IO, Unit]
+        profile = TestProfiles.profile()
+        call = clients.withConnection(profile)(_ =>
+          entered.updateAndGet(_ + 1).flatMap { n =>
+            (if n == 2 then both.complete(()).void else IO.unit) >> release.get
+          }
+        )
+        fiber <- (call, call).parTupled.start
+        overlapped <- both.get.timeout(2.seconds).attempt
+        _ <- release.complete(())
+        _ <- fiber.joinWithNever
+      } yield assert(
+        overlapped.isRight,
+        "both calls must be inside withConnection before either one finishes"
+      )
+    }
+  }
+
   test("generationSelectionAndUseAreAtomicAndOlderCallsCannotRestoreOldSettings") {
     TestControl.executeEmbed(registry { (clients, pool) =>
       for {
