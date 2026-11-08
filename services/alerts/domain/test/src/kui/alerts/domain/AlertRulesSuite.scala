@@ -277,6 +277,54 @@ final class AlertRulesSuite extends FunSuite {
     assertEquals(evaluation.reports.map(_.rule), AlertRule.All)
   }
 
+  test("an acknowledgement of a condition that is still firing does not open a second event") {
+    val first = firstPass(directories(directory("/data", Some(85))))
+    val acknowledged = first.opened.map(
+      _.resolvedBy(now.plusSeconds(30), AlertResolutionKind.Acknowledged, Some("ada"))
+    )
+
+    val second = AlertRules.evaluate(
+      now.plusSeconds(60),
+      limits,
+      directories(directory("/data", Some(85))),
+      acknowledged,
+      first.state
+    )
+
+    assertEquals(second.opened, Nil)
+    assertEquals(second.refreshed.map(_.id), acknowledged.map(_.id))
+    assertEquals(
+      second.refreshed.headOption.flatMap(_.resolution.map(_.kind)),
+      Some(AlertResolutionKind.Acknowledged)
+    )
+    assertEquals(second.resolved, Nil)
+
+    val third = AlertRules.evaluate(
+      now.plusSeconds(120),
+      limits,
+      directories(directory("/data", Some(10))),
+      second.refreshed,
+      second.state
+    )
+
+    assertEquals(third.opened, Nil)
+    assertEquals(third.resolved, Nil)
+    assertEquals(third.released, acknowledged.map(_.id))
+
+    val cleared =
+      acknowledged.map(_.resolvedBy(now.plusSeconds(120), AlertResolutionKind.Cleared, None))
+    val returned = AlertRules.evaluate(
+      now.plusSeconds(180),
+      limits,
+      directories(directory("/data", Some(85))),
+      cleared,
+      third.state
+    )
+
+    assertEquals(returned.opened.size, 1)
+    assert(returned.opened.head.id != acknowledged.head.id)
+  }
+
   test("an event's id survives a second pass, so a screen's acknowledge link does not go stale") {
     val first = firstPass(partitions(offline = 2, underReplicated = 0))
     val second =

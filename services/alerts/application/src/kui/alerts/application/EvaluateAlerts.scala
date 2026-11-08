@@ -41,8 +41,10 @@ object EvaluateAlerts {
           now <- Clock[F].realTimeInstant
           read <- facts.read(cluster)
           state <- store.ruleState(cluster)
-          // The whole feed rather than the open events alone: `limit` of zero is the store's own "counts
-          // only" read, so this asks for what it needs and the page size stays the browser's business.
+          // The whole feed rather than the open events alone. An acknowledgement stays on its row, and a
+          // pass that cannot see that row opens a second event for a condition that is still firing.
+          // `limit` of zero is the store's own "counts only" read, so this asks for what it needs and the
+          // page size stays the browser's business.
           current <- store.feed(cluster, EvaluatingPrincipal, OpenEventsPage, None)
           evaluation = AlertRules.evaluate(now, limits, read, current.events, state)
           _ <- store.record(cluster, evaluation, now)

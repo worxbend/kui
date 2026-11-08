@@ -65,20 +65,64 @@ object AlertRuleState {
 /** What one pass decided.
   *
   * @param opened
-  *   events for conditions that were not already open. A condition that is *still* firing opens nothing: it
-  *   is the same event, and [[refreshed]] carries its latest severity, text and observation time.
+  *   events for conditions that were not already represented. A condition that is *still* firing opens
+  *   nothing, whether or not somebody has acknowledged it: it is the same event, and [[refreshed]] carries
+  *   its latest severity, text and observation time. The acknowledgement stays on that copy.
   * @param resolved
-  *   ids of events whose rule ran and no longer fires. An event whose rule could **not** run is not here:
-  *   closing an alert because KUI stopped being able to check it is the single most dangerous thing an
+  *   ids of **open** events whose rule ran and no longer fires. An event whose rule could **not** run is not
+  *   here: closing an alert because KUI stopped being able to check it is the single most dangerous thing an
   *   alerting system can do.
+  * @param released
+  *   ids of **acknowledged** events whose rule ran and no longer fires. Recording them sets `Cleared`, so a
+  *   condition that later returns is a new event. They are not in [[resolved]]: a pass computed while the
+  *   event was still open must not be able to replace an acknowledgement that landed before it was recorded.
   */
 final case class Evaluation(
     opened: List[AlertEvent],
     refreshed: List[AlertEvent],
     resolved: List[AlertEventId],
     state: AlertRuleState,
-    reports: List[RuleReport]
-)
+    reports: List[RuleReport],
+    released: List[AlertEventId] = Nil
+) {
+
+  /** How one stored event looks after this pass is recorded.
+    *
+    * An open event is cleared or refreshed. An acknowledged event is refreshed only when this pass was
+    * computed *from that acknowledgement*, and cleared only when the pass puts its id in [[released]]. A pass
+    * computed while the event was still open carries the open event in `refreshed` or `resolved` and leaves
+    * the acknowledgement alone: the person won the race.
+    */
+  def project(event: AlertEvent, at: Instant): AlertEvent = {
+    def observe(latest: AlertEvent): AlertEvent =
+      event.copy(
+        severity = latest.severity,
+        title = latest.title,
+        detail = latest.detail,
+        lastSeenAt = at
+      )
+
+    val proposed = refreshed.find(_.id == event.id)
+    val acknowledged = event.resolution.exists(_.kind == AlertResolutionKind.Acknowledged)
+
+    if event.isOpen then
+      if resolved.contains(event.id) then event.resolvedBy(at, AlertResolutionKind.Cleared, None)
+      else proposed.fold(event)(observe)
+    else if acknowledged && released.contains(event.id) then
+      event.resolvedBy(at, AlertResolutionKind.Cleared, None)
+    else if acknowledged then
+      proposed match {
+        case Some(latest) if latest.resolution.exists(_.kind == AlertResolutionKind.Acknowledged) =>
+          observe(latest)
+        case _ => event
+      }
+    else event
+  }
+
+  /** Whether recording this pass can change a feed a subscriber is watching. */
+  def affectsFeed: Boolean =
+    opened.nonEmpty || refreshed.nonEmpty || resolved.nonEmpty || released.nonEmpty
+}
 
 object Evaluation {
   given CanEqual[Evaluation, Evaluation] = CanEqual.derived
@@ -102,8 +146,10 @@ object AlertRules {
   /** One pass.
     *
     * @param open
-    *   the events currently open, as the store holds them. It is an input rather than something this function
-    *   discovers, because "is this already open" is the difference between an alert and a per-minute log.
+    *   the events the store holds, not only the open ones. An acknowledgement is still the condition it was
+    *   opened for: while that row is the latest event for its key, a pass that sees the condition still
+    *   firing refreshes it instead of opening another. Passing only the open rows would relight the bell one
+    *   interval after every acknowledgement.
     */
   def evaluate(
       now: Instant,
@@ -128,7 +174,22 @@ object AlertRules {
       rule
     }.toSet
 
+    // An open row wins over an older acknowledgement for the same key. Otherwise the latest event is the
+    // condition: an acknowledgement silences it, and a later `Cleared` means the episode has ended, so a
+    // return opens a new event instead of staying silent forever.
     val openByKey = open.filter(_.isOpen).map(event => event.key -> event).toMap
+    val silencedByKey = open
+      .groupBy(_.key)
+      .iterator
+      .flatMap { (key, events) =>
+        val latest = events.maxBy(event => (event.openedAt.toEpochMilli, event.id.value))
+        Option.when(
+          !openByKey.contains(key) &&
+            latest.resolution.exists(_.kind == AlertResolutionKind.Acknowledged)
+        )(key -> latest)
+      }
+      .toMap
+    val activeByKey = openByKey ++ silencedByKey
     // Absence from a partial broker response is not a healthy measurement. Disk alerts may only
     // clear when this exact directory supplied a percentage on this pass.
     val measuredDisks = facts.logDirectories.toOption.toList.flatten
@@ -136,12 +197,16 @@ object AlertRules {
       .map(directory => AlertKey(AlertRule.DiskUsage, directory.label))
       .toSet
 
+    def conditionEnded(key: AlertKey): Boolean =
+      ran.contains(key.rule) && !fired.contains(key) &&
+        (key.rule != AlertRule.DiskUsage || measuredDisks.contains(key))
+
     val opened = fired.collect {
-      case (key, firing) if !openByKey.contains(key) =>
+      case (key, firing) if !activeByKey.contains(key) =>
         AlertEvent.open(key, firing.severity, now, firing.title, firing.detail)
     }.toList
 
-    val refreshed = openByKey.toList.flatMap { (key, event) =>
+    val refreshed = activeByKey.toList.flatMap { (key, event) =>
       fired
         .get(key)
         .map(firing =>
@@ -154,10 +219,14 @@ object AlertRules {
         )
     }
 
-    val resolved = openByKey.collect {
+    val resolved = activeByKey.collect {
+      case (key, event) if event.isOpen && conditionEnded(key) => event.id
+    }.toList
+
+    val released = activeByKey.collect {
       case (key, event)
-          if ran.contains(key.rule) && !fired.contains(key) &&
-            (key.rule != AlertRule.DiskUsage || measuredDisks.contains(key)) =>
+          if event.resolution.exists(_.kind == AlertResolutionKind.Acknowledged) &&
+            conditionEnded(key) =>
         event.id
     }.toList
 
@@ -166,7 +235,8 @@ object AlertRules {
       refreshed = refreshed,
       resolved = resolved,
       state = rebalance.state,
-      reports = reports
+      reports = reports,
+      released = released
     )
   }
 

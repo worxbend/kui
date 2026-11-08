@@ -148,9 +148,11 @@ kui:
       # quickstart opens one `storage` warning. `diskUsedCriticalPercent` stays at 90, so a disk
       # that is genuinely nearly full still reads as critical and not as this.
       #
-      # Acknowledging it does not make it permanent: `AlertRules.evaluate` only counts events that
-      # are still open, so the next pass (`evaluationInterval` above, 60s) opens a fresh one. That
-      # is what makes the browser case re-runnable rather than green once per stack.
+      # Acknowledging it silences that condition until the directory drops back under the
+      # threshold. The next pass refreshes the same event instead of opening another, and the
+      # bell stays clear. At this demonstration threshold the directory does not drop under it,
+      # so the browser acknowledgement case is green once per stack: a re-run finds the warning
+      # silenced and skips.
       diskUsedWarningPercent: 1
       diskUsedCriticalPercent: 90
 

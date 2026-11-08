@@ -686,33 +686,24 @@ test.describe("the shell", () => {
    *
    * ## Why it is the last case in this file
    *
-   * Acknowledging closes the event, and the next evaluation pass — 60 seconds later — opens a fresh
-   * one, because `AlertRules.evaluate` counts only events that are still open. That is what makes
-   * this case re-runnable against a long-lived stack. It also means the open count moves twice
-   * without anybody touching the screen, so any case that reads the feed and then asserts a figure
-   * off the page has a window in which the two disagree. Every such case in this suite —
-   * `alerts.spec.ts` in full, the bell's count above, and the panel above — runs before this one,
-   * and nothing after it reads alerts. Ordering is the fix rather than a tolerance, because a
-   * tolerance is an assertion that has stopped being one.
+   * Acknowledging silences the condition until it clears. On the quickstart the disk warning is
+   * opened by a 1% threshold, so it does not clear, and this case consumes the one open event for
+   * the life of the stack. A later case that read the feed would see it empty. Every case that
+   * reads alerts — `alerts.spec.ts` in full, the bell's count above, and the panel above — runs
+   * before this one, and nothing after it reads alerts.
    */
   test("acknowledging an open event moves the bell, with no reload", async ({ page, api }) => {
     /*
-     * IT WAITS FOR THE NEXT EVALUATION PASS RATHER THAN SKIPPING PAST IT.
+     * IT WAITS FOR THE FIRST EVALUATION RATHER THAN SKIPPING A COLD FEED.
      *
-     * Filed as W11-02/F-3, and it needs no mutation to reproduce: run this case twice inside the
-     * quickstart's 60s `evaluationInterval` and run 1 is `1 passed`, run 2 is `1 skipped`, both
-     * exit 0. The suite's figure moves from 108/2 to 107/3 and nothing anywhere notices — the skip
-     * is a summary line nobody diffs, and it is the same silence that let three of
-     * `alerts.spec.ts`'s four cases pass while asserting nothing.
+     * A process that has not completed a pass yet holds no event. The read below polls for that
+     * first open row. It does not wait for an acknowledgement to wear off: a condition that is
+     * still firing stays the same silenced event, so a re-run of this case against a stack whose
+     * warning was already acknowledged finds nothing to acknowledge and skips. That skip is the
+     * deployment's answer, not a gap in the poll.
      *
-     * The cause is this case's own success: acknowledging closes the event, and
-     * `AlertRules.evaluate` counts only events that are still open, so the feed is empty until
-     * the next pass reopens one. That is exactly the interval a person re-running the suite is
-     * inside. So the read below polls for it instead of taking the emptiness as the deployment's
-     * answer, and the skip below is left for the deployment that genuinely never opens one.
-     *
-     * Sized off the shipped configuration rather than guessed: `evaluationInterval` is 60s, so a
-     * reopen is at most one interval away and 90 seconds is one and a half of them.
+     * Sized off the shipped configuration rather than guessed: `evaluationInterval` is 60s, so the
+     * first pass is at most one interval away and 90 seconds is one and a half of them.
      * `test.setTimeout` is raised only when there is something to wait for, so a cold suite --
      * the ordinary case, and the one with an event already open -- is not slowed by a line of it.
      */
@@ -761,8 +752,8 @@ test.describe("the shell", () => {
       const deadline = Date.now() + REOPEN_TIMEOUT_MS;
       console.log(
         "[shell.spec] the alerts feed holds no open event; waiting up to " +
-          `${REOPEN_TIMEOUT_MS / 1000}s for the next evaluation pass to reopen one. ` +
-          "This is the state a re-run inside the 60s evaluationInterval leaves behind.",
+          `${REOPEN_TIMEOUT_MS / 1000}s for the first evaluation pass to open one. ` +
+          "An acknowledgement silences a condition that is still firing, so a re-run does not.",
       );
       while (Date.now() < deadline && !acknowledgeable(reading)) {
         await new Promise((wake) => setTimeout(wake, REOPEN_POLL_MS));

@@ -118,29 +118,11 @@ final class InMemoryAlertStore[F[_]: Async] private (
       }
       .flatTap(_.traverse_(_ => updates.publish1(cluster).void))
 
-  def record(cluster: ClusterId, evaluation: Evaluation, at: Instant): F[Unit] = {
-    val resolved = evaluation.resolved.toSet
-    val refreshed = evaluation.refreshed.map(event => event.id -> event).toMap
-
+  def record(cluster: ClusterId, evaluation: Evaluation, at: Instant): F[Unit] =
     state
       .update { clusters =>
         val held = clusters.getOrElse(cluster, ClusterAlerts.empty)
-
-        val updated = held.events.map { event =>
-          if !event.isOpen then event
-          else if resolved.contains(event.id) then event.resolvedBy(at, AlertResolutionKind.Cleared, None)
-          else
-            refreshed
-              .get(event.id)
-              .fold(event)(latest =>
-                event.copy(
-                  severity = latest.severity,
-                  title = latest.title,
-                  detail = latest.detail,
-                  lastSeenAt = at
-                )
-              )
-        }
+        val updated = held.events.map(event => evaluation.project(event, at))
 
         clusters.updated(
           cluster,
@@ -156,9 +138,8 @@ final class InMemoryAlertStore[F[_]: Async] private (
         updates
           .publish1(cluster)
           .void
-          .whenA(evaluation.opened.nonEmpty || evaluation.resolved.nonEmpty || evaluation.refreshed.nonEmpty)
+          .whenA(evaluation.affectsFeed)
       )
-  }
 
   def ruleState(cluster: ClusterId): F[AlertRuleState] =
     state.get.map(_.get(cluster).fold(AlertRuleState.empty)(_.ruleState))

@@ -110,23 +110,7 @@ final class DurableAlertStore[F[_]: Async] private (
           // projection's clock or an event's last-seen time backwards after a newer replica has committed.
           ().asRight[KuiError].pure[F]
         case Right((version, held)) =>
-          val resolved = evaluation.resolved.toSet
-          val refreshed = evaluation.refreshed.map(event => event.id -> event).toMap
-          val updated = held.events.map { event =>
-            if !event.isOpen then event
-            else if resolved.contains(event.id) then event.resolvedBy(at, AlertResolutionKind.Cleared, None)
-            else
-              refreshed
-                .get(event.id)
-                .fold(event)(latest =>
-                  event.copy(
-                    severity = latest.severity,
-                    title = latest.title,
-                    detail = latest.detail,
-                    lastSeenAt = at
-                  )
-                )
-          }
+          val updated = held.events.map(event => evaluation.project(event, at))
           // Two replicas can both decide that one condition is new before either write becomes visible. Their
           // opening instants (and therefore ids) differ, so id-only deduplication would leave two open rows.
           // Keep the earliest event identity and the latest observation for each still-open condition.

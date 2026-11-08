@@ -52,6 +52,66 @@ final class AlertTransitionSuite extends KuiIOSuite {
       }
     }
 
+    test(s"$name: acknowledging a condition that is still firing does not open another event") {
+      resource.use { store =>
+        val first = AlertRules.evaluate(at, limits, facts(85), Nil, AlertRuleState.empty)
+
+        for {
+          _ <- store.record(cluster, first, at)
+          _ <- store.acknowledge(cluster, first.opened.head.id, at.plusSeconds(30), "ada")
+          before <- store.feed(cluster, reader, 10, Some(at.plusSeconds(45)))
+          next = AlertRules.evaluate(
+            at.plusSeconds(60),
+            limits,
+            facts(85),
+            before.events,
+            first.state
+          )
+          _ <- store.record(cluster, next, at.plusSeconds(60))
+          feed <- store.feed(cluster, reader, 10, None)
+          third = AlertRules.evaluate(
+            at.plusSeconds(120),
+            limits,
+            facts(10),
+            feed.events,
+            next.state
+          )
+          _ <- store.record(cluster, third, at.plusSeconds(120))
+          cleared <- store.feed(cluster, reader, 10, None)
+          returned = AlertRules.evaluate(
+            at.plusSeconds(180),
+            limits,
+            facts(85),
+            cleared.events,
+            third.state
+          )
+          _ <- store.record(cluster, returned, at.plusSeconds(180))
+          reopened <- store.feed(cluster, reader, 10, None)
+        } yield {
+          assertEquals(next.opened, Nil)
+          assertEquals(feed.total, 1)
+          assertEquals(feed.openCount, 0)
+          assertEquals(feed.unreadCount, before.unreadCount)
+          assertEquals(feed.events.map(_.id), first.opened.map(_.id))
+          assertEquals(
+            feed.events.headOption.flatMap(_.resolution.map(_.kind)),
+            Some(AlertResolutionKind.Acknowledged)
+          )
+          assertEquals(third.opened, Nil)
+          assertEquals(cleared.total, 1)
+          assertEquals(cleared.openCount, 0)
+          assertEquals(
+            cleared.events.headOption.flatMap(_.resolution.map(_.kind)),
+            Some(AlertResolutionKind.Cleared)
+          )
+          assertEquals(returned.opened.map(_.key), first.opened.map(_.key))
+          assert(returned.opened.head.id != first.opened.head.id)
+          assertEquals(reopened.openCount, 1)
+          assertEquals(reopened.total, 2)
+        }
+      }
+    }
+
     List(10, 95).foreach { percent =>
       test(s"$name: evaluation computed before acknowledgement cannot overwrite it ($percent percent)") {
         resource.use { store =>

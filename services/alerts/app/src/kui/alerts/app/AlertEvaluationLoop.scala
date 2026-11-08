@@ -87,19 +87,20 @@ object AlertEvaluationLoop {
       case report if report.outcome.isInstanceOf[RuleOutcome.NotEvaluated] => report.rule.wire
     }
 
+    val resolved = evaluation.resolved.size + evaluation.released.size
     val moved =
       logger
         .info(
           Map(
             "cluster.id" -> cluster.value,
             "alerts.opened" -> evaluation.opened.size.toString,
-            "alerts.resolved" -> evaluation.resolved.size.toString
+            "alerts.resolved" -> resolved.toString
           )
         )(
-          s"${evaluation.opened.size} alert(s) opened and ${evaluation.resolved.size} resolved on cluster " +
+          s"${evaluation.opened.size} alert(s) opened and $resolved resolved on cluster " +
             cluster.value
         )
-        .whenA(evaluation.opened.nonEmpty || evaluation.resolved.nonEmpty)
+        .whenA(evaluation.opened.nonEmpty || resolved > 0)
 
     val refused =
       logger
