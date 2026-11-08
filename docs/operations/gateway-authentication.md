@@ -1,5 +1,9 @@
 # Gateway authentication boundary
 
+Form and OIDC sign-in are delivered only in the all-in-one shape, which wires identity in-process.
+The fault-isolated shape has no identity image. Leave `kui.auth.type: disabled` there; see
+[Deploying KUI](deployment.md#authentication-and-authorization).
+
 When `kui.auth.type` is `form` or `oidc`, gateway application APIs require a
 signed-in session even when RBAC is disabled. Public API paths are explicitly
 limited to build information, liveness/readiness, and the authentication flow

@@ -37,8 +37,10 @@ The repository examples show the two shapes:
   domain service, the frontend, and development fixtures. Use its KUI service graph and health
   checks as a reference, not its broker fixtures, credentials, port exposure, or HTTP settings.
 - [`production.yaml`](../../deployment/examples/production.yaml) is an annotated configuration
-  catalog. It is not a complete orchestrator manifest and still selects disabled authentication;
-  production must replace that posture as described below.
+  catalog for the fault-isolated shape. It is not a complete orchestrator manifest. It selects
+  `kui.auth.type: disabled` on purpose. Form and OIDC sign-in are delivered only in the all-in-one
+  shape, as described below. Changing this file's auth type does not produce a deployment anyone
+  can sign in to.
 
 ### Local-demo upstream policy
 
@@ -149,9 +151,24 @@ deployment-owned configuration even when the platform mounts them into separate 
 
 ### Authentication and authorization
 
-`kui.auth.type` supports `form` and `oidc`; `disabled` is the default and is unsafe on an untrusted
-network. For form login, generate each encoded password hash through standard input so the password
-does not enter shell history:
+`kui.auth.type` accepts `disabled` (the default), `form`, and `oidc`. Sign-in is delivered only in
+the all-in-one shape: that process wires the identity service in-process. The worked example is
+[`kui-quickstart-auth.yaml`](../../deployment/quickstart/kui-quickstart-auth.yaml), started with
+`deployment/quickstart/quickstart.sh --with-auth`.
+
+The fault-isolated shape has no identity image and no `kui.gateway.services.identity` address
+(`ARCHITECTURE.md`; `DESIGN.md` Q-c). `deployment.docker` does not build an identity image, and
+[`kui.yaml`](../../deployment/compose/kui.yaml) lists no identity service. Setting `form` or `oidc`
+there still starts the gateway. Every sign-in then answers `Unsupported` ("this deployment has no
+identity service (set kui.gateway.services.identity)"), and every non-public API call returns 401.
+Leave `disabled` on that shape until the packaging question is resolved. The gateway does not fail
+startup for the combination; the refusal is the sign-in response, on purpose.
+
+`disabled` makes every request anonymous, so do not publish it on an untrusted network. The
+delivered way to require sign-in is the all-in-one shape.
+
+For form login on that shape, generate each encoded password hash through standard input so the
+password does not enter shell history:
 
 ```bash
 ./mill services.identity.app.runMain kui.identity.app.HashPassword
@@ -290,8 +307,10 @@ client is generated from the same contracts the services implement.
 3. Exercise the release with production-shaped configuration and dependencies in staging.
 4. For the distributed shape, replace internal services and wait for readiness, then replace the
    single gateway, then the frontend. Keep the mixed-version interval short.
-5. Verify proxied readiness and `/api/v1/info`, then exercise sign-in, a read-only workflow, a
-   streamed record browse, and one authorized mutation appropriate for the environment.
+5. Verify proxied readiness and `/api/v1/info`, then exercise a read-only workflow, a streamed
+   record browse, and one authorized mutation appropriate for the environment. On an all-in-one
+   deployment with `form` or `oidc`, also exercise sign-in. A fault-isolated deployment left on
+   `disabled` has no sign-in to exercise.
 
 A gateway replacement ends active sessions because the current session store is in memory; plan
 the user-visible restart accordingly. An all-in-one replacement restarts every backend domain at
