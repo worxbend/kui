@@ -104,6 +104,10 @@ object SchemaRegistryAuth {
   *   how long the *latest* version of a subject may be reused. This one must expire: registering a new
   *   version is how a schema evolves, and a KUI that cached the latest version forever would keep producing
   *   against a schema the topic has moved on from.
+  * @param schemaMissTtl
+  *   how long a schema id the registry reported missing may be treated as missing without asking again. A 404
+  *   is an answer, unlike a registry that cannot be reached, but an id that 404s today can be allocated
+  *   tomorrow, so the answer must expire.
   */
 final case class SchemaRegistryConfig(
     urls: NonEmptyList[SafeUrl],
@@ -111,7 +115,8 @@ final case class SchemaRegistryConfig(
     callTimeout: FiniteDuration = 10.seconds,
     urlPolicy: UrlPolicy = UrlPolicy.Strict,
     schemaCacheSize: Long = 1000L,
-    subjectCacheTtl: FiniteDuration = 30.seconds
+    subjectCacheTtl: FiniteDuration = 30.seconds,
+    schemaMissTtl: FiniteDuration = 30.seconds
 ) {
 
   /** The registry as `libs/http` sees it: an upstream with a name, a bulkhead, a breaker and a failover list.

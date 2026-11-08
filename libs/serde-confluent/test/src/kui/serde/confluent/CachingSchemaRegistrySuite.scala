@@ -10,7 +10,7 @@ import cats.syntax.all.*
 import kui.cache.CacheMetrics
 import kui.config.SafeUrl
 import kui.kernel.ClusterId
-import kui.kernel.error.{InfrastructureError, KuiError}
+import kui.kernel.error.{ApplicationError, ErrorCode, InfrastructureError, KuiError}
 import kui.testkit.KuiIOSuite
 
 /** The asymmetry between the two caches, which is the whole design of this class.
@@ -281,6 +281,77 @@ final class CachingSchemaRegistrySuite extends KuiIOSuite {
       configured.toInt,
       clue = "a schema id was fetched twice: the cache was built smaller than the configuration asked for"
     )
+  }
+
+  test(
+    "an unknown schema id is remembered, so a non-registry payload does not call the registry per record"
+  ) {
+    // Review R2 finding messages-8. A key written by Kafka's LongSerializer starts with 0x00 and is long
+    // enough to look like a registry frame, so autodetect asks the registry for an id it will never have
+    // (about 105000 for an epoch-millis key). A 404 was not cached, and a page of such records made one
+    // HTTP call each. A missing id can be allocated later, so the memory is only good for a short TTL;
+    // inside that window one hundred sequential lookups are one registry call.
+    val missingId = 105000
+    val notFound = ApplicationError.NotFound("schema", missingId.toString, ErrorCode.SchemaNotFound)
+    val lookups = 100
+
+    val program = for {
+      calls <- Ref.of[IO, Int](0)
+      underlying = new SchemaRegistry[IO] {
+        def schemaById(id: Int): IO[Either[KuiError, RegistrySchema]] =
+          calls.update(_ + 1).as(Left(notFound))
+
+        def latestForSubject(subject: String): IO[Either[KuiError, Option[RegistrySchema]]] =
+          IO.pure(Right(None))
+      }
+      made <- CachingSchemaRegistry
+        .resource[IO](underlying, config, cluster, CacheMetrics.noop[IO])
+        .use(registry => (1 to lookups).toList.traverse_(_ => registry.schemaById(missingId)) >> calls.get)
+    } yield made
+
+    TestControl.executeEmbed(program).map { made =>
+      assert(made <= 1, s"schema id $missingId was looked up $made times within one miss TTL")
+    }
+  }
+
+  test("a remembered missing schema id is asked for again once its TTL has passed") {
+    // An id that 404s can be registered later. Caching the miss for the life of the process would keep
+    // answering "no such schema" after the registry had allocated it.
+    val missingId = 105000
+    val notFound = ApplicationError.NotFound("schema", missingId.toString, ErrorCode.SchemaNotFound)
+
+    val program = for {
+      calls <- Ref.of[IO, Int](0)
+      underlying = new SchemaRegistry[IO] {
+        def schemaById(id: Int): IO[Either[KuiError, RegistrySchema]] =
+          calls.update(_ + 1).as(Left(notFound))
+
+        def latestForSubject(subject: String): IO[Either[KuiError, Option[RegistrySchema]]] =
+          IO.pure(Right(None))
+      }
+      result <- CachingSchemaRegistry
+        .resource[IO](underlying, config.copy(schemaMissTtl = ttl), cluster, CacheMetrics.noop[IO])
+        .use { registry =>
+          for {
+            _ <- registry.schemaById(missingId)
+            _ <- registry.schemaById(missingId)
+            served <- calls.get
+            _ <- IO.sleep(ttl * 10)
+            _ <- registry.schemaById(missingId)
+            renewed <- calls.get
+          } yield (served, renewed)
+        }
+    } yield result
+
+    TestControl.executeEmbed(program).map { (served, renewed) =>
+      assertEquals(served, 1, clue = "the second lookup inside the miss TTL reached the registry")
+      assertEquals(
+        renewed,
+        2,
+        clue = "a missing schema id was still treated as missing after its TTL, so a schema registered " +
+          "in the meantime would stay invisible"
+      )
+    }
   }
 
   test("the subject cache holds the topics an operator browses inside one TTL window") {
