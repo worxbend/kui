@@ -45,11 +45,12 @@ import kui.testkit.fakes.FakeStructuredLogger
   *
   * ==Where the 403 actually comes from==
   *
-  * This service wires `RbacGuard.allowAll` today, exactly as the two compatibility writes do, and the gateway
-  * is the enforcement point for a call that arrives through it. Both are the same `EndpointDecision` over the
-  * same declaration this endpoint carries, so the two cases below are the two halves of that: one calls
-  * `decide` directly on the published endpoint value, and one binds the route behind a real `RbacGuard` and
-  * reads the status code. Neither composes a permission by hand — both read the declaration
+  * `SchemaWiring` builds `RbacGuard.fromPolicy` and passes it into `SchemaApi.routes`. This suite binds the
+  * published endpoint itself, so a disabled policy here uses `RbacGuard.allowAll` and an enabled one uses
+  * `RbacGuard.fromPolicy`. The gateway's pre-check and that guard are the same `EndpointDecision` over the
+  * same declaration, so the two cases below are the two halves of that: one calls `decide` directly on the
+  * published endpoint value, and one binds the route behind a real `RbacGuard` and reads the status code.
+  * Neither composes a permission by hand — both read the declaration
   * `SchemaMutationEndpoints.registerVersion` publishes, which is the thing that would be wrong if
   * `Action.SchemaCreate` were the wrong action or the declaration were missing.
   */
@@ -106,8 +107,9 @@ final class SchemaRegistrationRoutesSuite extends KuiIOSuite {
   /** The four bodied routes, with no socket, over one writable cluster and one read-only one.
     *
     * @param policy
-    *   `RbacPolicy.Disabled` is what this service runs with; a real policy is passed only by the two cases
-    *   that are about the permission the endpoint declares.
+    *   `RbacPolicy.Disabled` leaves this stub on `RbacGuard.allowAll`. A deployed schema service builds its
+    *   guard from `kui.rbac` in `SchemaWiring`; a real policy is passed here only by the two cases that are
+    *   about the permission the endpoint declares.
     */
   private def server(
       rejection: Option[KuiError] = None,

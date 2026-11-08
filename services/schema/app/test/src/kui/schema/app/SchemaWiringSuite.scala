@@ -1,11 +1,31 @@
 package kui.schema.app
 
+import java.nio.charset.StandardCharsets
+import java.time.Instant
+
 import cats.data.NonEmptyList
 import cats.effect.IO
+import cats.effect.kernel.{Ref, Resource}
+import io.circe.parser.parse
+import io.circe.syntax.*
+import sttp.client4.*
+import sttp.client4.impl.cats.implicits.*
+import sttp.client4.testing.BackendStub
+import sttp.model.Uri
+import sttp.tapir.server.stub4.TapirStubInterpreter
 
 import kui.config.{ClusterConfig, RegistryAuthConfig, SafeUrl, SchemaRegistrySettings, UrlPolicy}
+import kui.contracts.KuiEndpoint
 import kui.kernel.cluster.{AdminTuning, BootstrapServers, ClientProperties, ClusterSecurity}
-import kui.kernel.{ClusterId, Secret}
+import kui.kernel.{ClusterId, RoleName, SchemaId, Secret, Subject, UserName}
+import kui.observability.Telemetry
+import kui.schema.api.SchemaApi
+import kui.schema.application.*
+import kui.schema.contract.dto.RegisterSchemaRequest
+import kui.schema.contract.dto.RegisterSchemaRequest.given
+import kui.schema.domain.*
+import kui.security.*
+import kui.security.rbac.{Resource as RbacResource, *}
 import kui.testkit.KuiIOSuite
 import kui.testkit.fakes.FakeStructuredLogger
 
@@ -128,6 +148,118 @@ final class SchemaWiringSuite extends KuiIOSuite {
       }
   }
 
+  test("a view-only principal is refused registration and a create principal is served") {
+    // `SchemaWiring.assemble` is what `make` serves once the registry clients exist. The policy is an
+    // argument of that root and the guard is built there, so this case fails if production goes back to
+    // allowing every signed caller. A view-only role over `orders-.*` must not reach the registry.
+    val viewer = RoleName.unsafe("viewer")
+    val creator = RoleName.unsafe("creator")
+    val pattern = ResourcePattern.compile("orders-.*").getOrElse(fail("orders-.* does not compile"))
+    def grant(name: RoleName, actions: Action*): RbacPolicy =
+      RbacPolicy(
+        roles = List(
+          Role(
+            name = name,
+            clusters = Set(cluster),
+            subjects = Nil,
+            permissions = List(RbacPolicy.permission(RbacResource.Schema, Some(pattern), actions.toSet))
+          )
+        ),
+        defaultRole = None
+      )
+
+    val request = RegisterSchemaRequest("AVRO", "\"string\"", Nil)
+    val bytes = io.circe.Printer.noSpaces.print(request.asJson).getBytes(StandardCharsets.UTF_8)
+    val path = s"/internal/v1/clusters/${cluster.value}/schemas/subjects/orders-value/versions"
+
+    def post(backend: Backend[IO], roles: Set[RoleName]): IO[sttp.client4.Response[String]] =
+      IO.realTimeInstant
+        .flatMap(now =>
+          codec.sign(
+            PrincipalClaims(
+              subject = UserName.unsafe("alice"),
+              roles = roles,
+              kind = PrincipalKind.Session,
+              sessionRef = None,
+              issuedAt = now,
+              expiresAt = now.plusSeconds(60),
+              audience = SchemaApi.Id,
+              requestDigest = RequestDigests.of("POST", path, bytes)
+            )
+          )
+        )
+        .flatMap(signed =>
+          basicRequest
+            .post(Uri.unsafeParse(s"http://schema$path"))
+            .header(KuiEndpoint.PrincipalHeader, signed.value)
+            .header(kui.contracts.HttpHeaders.Csrf, "a-csrf-token")
+            .contentType("application/json")
+            .body(new String(bytes, StandardCharsets.UTF_8))
+            .response(asStringAlways)
+            .send(backend)
+        )
+
+    def recording(calls: Ref[IO, Int]): ClusterRegistries[IO] = {
+      val port = new SchemaRegistryPort[IO] {
+        def subjects = IO.pure(Right(Nil))
+        def summary(subject: Subject) = IO.pure(Right(None))
+        def versions(subject: Subject) = IO.pure(Right(None))
+        def schema(subject: Subject, version: VersionSelector) = IO.pure(Right(None))
+        def globalCompatibility = IO.pure(Right(CompatibilityLevel.Backward))
+        def subjectCompatibility(subject: Subject) = IO.pure(Right(None))
+        def setGlobalCompatibility(level: CompatibilityLevel) = IO.pure(Right(()))
+        def setSubjectCompatibility(subject: Subject, level: CompatibilityLevel) = IO.pure(Right(()))
+        def checkCompatibility(subject: Subject, version: VersionSelector, proposed: ProposedSchema) =
+          IO.pure(Right(None))
+        def register(subject: Subject, proposed: ProposedSchema) =
+          calls.update(_ + 1) *>
+            IO.pure(
+              Right(RegisteredVersion(subject, SchemaId.unsafe(41), Some(SchemaVersion.unsafe(1))))
+            )
+      }
+      val profiles = List(RegistryProfile(cluster, "With a registry", hasRegistry = true, readOnly = false))
+      new ClusterRegistries[IO] {
+        def all = IO.pure(profiles)
+        def profile(id: ClusterId) = IO.pure(profiles.find(_.cluster == id))
+        def registry(id: ClusterId) = IO.pure(Option.when(id == cluster)(port))
+      }
+    }
+
+    def served(policy: RbacPolicy): Resource[IO, (Backend[IO], Ref[IO, Int])] =
+      for {
+        logger <- Resource.eval(FakeStructuredLogger[IO])
+        calls <- Resource.eval(Ref.of[IO, Int](0))
+        server <- SchemaWiring.assemble[IO](
+          List(configured),
+          recording(calls),
+          policy,
+          Telemetry.noop[IO],
+          codec,
+          logger
+        )
+      } yield {
+        val backend = TapirStubInterpreter(server.interceptors, BackendStub[IO](summon))
+          .whenServerEndpointsRunLogic(server.routes)
+          .backend()
+        (backend, calls)
+      }
+
+    served(grant(viewer, Action.SchemaView)).use { (backend, calls) =>
+      for {
+        refused <- post(backend, Set(viewer))
+        hits <- calls.get
+      } yield {
+        val code = parse(refused.body).toOption.flatMap(_.hcursor.get[String]("code").toOption)
+        assertEquals(refused.code.code, 403, refused.body)
+        assertEquals(code, Some("KUI-FORBIDDEN"))
+        assertEquals(hits, 0)
+      }
+    } *>
+      served(grant(creator, Action.SchemaCreate)).use { (backend, _) =>
+        post(backend, Set(creator)).map(response => assertEquals(response.code.code, 200, response.body))
+      }
+  }
+
   test("the service and its instrumentation are named the same thing everywhere") {
     // `service.name` on every log line, span and metric, and the scope the meter is registered under. A
     // dashboard that filters on one and a log search that filters on the other have to agree.
@@ -139,6 +271,14 @@ final class SchemaWiringSuite extends KuiIOSuite {
   // -----------------------------------------------------------------------------------------------
 
   private val cluster: ClusterId = ClusterId.unsafe("with-registry")
+
+  private val key: SigningKey =
+    SigningKey("test-1", Secret(Array.fill[Byte](32)(7)), Instant.parse("2020-01-01T00:00:00Z"))
+
+  private val codec: PrincipalCodec[IO] =
+    JwsPrincipalCodec
+      .make[IO](NonEmptyList.of(key), "kui-gateway")
+      .getOrElse(throw new IllegalStateException("the test signing key is too short for HS256"))
 
   private val issuer: SafeUrl = SafeUrl.unsafe("http://issuer.internal:9000/oauth/token")
 

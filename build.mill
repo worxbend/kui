@@ -2635,7 +2635,11 @@ object services extends Module {
         def moduleDeps = super.moduleDeps ++ Seq(libs.testkit.jvm)
 
         def mvnDeps = super.mvnDeps() ++ Seq(
-          mvn"org.typelevel::munit-cats-effect::${Versions.munitCatsEffect}"
+          mvn"org.typelevel::munit-cats-effect::${Versions.munitCatsEffect}",
+          // The register-version route is driven through Tapir's stub interpreter, the same way
+          // `SchemaRegistrationRoutesSuite` does, so a permission refusal can be asserted without a socket.
+          mvn"com.softwaremill.sttp.tapir::tapir-sttp-stub4-server::${Versions.tapir}",
+          mvn"io.circe::circe-parser::${Versions.circe}"
         )
       }
     }

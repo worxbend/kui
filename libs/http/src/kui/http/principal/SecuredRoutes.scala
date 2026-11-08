@@ -67,9 +67,9 @@ import kui.security.{Principal, PrincipalCodec, RequestDigest, RequestDigests, S
   *   this service's id, which is the `aud` claim a token must have been minted for. A token for `topic` is
   *   refused by `message`, and that is the check this parameter exists for.
   * @param guard
-  *   this deployment's permission rules. It defaults to allowing everything so that a composition root that
-  *   has not yet been given a policy still compiles and runs — with the gateway as its only enforcement
-  *   point, which is a weaker deployment and is why every service's wiring passes a real one.
+  *   this deployment's permission rules. The four-argument constructor allows everything, so the gateway is
+  *   the only RBAC check. Metrics and identity use that constructor. Every other domain service's wiring
+  *   passes a real guard.
   */
 final class SecuredRoutes[F[_]: Async](
     principals: PrincipalCodec[F],
@@ -79,11 +79,11 @@ final class SecuredRoutes[F[_]: Async](
     guard: RbacGuard[F]
 ) {
 
-  /** The same, with no permission rules: the gateway becomes the only enforcement point.
+  /** The same, with no permission rules: the gateway is the only RBAC check.
     *
-    * It exists so that a composition root which has not been given a policy yet still compiles, and it is
-    * spelled out as a constructor rather than hidden in a default argument so that `new SecuredRoutes(...)`
-    * with four arguments is a visible choice somebody can grep for.
+    * Metrics and identity use this constructor. Their routes are still signed. It is a constructor rather
+    * than a default argument so that `new SecuredRoutes(...)` with four arguments is a visible choice
+    * somebody can grep for.
     */
   def this(
       principals: PrincipalCodec[F],

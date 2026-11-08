@@ -142,10 +142,11 @@ every process first, give it a future `notBefore`, wait until all processes acce
 remove the old key only after the new key is active.
 
 Keep the security policy consistent across process-specific configuration files as well. The
-gateway performs an RBAC pre-check, and each domain service enforces the signed principal again;
-deploying different `kui.rbac`, cluster `readOnly`, or principal-key settings on the two sides can
-make the UI offer an action that the service correctly refuses. Treat those sections as one
-deployment-owned configuration even when the platform mounts them into separate containers.
+gateway performs an RBAC pre-check, and each domain service enforces the signed principal again.
+Metrics and identity keep the gateway as their only RBAC check. Deploying different `kui.rbac`,
+cluster `readOnly`, or principal-key settings on the two sides can make the UI offer an action
+that the service correctly refuses. Treat those sections as one deployment-owned configuration
+even when the platform mounts them into separate containers.
 
 ### Authentication and authorization
 

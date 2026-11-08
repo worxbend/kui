@@ -17,7 +17,7 @@ import sttp.model.Uri
 import sttp.tapir.server.stub4.TapirStubInterpreter
 
 import kui.contracts.KuiEndpoint
-import kui.http.principal.PrincipalVerification
+import kui.http.principal.{PrincipalVerification, RbacGuard}
 import kui.kernel.error.{InfrastructureError, KuiError}
 import kui.kernel.{ClusterId, SchemaId, Secret, Subject, UserName}
 import kui.observability.Telemetry
@@ -146,7 +146,7 @@ final class SubjectListRoutesSuite extends KuiIOSuite {
           SubjectVersionsUseCase.make[IO](registries),
           SchemaVersionUseCase.make[IO](registries),
           CompatibilityReadUseCase.make[IO](registries, logger),
-          SchemaApi.Securing[IO](codec, rejections, logger)
+          SchemaApi.Securing[IO](codec, rejections, logger, RbacGuard.allowAll[IO])
         )
 
         val backend = TapirStubInterpreter(interceptors, BackendStub[IO](summon))

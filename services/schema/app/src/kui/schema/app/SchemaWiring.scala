@@ -19,7 +19,7 @@ import kui.config.{
 }
 import kui.contracts.capability.ServiceCapabilities
 import kui.http.health.ReadinessCheck
-import kui.http.principal.PrincipalVerification
+import kui.http.principal.{PrincipalVerification, RbacGuard}
 import kui.http.upstream.{HttpTls, UpstreamClient, UpstreamConfig}
 import kui.kernel.{ClusterId, PositiveInt}
 import kui.observability.Telemetry
@@ -29,6 +29,7 @@ import kui.schema.application.*
 import kui.schema.domain.SchemaRegistryPort
 import kui.schema.infrastructure.{ConfiguredClusterRegistries, RegistryCredentials, RegistryHttp}
 import kui.security.PrincipalCodec
+import kui.security.rbac.{ClusterFlags, RbacPolicy}
 
 /** Everything the schema service needs in order to be served, with no listener started.
   *
@@ -97,10 +98,44 @@ object SchemaWiring {
     *   `UrlPolicy.Strict`, because a Schema Registry is very often the one upstream that legitimately lives
     *   on a private network — `http://schema-registry:8081` inside a Compose network is the ordinary
     *   arrangement — and the operator's `KUI_ALLOW_PRIVATE_UPSTREAMS` is what decides it.
+    * @param rbac
+    *   this deployment's roles. The service enforces them itself, on the same endpoint declarations the
+    *   gateway read, so a caller who reaches this port directly is refused here.
     */
   def make[F[_]: {Async, Parallel}](
       clusters: List[ClusterConfig],
       policy: UrlPolicy,
+      rbac: RbacPolicy,
+      telemetry: Telemetry[F],
+      principals: PrincipalCodec[F],
+      logger: StructuredLogger[F]
+  ): Resource[F, SchemaServer[F]] =
+    for {
+      // One connection pool for the process, and none at all when no cluster configures a registry.
+      backend <- httpBackend[F](clusters, policy)
+      ports <- portsFor[F](clusters, backend, policy, telemetry, logger)
+      _ <- Resource.eval(startupLog[F](clusters, logger))
+      server <- assemble[F](
+        clusters,
+        new ConfiguredClusterRegistries[F](ConfiguredClusterRegistries.profilesOf(clusters), ports),
+        rbac,
+        telemetry,
+        principals,
+        logger
+      )
+    } yield server
+
+  /** The routes, the guard and the use cases, over registries that already exist.
+    *
+    * `private[app]` so `SchemaWiringSuite` can pass a recording registry. Building [[make]] dials nothing
+    * until the first request, but it does open the process HTTP pool, and a permission refusal has to be
+    * assertable with zero calls and zero sockets. The guard is built here and nowhere else: a suite that
+    * supplied its own `RbacGuard` would stay green if this root went back to allowing every signed caller.
+    */
+  private[app] def assemble[F[_]: {Async, Parallel}](
+      clusters: List[ClusterConfig],
+      registries: ClusterRegistries[F],
+      rbac: RbacPolicy,
       telemetry: Telemetry[F],
       principals: PrincipalCodec[F],
       logger: StructuredLogger[F]
@@ -110,18 +145,7 @@ object SchemaWiring {
       rejections <- Resource.eval(PrincipalVerification.rejectionCounter[F](meter))
       interceptors <- Resource.eval(SchemaApi.interceptors[F](telemetry, rejections, logger))
 
-      // One connection pool for the process, and none at all when no cluster configures a registry.
-      backend <- httpBackend[F](clusters, policy)
-      ports <- portsFor[F](clusters, backend, policy, telemetry, logger)
-      _ <- Resource.eval(startupLog[F](clusters, logger))
-
-      registries = new ConfiguredClusterRegistries[F](
-        ConfiguredClusterRegistries.profilesOf(clusters),
-        ports
-      )
-
       audit = LoggingAuditSink.make[F](logger)
-
       subjects = SubjectListUseCase.make[F](registries, logger)
       versions = SubjectVersionsUseCase.make[F](registries)
       schema = SchemaVersionUseCase.make[F](registries)
@@ -130,6 +154,13 @@ object SchemaWiring {
       register = RegisterSchemaUseCase.make[F](registries, audit, logger)
       check = CompatibilityCheckUseCase.make[F](registries)
       capabilities = SchemaCapabilities.make[F](registries, logger)
+      // Read-only comes from this process's own `kui.clusters[]`, so a registration on a read-only
+      // cluster is refused here whether or not the gateway was asked.
+      permissions = RbacGuard.fromPolicy[F](
+        rbac,
+        cluster => ClusterFlags(clusters.find(_.id == cluster).exists(_.readOnly)),
+        logger
+      )
 
       // Readiness is deliberately empty. "Can this service answer" is true as soon as it is wired, and a
       // check that waited for a registry would take the schema service out of rotation whenever an
@@ -149,7 +180,8 @@ object SchemaWiring {
         capabilities,
         principals,
         rejections,
-        logger
+        logger,
+        permissions
       ),
       interceptors = interceptors,
       readiness = readiness,

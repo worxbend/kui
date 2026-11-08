@@ -37,8 +37,14 @@ object Main extends IOApp {
         IO.delay(sys.env)
           .toResource
           .flatMap(environment =>
-            SchemaWiring
-              .make[IO](config.clusters, UrlPolicy.fromEnv(environment), telemetry, principals, logger)
+            SchemaWiring.make[IO](
+              config.clusters,
+              UrlPolicy.fromEnv(environment),
+              config.rbac,
+              telemetry,
+              principals,
+              logger
+            )
           )
           .map(service => ServiceMain.Serving(service.routes, service.interceptors))
     )

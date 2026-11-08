@@ -282,6 +282,7 @@ object AllInOneWiring {
       schemaService <- SchemaWiring.make[F](
         clusters,
         UrlPolicy.fromEnv(schemaEnvironment),
+        rbac,
         telemetry,
         principals,
         logger
