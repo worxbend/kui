@@ -54,6 +54,42 @@ describe("the cluster form", () => {
     expect(bad.problems.some((p) => /lowercase letters, digits and hyphens/i.test(p))).toBe(true);
   });
 
+  it("refuses an id the name does not identify", () => {
+    /*
+     * The add form used to invite a shorter id than the name. The server refuses that: the id has
+     * to be the slug of the name, and the connection test never checks because it derives the id
+     * from the name itself. "Staging EU West" with id `staging` must fail here, before either call.
+     */
+    const answer = toRequest({
+      ...EMPTY_CLUSTER_FORM,
+      name: "Staging EU West",
+      id: "staging",
+      bootstrapServers: "b:9092",
+    });
+    expect(answer.ok).toBe(false);
+    if (answer.ok) return;
+    expect(answer.problems.some((p) => /identifies the cluster/i.test(p))).toBe(true);
+    expect(answer.problems.some((p) => p.includes("staging-eu-west") && p.includes("staging"))).toBe(
+      true,
+    );
+  });
+
+  it("refuses a rename whose slug is a different id", () => {
+    // An edit keeps the record's id and still sends the name. "Orders Prod" renamed to
+    // "Orders Production" passes the id pattern and is a different cluster to the server.
+    const answer = toRequest({
+      ...EMPTY_CLUSTER_FORM,
+      name: "Orders Production",
+      id: "orders-prod",
+      bootstrapServers: "b:9092",
+    });
+    expect(answer.ok).toBe(false);
+    if (answer.ok) return;
+    expect(
+      answer.problems.some((p) => p.includes("orders-production") && p.includes("orders-prod")),
+    ).toBe(true);
+  });
+
   it("asks for credentials only on a SASL connection", () => {
     expect(isSasl({ ...valid, protocol: PLAINTEXT })).toBe(false);
     expect(isSasl({ ...valid, protocol: SASL_SSL })).toBe(true);
@@ -83,7 +119,7 @@ describe("the cluster form", () => {
     expect(isTls({ ...valid, protocol: SASL_SSL })).toBe(true);
   });
 
-  it("suggests an id from a name without insisting on it", () => {
+  it("derives an id from a name the way the server slugs it", () => {
     expect(suggestId("Staging (eu-west)")).toBe("staging-eu-west");
     expect(suggestId("  Production!  ")).toBe("production");
     // Never a trailing hyphen, which the server's pattern refuses.

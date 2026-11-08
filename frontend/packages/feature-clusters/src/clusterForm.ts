@@ -14,7 +14,9 @@
  * Somebody who got three fields wrong should be told about all three rather than discovering them
  * one save at a time. The server accumulates for the same reason (ADR-013) and refuses the same
  * things; these checks exist to answer *before* a round trip and are deliberately a subset — the
- * form never claims something is valid that the server then rejects.
+ * form never claims something is valid that the server then rejects. The id is not a gap in that
+ * subset: it has to be the slug of the name, because the connection test derives the id from the
+ * name and would otherwise report a cluster reachable that Save then refuses.
  */
 
 export const PLAINTEXT = "PLAINTEXT";
@@ -46,7 +48,8 @@ export interface ClusterForm {
   /**
    * The slug this cluster is addressed by: it is in every URL and in every audit line, and it cannot
    * be changed afterwards without the links people have kept stopping working. Collected only when
-   * adding — an edit addresses an existing record and must not move it.
+   * adding — an edit addresses an existing record and must not move it. It is the slug of the name;
+   * the server refuses any other value.
    */
   readonly id: string;
   readonly name: string;
@@ -103,11 +106,13 @@ export function isTls(form: ClusterForm): boolean {
 const ID_PATTERN = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
 
 /**
- * A name turned into a plausible id, for the add form to start from.
+ * The id the server derives from a name (`ClusterConfig.slug`).
  *
- * A suggestion and not a rule: the box stays editable, because the id is in every URL and every
- * audit line for the life of the cluster and the person adding it may well want a shorter one than
- * "our-staging-kafka-eu-west-1".
+ * Not a suggestion. The write endpoint refuses a body whose name does not slug to the id in the
+ * path: renaming a cluster creates a new one and removes the old one. A shorter id used to be
+ * offered here, and the connection test — which derives the id from the name — would call that
+ * cluster reachable, then Save would fail. The add form shows this value and does not let it be
+ * typed over.
  */
 export function suggestId(name: string): string {
   return name
@@ -134,14 +139,30 @@ export function toRequest(
   | { readonly ok: false; readonly problems: readonly string[] } {
   const problems: string[] = [];
 
-  if (form.name.trim() === "") problems.push("A name is required.");
-  if (form.id.trim() === "") {
+  const name = form.name.trim();
+  const id = form.id.trim();
+
+  if (name === "") problems.push("A name is required.");
+  if (id === "") {
     problems.push("An id is required.");
-  } else if (!ID_PATTERN.test(form.id.trim())) {
+  } else if (!ID_PATTERN.test(id)) {
     // The server's own rule, quoted. It is in every URL this cluster appears in, so the constraint
     // is not arbitrary tidiness — a slug with a slash or a space in it is a path that does not route.
     problems.push(
       "An id is lowercase letters, digits and hyphens, starting and ending with a letter or digit.",
+    );
+  } else if (name !== "" && suggestId(name) !== id) {
+    /*
+     * The same sentence the server returns. A well-formed shorter id ("staging" for "Staging EU
+     * West") used to pass this form, the connection test derived the id from the name and reported
+     * the cluster reachable, and Save was then refused. An edit that changes the slug is the same
+     * refusal: the path id stays, and the new name identifies a different cluster.
+     */
+    const slugged = suggestId(name);
+    problems.push(
+      slugged === ""
+        ? `'${name}' contains no letters or digits that can be made into a URL slug.`
+        : `'${name}' identifies the cluster '${slugged}', not '${id}'; renaming a cluster creates a new one and removes the old one.`,
     );
   }
   if (form.bootstrapServers.trim() === "")
@@ -180,7 +201,7 @@ export function toRequest(
   return {
     ok: true,
     request: {
-      name: form.name.trim(),
+      name,
       readOnly: form.readOnly,
       bootstrapServers: form.bootstrapServers.trim(),
       security: {

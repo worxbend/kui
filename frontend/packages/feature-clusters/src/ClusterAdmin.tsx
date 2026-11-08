@@ -254,13 +254,10 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
                   props.onFormChange({
                     ...current().form,
                     name,
-                    /* The id follows the name until somebody edits it, and only while adding: an
-                       edit addresses an existing record, and moving it would break every link and
-                       bookmark anybody has kept. */
-                    ...(current().id === undefined &&
-                    current().form.id === suggestId(current().form.name)
-                      ? { id: suggestId(name) }
-                      : {}),
+                    /* While adding, the id is the slug of the name and nothing else: the server
+                       refuses a shorter one, and the connection test would not notice. An edit
+                       keeps the record's id — moving it would break every link and audit line. */
+                    ...(current().id === undefined ? { id: suggestId(name) } : {}),
                   })
                 }
                 required
@@ -270,21 +267,23 @@ export function ClusterAdmin(props: ClusterAdminProps): JSX.Element {
                 fallback={
                   <p class="kui-cluster-admin__help">
                     This cluster's id is <code>{current().form.id}</code>. It is in every link and
-                    every audit line for this cluster, so it cannot be changed here.
+                    every audit line for this cluster, so it cannot be changed here. The name can
+                    change only while it still identifies that id; a different slug is a new
+                    cluster, which this form will not save.
                   </p>
                 }
               >
                 <TextField
                   label="Id"
                   value={current().form.id}
-                  onInput={(id) => props.onFormChange({ ...current().form, id })}
+                  readOnly
                   mono
                   required
                   placeholder="staging-eu-west"
                 />
                 <p class="kui-cluster-admin__help">
-                  Lowercase letters, digits and hyphens. It appears in every URL for this cluster
-                  and cannot be changed afterwards.
+                  Taken from the name. The server refuses any other id, because a name identifies
+                  exactly one cluster and renaming creates a new one rather than moving this one.
                 </p>
               </Show>
               <TextField

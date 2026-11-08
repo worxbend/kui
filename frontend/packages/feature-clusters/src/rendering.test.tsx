@@ -551,6 +551,33 @@ describe("managing which clusters KUI knows about", () => {
     expect(suggestId("Spare cluster")).toBe("spare-cluster");
     dispose();
   });
+
+  it("will not save a rename whose slug is a different cluster", async () => {
+    /*
+     * The id stays (the case above). What used to happen next is that Save was enabled: the name
+     * still matched the id pattern, the connection test derived its id from the name, and the
+     * server then refused the write. The problem has to be on screen before either call.
+     */
+    const existing = {
+      ...EMPTY_CLUSTER_FORM,
+      id: "orders-prod",
+      name: "Orders Production",
+      bootstrapServers: "b:9092",
+    };
+    const { container, dispose } = admin([stored], { id: "orders-prod", form: existing });
+    await flush();
+    const listed = [...container.querySelectorAll(".kui-cluster-admin__problems li")].map((one) =>
+      (one.textContent ?? "").trim(),
+    );
+    expect(listed.some((line) => line.includes("orders-production") && line.includes("orders-prod"))).toBe(
+      true,
+    );
+    const save = [...container.querySelectorAll("button")].find(
+      (one) => (one.textContent ?? "").trim() === "Save",
+    );
+    expect(save?.getAttribute("aria-disabled")).toBe("true");
+    dispose();
+  });
 });
 
 describe("the brokers screen", () => {
