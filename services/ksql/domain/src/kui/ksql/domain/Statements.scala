@@ -5,10 +5,11 @@ package kui.ksql.domain
   * The three cases are not stylistic: they are three different promises about when the answer ends.
   *
   *   - a [[StatementShape.PushQuery]] never ends. `SELECT … EMIT CHANGES` emits a row every time one arrives
-  *     on the underlying topic and runs until the client goes away or the budget expires (ADR-035), so it can
-  *     only be answered by the stream endpoint. Answering it from the JSON endpoint would mean buffering an
-  *     unbounded result into one document, which is a request that never returns and a heap that never stops
-  *     growing.
+  *     on the underlying topic, and `SELECT … EMIT FINAL` (a windowed aggregation, ksqlDB 0.28+) holds the
+  *     response open until each window closes. Either runs until the client goes away or the budget expires
+  *     (ADR-035), so it can only be answered by the stream endpoint. Answering it from the JSON endpoint
+  *     would mean buffering an unbounded result into one document, which is a request that never returns and
+  *     a heap that never stops growing.
   *   - a [[StatementShape.PullQuery]] ends. `SELECT … FROM t WHERE k = 'x'` reads the materialised state once
   *     and answers rows.
   *   - everything else is a [[StatementShape.Statement]]: DDL and DML, which answer a *status* rather than
@@ -87,10 +88,10 @@ object StatementProblem {
   * It is a **classifier, not a SQL parser**, and the line matters because the classification gates a
   * destructive operation. It strips `--` line comments and the slash-star block comments, it knows that a `;`
   * inside a single-quoted literal does not end a statement, and it then looks at the leading keyword and at
-  * whether the remaining text contains `EMIT CHANGES` or `DELETE TOPIC` outside quotes. That is enough to be
-  * *conservative* in the direction that matters: anything it cannot confidently call harmless it calls
-  * destructive, and a statement it cannot split into exactly one is refused rather than guessed at. ADR-055
-  * §6 states the limits and the one case that would change them.
+  * whether the remaining text contains `EMIT CHANGES`, `EMIT FINAL` or `DELETE TOPIC` outside quotes. That is
+  * enough to be *conservative* in the direction that matters: anything it cannot confidently call harmless it
+  * calls destructive, and a statement it cannot split into exactly one is refused rather than guessed at.
+  * ADR-055 §6 states the limits and the one case that would change them.
   */
 final case class KsqlStatement private (
     text: String,
@@ -128,10 +129,14 @@ object KsqlStatement {
     */
   val MaxLength: Int = 16384
 
-  /** The keyword that makes a `SELECT` unbounded. Two words, matched with any run of whitespace between them,
-    * because `EMIT\n  CHANGES` is what a formatted statement looks like.
+  /** The output refinement that makes a `SELECT` unbounded.
+    *
+    * `EMIT CHANGES` is the ordinary push query. `EMIT FINAL` is the other refinement ksqlDB 0.28+ accepts on
+    * a windowed aggregation, and it is a push query too: the `/query` response stays open. Matched with any
+    * run of whitespace between the words, because `EMIT\n  CHANGES` is what a formatted statement looks like.
+    * Comments are already gone from the token text this is applied to, so `EMIT /*x*/ FINAL` still matches.
     */
-  private val EmitChanges = """(?is)\bEMIT\s+CHANGES\b""".r
+  private val EmitRefinement = """(?is)\bEMIT\s+(?:CHANGES|FINAL)\b""".r
 
   /** The clause that makes a `DROP` destroy data outside ksqlDB.
     *
@@ -166,7 +171,7 @@ object KsqlStatement {
 
     val shape =
       if !SelectLeading.matches(quoteless) then StatementShape.Statement
-      else if EmitChanges.findFirstIn(quoteless).isDefined then StatementShape.PushQuery
+      else if EmitRefinement.findFirstIn(quoteless).isDefined then StatementShape.PushQuery
       else StatementShape.PullQuery
 
     KsqlStatement(

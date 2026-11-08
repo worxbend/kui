@@ -50,6 +50,26 @@ final class StatementsSuite extends FunSuite {
     assertEquals(parsed("CREATE STREAM A AS SELECT * FROM B EMIT CHANGES;").shape, StatementShape.Statement)
   }
 
+  test("a windowed SELECT with EMIT FINAL is a push query, and a literal mentioning it is not") {
+    // ksqlDB 0.28+ accepts EMIT FINAL on a windowed aggregation. It is a transient push query: the
+    // response stays open until a window closes, so classifying it as a pull query sends it to POST
+    // /query and waits until the call timeout.
+    val windowed =
+      "SELECT k, COUNT(*) FROM s WINDOW TUMBLING (SIZE 1 MINUTE) GROUP BY k EMIT FINAL;"
+
+    assertEquals(parsed(windowed).shape, StatementShape.PushQuery)
+    assertEquals(parsed("SELECT k FROM s EMIT /*x*/ FINAL;").shape, StatementShape.PushQuery)
+    assertEquals(parsed("SELECT k\nFROM s\nEMIT\nFINAL;").shape, StatementShape.PushQuery)
+    assertEquals(
+      parsed("SELECT k FROM s WHERE note = 'EMIT FINAL';").shape,
+      StatementShape.PullQuery
+    )
+    assertEquals(
+      parsed("CREATE TABLE T AS SELECT k, COUNT(*) FROM s GROUP BY k EMIT FINAL;").shape,
+      StatementShape.Statement
+    )
+  }
+
   test("a statement that is not a SELECT answers a status rather than rows") {
     List(
       "CREATE STREAM ORDERS (ID STRING) WITH (KAFKA_TOPIC='orders', VALUE_FORMAT='JSON');",

@@ -250,6 +250,25 @@ final class KsqlUseCasesSuite extends CatsEffectSuite {
     )
   }
 
+  test("a SELECT ... EMIT FINAL is refused here without calling ksqlDB") {
+    val windowed =
+      "SELECT k, COUNT(*) FROM s WINDOW TUMBLING (SIZE 1 MINUTE) GROUP BY k EMIT FINAL;"
+
+    rig().flatMap { rig =>
+      for {
+        answer <- rig.useCases.execute(alice, cluster, windowed, None)
+        executed <- rig.server.executed.get
+        opened <- rig.server.opened.get
+      } yield {
+        assertEquals(answer.left.toOption.map(_.message), Some(KsqlUseCases.PushQueryElsewhere))
+        assert(clue(KsqlUseCases.PushQueryElsewhere).contains("EMIT FINAL"))
+        assert(clue(KsqlUseCases.PushQueryElsewhere).contains("EMIT CHANGES"))
+        assertEquals(executed, Nil)
+        assertEquals(opened, Nil)
+      }
+    }
+  }
+
   test("a SELECT ... EMIT CHANGES is refused here and the refusal names the address that answers it") {
     // The required case's first half: a push query answers a stream rather than a document. Buffering an
     // unbounded result into one JSON body is a request that never returns and a heap that never stops

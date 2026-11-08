@@ -110,7 +110,7 @@ object KsqlUseCases {
     * alternative is a dead end for whoever is holding a `curl`.
     */
   val PushQueryElsewhere: String =
-    "a SELECT ... EMIT CHANGES is a push query: it never finishes, so it is answered by " +
+    "a SELECT ... EMIT CHANGES or EMIT FINAL is a push query: it never finishes, so it is answered by " +
       "GET .../ksql/stream?statement=... and not here"
 
   val FinishingQueryElsewhere: String =
