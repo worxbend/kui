@@ -110,7 +110,27 @@ final class ClusterConfigSuite extends KuiSuite {
 
     assertEquals(found.map(_.key), List("kui.clusters.<n>.properties"))
     assert(found.head.problem.contains("KUI_CLUSTERS_0_PROPERTIES_SSL_CIPHER_SUITES"), found.head.problem)
-    assert(found.head.problem.contains("env:NAME"), found.head.problem)
+    assert(found.head.problem.contains("literal"), found.head.problem)
+    assert(!found.head.problem.contains("still uses env:NAME"), found.head.problem)
+  }
+
+  test("aPropertyValueIsLiteralAndDoesNotResolveEnv") {
+    val file = ConfigFixtures.yaml(
+      """kui:
+        |  clusters:
+        |    - name: One
+        |      bootstrapServers: broker:9092
+        |      properties:
+        |        ssl.truststore.password: env:TS_PW
+        |""".stripMargin
+    )
+
+    val cluster = loaded(load(List(file), env = Map("TS_PW" -> "x"))).clusters.head
+
+    assertEquals(
+      cluster.properties.get("ssl.truststore.password").map(_.unsafeValue),
+      Some("env:TS_PW")
+    )
   }
 
   test("emptyClusterListLoads") {

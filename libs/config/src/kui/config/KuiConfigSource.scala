@@ -2221,8 +2221,9 @@ object KuiConfigSource {
           s"$ClustersPrefix.<n>.properties",
           s"cannot be set from the environment (${names.mkString(", ")}); a Kafka property name contains " +
             "dots that the KUI_* mapping cannot round-trip, so raw properties are read from a YAML file " +
-            "only. A secret inside properties still uses env:NAME, which travels through the environment " +
-            "as a value rather than as a key",
+            "only. Values under properties are literal text and are not resolved: env:NAME and file:/path " +
+            "written there are sent to the Kafka client unchanged. A secret belongs on the typed security " +
+            "keys, which do resolve those references",
           ConfigSourceName.Env
         ).invalidNel
     }
