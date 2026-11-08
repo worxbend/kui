@@ -36,8 +36,17 @@ object ConnectionProperties {
               case Left(error) =>
                 Async[F].pure(Left(error): Either[KuiError, ClientProperties])
               case Right(materialized) =>
-                report(connection, materialized, log)
-                  .as(renderWith(connection, purpose, clientId, materialized))
+                report(connection, materialized, log).map { _ =>
+                  renderWith(connection, purpose, clientId, materialized) match {
+                    case right @ Right(properties) =>
+                      // After render, so an override that replaced the token endpoint is what gets
+                      // listed. Kafka reads the list when the client is constructed, which is after
+                      // this resource yields.
+                      OAuthBearerAllowList.permit(properties)
+                      right
+                    case left => left
+                  }
+                }
             }
       }
 

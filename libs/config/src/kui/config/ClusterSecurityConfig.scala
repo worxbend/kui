@@ -109,8 +109,17 @@ object ClusterSecurityConfig {
     * reported with its own key, so the operator sees every field they still have to fill in rather than one
     * per restart.
     */
-  def decode(prefix: String, lookup: Lookup): Problems[ClusterSecurityDraft] = {
-    val reader = Reader(prefix, lookup)
+  def decode(prefix: String, lookup: Lookup): Problems[ClusterSecurityDraft] =
+    decode(prefix, lookup, UrlPolicy.Strict)
+
+  /** `policy` is applied to every token endpoint this mechanism will hand to Kafka.
+    *
+    * Kafka's OAuth HTTP client does not apply [[UrlPolicy]] when it dials, so a metadata address written here
+    * would be requested once the client allow-lists it. The check is the same one every other outbound URL
+    * goes through. The two-argument [[decode]] uses [[UrlPolicy.Strict]].
+    */
+  def decode(prefix: String, lookup: Lookup, policy: UrlPolicy): Problems[ClusterSecurityDraft] = {
+    val reader = Reader(prefix, lookup, policy)
     reader.enumerated("protocol", Protocols, "PLAINTEXT").andThen {
       case "PLAINTEXT" =>
         (rejectMechanism(reader, "PLAINTEXT"), draft(Map.empty, _ => ClusterSecurity.Plaintext).validNel)
@@ -228,7 +237,7 @@ object ClusterSecurityConfig {
 
       case "OAUTHBEARER" =>
         (
-          reader.text("tokenEndpoint"),
+          reader.httpUrl("tokenEndpoint"),
           reader.text("clientId"),
           reader.secret("clientSecret"),
           reader.optionalText("scope")
@@ -250,7 +259,7 @@ object ClusterSecurityConfig {
           }
 
       case "AZURE_ENTRA" =>
-        (reader.text("namespace"), reader.optionalText("tokenEndpoint")).mapN { (namespace, endpoint) =>
+        (reader.text("namespace"), reader.optionalHttpUrl("tokenEndpoint")).mapN { (namespace, endpoint) =>
           (
             Map.empty[String, SecretRef],
             (_: Map[String, Secret[String]]) => SaslMechanism.AzureEntra(namespace, endpoint)
@@ -283,7 +292,7 @@ object ClusterSecurityConfig {
   // -----------------------------------------------------------------------------------------------
 
   /** Reads leaves under one prefix and builds problems that name the full dotted key. */
-  final private case class Reader(prefix: String, lookup: Lookup) {
+  final private case class Reader(prefix: String, lookup: Lookup, policy: UrlPolicy) {
 
     def key(leaf: String): String = s"$prefix.$leaf"
 
@@ -303,6 +312,23 @@ object ClusterSecurityConfig {
 
     def optionalText(leaf: String): Problems[Option[String]] =
       raw(leaf).map(_.trim).filter(_.nonEmpty).validNel
+
+    /** A required http(s) URL, checked with the deployment's [[UrlPolicy]]. */
+    def httpUrl(leaf: String): Problems[String] =
+      text(leaf).andThen(checkUrl(leaf, _))
+
+    /** The same check, for a URL that may be absent. */
+    def optionalHttpUrl(leaf: String): Problems[Option[String]] =
+      optionalText(leaf).andThen {
+        case None => none[String].validNel
+        case Some(raw) => checkUrl(leaf, raw).map(Some(_))
+      }
+
+    private def checkUrl(leaf: String, raw: String): Problems[String] =
+      SafeUrl.from(raw, policy) match {
+        case Right(_) => raw.validNel
+        case Left(error) => problem(leaf, error.message).invalidNel
+      }
 
     /** A secret leaf: the dotted key it lives at, and the reference found there, still unresolved. */
     def secret(leaf: String): Problems[(String, SecretRef)] =

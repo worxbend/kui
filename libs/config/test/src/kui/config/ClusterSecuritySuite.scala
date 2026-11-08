@@ -17,9 +17,13 @@ import kui.testkit.KuiSuite
   */
 final class ClusterSecuritySuite extends KuiSuite {
 
-  private def load(yaml: String, env: Map[String, String] = Map.empty): Either[ConfigErrors, KuiConfig] =
+  private def load(
+      yaml: String,
+      env: Map[String, String] = Map.empty,
+      policy: UrlPolicy = UrlPolicy.Dev
+  ): Either[ConfigErrors, KuiConfig] =
     KuiConfigSource
-      .loadFrom[IO](Nil, List(ConfigFixtures.yaml(yaml)), env, UrlPolicy.Dev)
+      .loadFrom[IO](Nil, List(ConfigFixtures.yaml(yaml)), env, policy)
       .unsafeRunSync()
 
   /** One cluster whose `security` block is the indented text supplied. */
@@ -34,8 +38,8 @@ final class ClusterSecuritySuite extends KuiSuite {
   private def securityOf(yaml: String, env: Map[String, String] = Map.empty): ClusterSecurity =
     load(yaml, env).fold(errors => fail(errors.render), _.clusters.head.security)
 
-  private def problemKeys(yaml: String): List[String] =
-    load(yaml) match {
+  private def problemKeys(yaml: String, policy: UrlPolicy = UrlPolicy.Dev): List[String] =
+    load(yaml, policy = policy) match {
       case Left(errors) => errors.problems.toList.map(_.key).sorted
       case Right(_) => fail("expected the load to fail, but it succeeded")
     }
@@ -135,6 +139,55 @@ final class ClusterSecuritySuite extends KuiSuite {
     assertEquals(
       saslOf(security),
       SaslMechanism.Gssapi("kafka", "kui@EXAMPLE.COM", Some("/etc/kui/kui.keytab"), false, true)
+    )
+  }
+
+  test("anOAuthTokenEndpointOnAMetadataAddressIsRefused") {
+    // Kafka's OAuth client does not apply UrlPolicy when it dials the token endpoint, so the check
+    // has to happen here, before that URL is allow-listed. Strict is what production loads with.
+    val yaml = cluster("""        protocol: SASL_SSL
+                          |        mechanism: OAUTHBEARER
+                          |        tokenEndpoint: http://169.254.169.254/latest/api/token
+                          |        clientId: kui
+                          |        clientSecret: secret""".stripMargin)
+
+    assertEquals(
+      problemKeys(yaml, UrlPolicy.Strict),
+      List("kui.clusters.0.security.tokenEndpoint")
+    )
+    assertEquals(
+      saslOf(securityOf(yaml, env = Map.empty)),
+      SaslMechanism.OAuthBearer(
+        "http://169.254.169.254/latest/api/token",
+        "kui",
+        kui.kernel.Secret("secret"),
+        None
+      )
+    )
+  }
+
+  test("anOverrideThatReplacesTheTokenEndpointIsRefusedWhenThePolicyRefusesIt") {
+    // `properties` is applied after the typed endpoint, and that is the URL Kafka will request, so
+    // the policy has to see the override too. Otherwise the allow-list would name an address the
+    // typed field was not allowed to.
+    val yaml =
+      """kui:
+        |  clusters:
+        |    - name: One
+        |      bootstrapServers: broker:9092
+        |      security:
+        |        protocol: SASL_SSL
+        |        mechanism: OAUTHBEARER
+        |        tokenEndpoint: https://login.example.com/token
+        |        clientId: kui
+        |        clientSecret: secret
+        |      properties:
+        |        sasl.oauthbearer.token.endpoint.url: http://169.254.169.254/latest
+        |""".stripMargin
+
+    assertEquals(
+      problemKeys(yaml, UrlPolicy.Strict),
+      List("kui.clusters.0.properties.sasl.oauthbearer.token.endpoint.url")
     )
   }
 

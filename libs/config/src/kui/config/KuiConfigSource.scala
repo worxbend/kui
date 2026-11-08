@@ -16,6 +16,7 @@ import cats.syntax.all.*
 import ciris.{ConfigError, ConfigKey, ConfigValue}
 import io.circe.Json
 
+import kui.kafka.auth.OAuthBearerAllowList
 import kui.kernel.cluster.{AdminTuning, BootstrapServers, ClientProperties}
 import kui.kernel.search.SearchMode
 import kui.kernel.serde.SerdeName
@@ -508,7 +509,7 @@ object KuiConfigSource {
       server <- decodeServer[F](layers)
       gateway <- decodeGateway[F](layers, policy)
       telemetry <- decodeTelemetry[F](layers, policy)
-      store <- decodeStore[F](layers)
+      store <- decodeStore[F](layers, policy)
       topics <- decodeTopics[F](layers, policy)
       consumers <- decodeConsumers[F](layers)
       streaming <- decodeStreaming[F](layers)
@@ -813,7 +814,7 @@ object KuiConfigSource {
     * cross-field rules that no single field can check on its own and which are therefore checked here, each
     * producing its own problem so that an operator sees all of them at once.
     */
-  private def decodeStore[F[_]: Async](layers: Layers): F[Problems[StoreDraft]] =
+  private def decodeStore[F[_]: Async](layers: Layers, policy: UrlPolicy): F[Problems[StoreDraft]] =
     for {
       prefix <- read[F, String](
         field(
@@ -873,7 +874,7 @@ object KuiConfigSource {
         field("kui.store.dir", "a directory path", raw => readNonEmpty(raw).map(Path.of(_))),
         layers
       )
-      kafka <- decodeStoreKafka[F](layers)
+      kafka <- decodeStoreKafka[F](layers, policy)
       encryption = decodeStoreEncryption(layers)
       fields = (prefix, replication, minIsr, maxFile, replay, write, dir, kafka, encryption)
         .mapN(StoreDraft.apply)
@@ -905,7 +906,10 @@ object KuiConfigSource {
       }
 
   /** The store cluster's connection, or `None` when no bootstrap servers are configured. */
-  private def decodeStoreKafka[F[_]: Async](layers: Layers): F[Problems[Option[StoreKafkaDraft]]] = {
+  private def decodeStoreKafka[F[_]: Async](
+      layers: Layers,
+      policy: UrlPolicy
+  ): F[Problems[Option[StoreKafkaDraft]]] = {
     val key = "kui.store.kafka.bootstrapServers"
     if layers.first(key).isEmpty then Async[F].pure(none[StoreKafkaDraft].validNel)
     else
@@ -913,9 +917,11 @@ object KuiConfigSource {
         field(key, "a comma-separated list of host:port entries", readBootstrapServers),
         layers
       ).map { servers =>
-        val security = ClusterSecurityConfig.decode("kui.store.kafka.security", layers.first)
-        val properties = propertiesUnder(layers, "kui.store.kafka.properties")
-        (servers, security).mapN((s, sec) => Some(StoreKafkaDraft(s, sec, properties)))
+        val prefix = "kui.store.kafka"
+        val security = ClusterSecurityConfig.decode(s"$prefix.security", layers.first, policy)
+        val properties = propertiesUnder(layers, s"$prefix.properties")
+        val urls = oauthUrlProblems(s"$prefix.properties", properties, policy, layers)
+        (servers, security, urls).mapN((s, sec, _) => Some(StoreKafkaDraft(s, sec, properties)))
       }
   }
 
@@ -927,6 +933,36 @@ object KuiConfigSource {
     */
   private def propertiesUnder(layers: Layers, prefix: String): Map[String, String] =
     layers.documents.flatMap(document => Layers.leavesUnder(document.json, prefix)).toMap
+
+  /** OAuth endpoints in the override layer, checked before a client allow-lists them.
+    *
+    * The override wins over the typed token endpoint, so checking only the typed field would let
+    * `sasl.oauthbearer.token.endpoint.url` name a metadata address that Kafka's own HTTP client would then
+    * dial. Kafka does not apply [[UrlPolicy]] to the address it connects to.
+    */
+  private def oauthUrlProblems(
+      prefix: String,
+      properties: Map[String, String],
+      policy: UrlPolicy,
+      layers: Layers
+  ): Problems[Unit] = {
+    val problems = OAuthBearerAllowList.UrlKeys.toList.sorted.flatMap { key =>
+      properties.get(key).flatMap { value =>
+        SafeUrl.from(value, policy) match {
+          case Right(_) => None
+          case Left(error) =>
+            val dotted = s"$prefix.$key"
+            val source = layers.first(dotted).map(_._1).getOrElse(ConfigSourceName.Default)
+            Some(ConfigProblem(dotted, error.message, source))
+        }
+      }
+    }
+
+    problems match {
+      case Nil => ().validNel
+      case head :: tail => NonEmptyList(head, tail).invalid
+    }
+  }
 
   /** `encryptionKey` is one key with the id `k1`; `encryptionKeys` is `id:base64,id:base64`. Setting both is
     * an error rather than a merge: the shorthand exists for the common case, not as an alias.
@@ -2283,7 +2319,7 @@ object KuiConfigSource {
       )
       readOnly <- read[F, Boolean](field(s"$prefix.readOnly", "true or false", readBoolean, false), layers)
       security <- ClusterSecurityConfig
-        .decode(s"$prefix.security", layers.first)
+        .decode(s"$prefix.security", layers.first, policy)
         .traverse(draft => ClusterSecurityConfig.resolve[F](draft, layers.env))
         .map(_.andThen(identity))
       admin <- decodeAdminTuning[F](layers, index)
@@ -2292,8 +2328,21 @@ object KuiConfigSource {
       ksql <- decodeKsql[F](layers, s"$prefix.ksql", policy)
       serde <- decodeClusterSerde[F](layers, s"$prefix.serde")
       masking <- decodeMasking[F](layers, s"$prefix.masking")
-      properties = ClientProperties.fromRaw(propertiesUnder(layers, s"$prefix.properties"))
-    } yield (name, servers, readOnly, security, admin, registry, connect, ksql, serde, masking).tupled
+      rawProperties = propertiesUnder(layers, s"$prefix.properties")
+      urls = oauthUrlProblems(s"$prefix.properties", rawProperties, policy, layers)
+    } yield (
+      name,
+      servers,
+      readOnly,
+      security,
+      admin,
+      registry,
+      connect,
+      ksql,
+      serde,
+      masking,
+      urls
+    ).tupled
       .andThen {
         (
             clusterName,
@@ -2305,7 +2354,8 @@ object KuiConfigSource {
             connectClusters,
             ksqldb,
             serdes,
-            maskingRules
+            maskingRules,
+            _
         ) =>
           // The id is derived last, and only from a name that decoded: deriving it from a name that did
           // not would report the same bad name twice, once under `.name` and once under `.id`.
@@ -2315,7 +2365,7 @@ object KuiConfigSource {
               name = clusterName,
               bootstrapServers = bootstrap,
               security = sec,
-              properties = properties,
+              properties = ClientProperties.fromRaw(rawProperties),
               readOnly = readonly,
               admin = tuning,
               serde = serdes,

@@ -185,6 +185,14 @@ secret reference. The secured cluster in
 [`three-clusters.yaml`](../../deployment/examples/three-clusters.yaml) is the repository's worked
 configuration shape.
 
+`OAUTHBEARER` (and an `AZURE_ENTRA` token endpoint) is checked with the same URL policy as any other
+upstream when the configuration is loaded. kafka-clients 4.x will still not request a token until that
+exact URL is named in `org.apache.kafka.sasl.oauthbearer.allowed.urls`. KUI adds the endpoint it rendered
+when it builds the client, so the flag does not have to be set on the process. Kafka's own HTTP client
+does not apply KUI's connected-IP check: a name that was public when the configuration was accepted is
+dialled even if it later resolves to a link-local or metadata address. Do not point a token endpoint at
+an untrusted name.
+
 Treat Schema Registry, Connect, ksqlDB, and external metrics endpoints the same way: use HTTPS,
 configure their supported authentication mode, and mount private trust material read-only. The
 [metrics-source guide](configuration.md) documents the metrics-specific TLS, mTLS, authentication,

@@ -2,6 +2,8 @@ package kui.kafka.auth
 
 import scala.jdk.CollectionConverters.*
 
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
 import org.apache.kafka.clients.admin.AdminClientConfig
 import org.apache.kafka.common.security.JaasContext
 import org.apache.kafka.common.security.auth.AuthenticateCallbackHandler
@@ -75,5 +77,51 @@ final class KafkaOAuthBearerSuite extends KuiSuite {
 
     try withAllowedUrl(tokenEndpoint)(handler.configure(config, properties("sasl.mechanism"), entries))
     finally handler.close()
+  }
+
+  test("buildingAClientAllowListsTheTokenEndpointKafkaWouldOtherwiseRefuse") {
+    // kafka-clients 4.x rejects every token endpoint absent from
+    // org.apache.kafka.sasl.oauthbearer.allowed.urls, and the default is empty. The property is not
+    // something an operator sets: ConnectionProperties, which every client factory goes through,
+    // has to add the endpoint it just rendered. This test clears the property first, so a pass
+    // means KUI added it. configure makes no network call.
+    val previous = Option(System.getProperty(AllowedUrls))
+    val _ = System.clearProperty(AllowedUrls)
+    try {
+      val properties = ConnectionProperties
+        .resource[IO](
+          ClusterConnection(
+            id = ClusterId.unsafe("oauth"),
+            bootstrapServers = BootstrapServers.unsafe("broker-1:9093"),
+            security = ClusterSecurity.Sasl(
+              SaslProtocol.SaslSsl,
+              SaslMechanism.OAuthBearer(tokenEndpoint, "kui", Secret("kui-secret"), Some("kafka")),
+              None
+            ),
+            overrides = ClientProperties.empty,
+            admin = AdminTuning.default
+          ),
+          ClientPurpose.Admin,
+          "kui-admin-oauth"
+        )
+        .use {
+          case Left(error) => IO.raiseError(new RuntimeException(error.message))
+          case Right(rendered) => IO.pure(rendered.unsafeValues)
+        }
+        .unsafeRunSync()
+
+      val config = new AdminClientConfig(properties.asJava).values
+      val entries = JaasContext.loadClientContext(config).configurationEntries
+      val handler = Class
+        .forName(properties("sasl.login.callback.handler.class"))
+        .asSubclass(classOf[AuthenticateCallbackHandler])
+        .getDeclaredConstructor()
+        .newInstance()
+
+      try handler.configure(config, properties("sasl.mechanism"), entries)
+      finally handler.close()
+    } finally {
+      val _ = previous.fold(System.clearProperty(AllowedUrls))(System.setProperty(AllowedUrls, _))
+    }
   }
 }
