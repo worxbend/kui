@@ -86,7 +86,11 @@ RUN pnpm exec storybook build --output-dir /storybook --quiet
 # `nginx-unprivileged` runs as uid 101 throughout and keeps its temporary paths under `/tmp`, so it
 # needs no capability at all. It also cannot bind below port 1024, which is why this listens on
 # 8081.
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+# 1.30 is nginx's stable line. The digest makes the image a reviewed edit rather than whatever the
+# tag answers today, and Dependabot's docker updater proposes the next one. The tag this replaced,
+# 1.27-alpine, was last rebuilt on 2025-06-23, so every image built since shipped that day's nginx
+# and Alpine.
+FROM nginxinc/nginx-unprivileged:1.30-alpine@sha256:f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03
 
 # Storybook is a single-page application: it routes on the fragment and the path, so a deep link to
 # one story must be answered with `index.html` rather than a 404. Without this, every link anybody

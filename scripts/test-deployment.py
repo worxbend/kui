@@ -10,6 +10,7 @@ For config-only checks (no containers), run:
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -19,7 +20,17 @@ from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parent.parent
-IMAGE = "nginxinc/nginx-unprivileged:1.27-alpine"
+
+
+def runtime_image(dockerfile):
+    """The image a Dockerfile's last stage starts FROM: the one its container runs."""
+    images = re.findall(r"(?m)^FROM\s+(\S+)", (ROOT / dockerfile).read_text())
+    if not images:
+        raise AssertionError(f"{dockerfile} has no FROM line")
+    return images[-1]
+
+
+IMAGE = runtime_image("deployment/frontend/Dockerfile")
 COMPOSE = [
     "docker", "compose", "--env-file", "/dev/null",
     "-f", str(ROOT / "deployment/quickstart/docker-compose.quickstart.yml"),
@@ -169,6 +180,23 @@ class ToolPins(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("pnpm exec http-server storybook-static", workflow)
         self.assertNotIn("npx --yes http-server", workflow)
+
+    def test_nginx_runtime_images_are_pinned_and_updated(self):
+        # A tag nginx has stopped rebuilding (1.27-alpine, last pushed 2025-06-23) froze both
+        # images while every rebuild looked fresh. A digest makes the version a reviewed edit,
+        # and only Dependabot's docker updater proposes the next one.
+        for dockerfile in ("deployment/frontend/Dockerfile", "deployment/storybook/Dockerfile"):
+            with self.subTest(dockerfile=dockerfile):
+                image = runtime_image(dockerfile)
+                self.assertTrue(image.startswith("nginxinc/nginx-unprivileged:"), image)
+                self.assertRegex(image, r"@sha256:[0-9a-f]{64}$")
+        # The proxy cases run the image that ships, not a copy of its name.
+        self.assertEqual(IMAGE, runtime_image("deployment/frontend/Dockerfile"))
+        dependabot = (ROOT / ".github/dependabot.yml").read_text()
+        updater = re.search(r"(?ms)^  - package-ecosystem: docker\n(.*?)(?=^  - |\Z)", dependabot)
+        self.assertIsNotNone(updater, "dependabot.yml has no docker updater")
+        for directory in ("/deployment/frontend", "/deployment/storybook"):
+            self.assertRegex(updater.group(1), rf"(?m)^\s+- {re.escape(directory)}$")
 
 
 class QuickstartBindings(unittest.TestCase):

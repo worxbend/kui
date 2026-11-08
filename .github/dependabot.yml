@@ -23,3 +23,19 @@ updates:
       timezone: Europe/Kyiv
     open-pull-requests-limit: 5
     versioning-strategy: increase
+
+  # The nginx runtime stages are pinned by digest, which freezes them until something proposes the
+  # next one; that is this entry. Node is left out: the build stages carry .tool-versions' number,
+  # mirrored by hand into ci.yml, and a bump made here alone would split them.
+  - package-ecosystem: docker
+    directories:
+      - /deployment/frontend
+      - /deployment/storybook
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Kyiv
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: node
