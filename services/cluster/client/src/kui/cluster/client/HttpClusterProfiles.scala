@@ -566,9 +566,11 @@ object HttpClusterProfiles {
           PrincipalClaims(
             subject = identity,
             roles = Set.empty,
-            // A machine, not a person: this is one KUI process calling another, and an audit line that
-            // named a human for it would be a lie.
-            kind = PrincipalKind.Bearer,
+            // KUI itself. The profile and its change stream admit only PrincipalKind.System, including
+            // when RBAC is off, because the document carries connection credentials. An empty role set is
+            // deliberate: a collector is not a member of the deployment's roles, and the cluster list
+            // skips its per-row filter for this kind.
+            kind = PrincipalKind.System,
             sessionRef = None,
             issuedAt = now,
             expiresAt = now.plusSeconds(TokenLifetimeSeconds),

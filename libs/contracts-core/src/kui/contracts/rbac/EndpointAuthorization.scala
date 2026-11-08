@@ -95,8 +95,18 @@ object ResourceRequirement {
   * @param requirements
   *   every resource the call touches. All of them must be permitted: an operation that reads one topic and
   *   writes another is refused unless both are allowed, and it is refused before either happens
+  * @param serviceOnly
+  *   when true, only [[kui.security.PrincipalKind.System]] may call the endpoint. A session, an anonymous
+  *   caller and a bearer token are refused even when RBAC is switched off and even when a role would cover
+  *   the cluster. The cluster profile and its change stream use this: both documents are how one KUI process
+  *   learns another's connection settings, and a browser session that can read them can leave with the
+  *   credentials
   */
-final case class EndpointAuthorization(operation: String, requirements: List[ResourceRequirement])
+final case class EndpointAuthorization(
+    operation: String,
+    requirements: List[ResourceRequirement],
+    serviceOnly: Boolean = false
+)
 
 object EndpointAuthorization {
 
@@ -112,6 +122,10 @@ object EndpointAuthorization {
     * removes the rows they may not see, inside the service that has the rows.
     */
   def clusterScoped(operation: String): EndpointAuthorization = EndpointAuthorization(operation, List.empty)
+
+  /** A declaration only another KUI process may satisfy. See the `serviceOnly` parameter. */
+  def serviceOnly(operation: String): EndpointAuthorization =
+    EndpointAuthorization(operation, List.empty, serviceOnly = true)
 
   /** A declaration over one resource, which is what almost every endpoint needs. */
   def one(operation: String, requirement: ResourceRequirement): EndpointAuthorization =

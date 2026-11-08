@@ -105,6 +105,9 @@ enum DenialReason {
   /** The principal's permissions do not cover these actions on this resource. */
   case MissingActions(resource: Resource, name: Option[String], actions: Set[Action])
 
+  /** The endpoint admits only [[kui.security.PrincipalKind.System]], and this caller is not one. */
+  case ServicePrincipalRequired(operation: OperationName)
+
   /** A one-line rendering for a log or an audit record. It names the resource and the actions and never the
     * principal, because the caller of this already knows who it asked about.
     */
@@ -115,6 +118,8 @@ enum DenialReason {
     case MissingActions(resource, name, actions) =>
       val on = name.fold(resource.wire)(value => s"${resource.wire} $value")
       s"${render(actions)} on $on is not granted"
+    case ServicePrincipalRequired(operation) =>
+      s"${operation.value} accepts only a service principal"
   }
 
   private def render(actions: Set[Action]): String =

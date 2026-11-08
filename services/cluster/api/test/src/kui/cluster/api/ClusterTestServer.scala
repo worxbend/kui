@@ -100,14 +100,15 @@ object ClusterTestServer {
       validFor: FiniteDuration = 60.seconds,
       digest: RequestDigest = RequestDigest.ofRequestLine("GET", ClustersPath),
       subject: String = "alice",
-      roles: Set[RoleName] = Set.empty
+      roles: Set[RoleName] = Set.empty,
+      kind: PrincipalKind = PrincipalKind.Session
   ): IO[SignedPrincipal] =
     IO.realTimeInstant.flatMap(now =>
       codec.sign(
         PrincipalClaims(
           subject = UserName.unsafe(subject),
           roles = roles,
-          kind = PrincipalKind.Session,
+          kind = kind,
           sessionRef = None,
           issuedAt = now,
           expiresAt = now.plusSeconds(validFor.toSeconds),

@@ -18,8 +18,10 @@ import kui.cluster.contract.ProfileEndpoints
 import kui.cluster.domain.{ClusterProfile, StoreHealth}
 import kui.contracts.KuiEndpoint
 import kui.http.principal.RbacGuard
+import kui.kernel.{RoleName, UserName}
 import kui.observability.Telemetry
 import kui.security.*
+import kui.security.rbac.{Action, ClusterFlags, RbacPolicy, Resource as RbacResource, ResourcePattern, Role}
 import kui.testkit.fakes.FakeStructuredLogger
 
 /** That a service fetching a cluster's settings gets them, gets told when they have not changed, and never
@@ -31,7 +33,8 @@ final class ProfileRoutesSuite extends CatsEffectSuite {
   private val path = "/internal/v1/clusters/prod-eu/profile"
 
   private def server(
-      registry: ClusterRegistry[IO] = new ClusterFixtures.StubRegistry(List(profile))
+      registry: ClusterRegistry[IO] = new ClusterFixtures.StubRegistry(List(profile)),
+      policy: Option[RbacPolicy] = None
   ): Resource[IO, ClusterTestServer] =
     OtelJavaTestkit.inMemory[IO]().evalMap { testkit =>
       val telemetry = Telemetry.fromProviders(testkit.tracerProvider, testkit.meterProvider)
@@ -41,10 +44,13 @@ final class ProfileRoutesSuite extends CatsEffectSuite {
         logger <- FakeStructuredLogger[IO]
         rejections <- ClusterTestServer.rejectionCounter(testkit)
         interceptors <- ClusterApi.interceptors[IO](telemetry, rejections, logger)
+        guard = policy.fold(RbacGuard.allowAll[IO])(configured =>
+          RbacGuard.fromPolicy[IO](configured, _ => ClusterFlags.Writable, logger)
+        )
       } yield ClusterTestServer(
         TapirStreamStubInterpreter(interceptors, StreamBackendStub[IO, Fs2Streams[IO]](summon))
           .whenServerEndpointsRunLogic(
-            ProfileRoutes[IO](registry, codec, rejections, telemetry, logger, RbacGuard.allowAll[IO])
+            ProfileRoutes[IO](registry, codec, rejections, telemetry, logger, guard)
           )
           .backend(),
         logger,
@@ -53,18 +59,35 @@ final class ProfileRoutesSuite extends CatsEffectSuite {
       )
     }
 
+  private val readers: RbacPolicy = RbacPolicy(
+    List(
+      Role(
+        RoleName.unsafe("readers"),
+        Set(profile.id),
+        Nil,
+        List(
+          RbacPolicy.permission(RbacResource.Topic, Some(ResourcePattern.Everything), Set(Action.TopicView))
+        )
+      )
+    ),
+    None
+  )
+
   private def get(
       service: ClusterTestServer,
       at: String,
-      ifNoneMatch: Option[String] = None
+      ifNoneMatch: Option[String] = None,
+      kind: PrincipalKind = PrincipalKind.Session,
+      roles: Set[RoleName] = Set.empty,
+      subject: String = "kui-topic"
   ): IO[Response[String]] =
     IO.realTimeInstant.flatMap { now =>
       service.principals
         .sign(
           PrincipalClaims(
-            subject = kui.kernel.UserName.unsafe("kui-topic"),
-            roles = Set.empty,
-            kind = PrincipalKind.Session,
+            subject = UserName.unsafe(subject),
+            roles = roles,
+            kind = kind,
             sessionRef = None,
             issuedAt = now,
             expiresAt = now.plusSeconds(60L),
@@ -136,6 +159,31 @@ final class ProfileRoutesSuite extends CatsEffectSuite {
       assertEquals(response.code.code, 404, response.body)
       assert(response.body.contains("KUI-CLUSTER-NOT-FOUND"), response.body)
     }
+  }
+
+  test("a role-less system principal can read a profile when rbac is enabled") {
+    server(policy = Some(readers))
+      .use(get(_, path, kind = PrincipalKind.System, subject = "kui-metrics"))
+      .map { response =>
+        assertEquals(response.code.code, 200, response.body)
+        assert(response.body.contains("prod-eu"), response.body)
+      }
+  }
+
+  test("a session principal is refused the profile even when its role covers the cluster") {
+    server(policy = Some(readers))
+      .use(
+        get(
+          _,
+          path,
+          kind = PrincipalKind.Session,
+          roles = Set(RoleName.unsafe("readers")),
+          subject = "ada"
+        )
+      )
+      .map { response =>
+        assertEquals(response.code.code, 403, response.body)
+      }
   }
 
   // -----------------------------------------------------------------------------------------------

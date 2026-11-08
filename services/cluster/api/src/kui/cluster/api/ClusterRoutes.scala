@@ -17,7 +17,7 @@ import kui.contracts.cluster.{ClusterRowDto, LogDirDto}
 import kui.http.principal.RbacGuard
 import kui.kernel.ClusterId
 import kui.kernel.error.{ErrorCode, KuiError}
-import kui.security.PrincipalCodec
+import kui.security.{PrincipalCodec, PrincipalKind}
 
 /** The six read endpoints, bound to use cases.
   *
@@ -70,14 +70,24 @@ object ClusterRoutes {
       secured: ClusterApi.Securing[F],
       guard: RbacGuard[F]
   ): ServerEndpoint[Any, F] =
-    secured(ClusterEndpoints.listClusters) { ctx => _ =>
+    secured(ClusterEndpoints.listClusters) { principal => _ =>
       for {
         configured <- registry.list
-        profiles <- configured.filterA(profile =>
-          guard
-            .authorize(ctx, ClusterEndpoints.getCluster, s"/internal/v1/clusters/${profile.id.value}")
-            .map(_.isRight)
-        )
+        // A collector signs PrincipalKind.System and holds no roles. Filtering it through cluster.get
+        // would hide every row whenever RBAC is on, and the profile client would report healthy with an
+        // empty set. Humans keep the per-row filter: a list that refused would leak the hidden ids.
+        profiles <-
+          if principal.kind == PrincipalKind.System then configured.pure[F]
+          else
+            configured.filterA(profile =>
+              guard
+                .authorize(
+                  principal,
+                  ClusterEndpoints.getCluster,
+                  s"/internal/v1/clusters/${profile.id.value}"
+                )
+                .map(_.isRight)
+            )
         views <- topology.viewAll
         now <- Clock[F].realTimeInstant
       } yield {

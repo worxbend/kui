@@ -3,8 +3,8 @@ package kui.contracts.rbac
 import sttp.tapir.AnyEndpoint
 
 import kui.kernel.ClusterId
-import kui.security.Principal
-import kui.security.rbac.{ClusterFlags, Decision, DenialReason, Rbac, RbacPolicy}
+import kui.security.rbac.{ClusterFlags, Decision, DenialReason, OperationName, Rbac, RbacPolicy}
+import kui.security.{Principal, PrincipalKind}
 
 /** May this principal call this endpoint? — the whole question, in one pure function.
   *
@@ -38,10 +38,46 @@ object EndpointDecision {
       cluster: Option[ClusterId],
       requestSegments: List[String]
   ): Either[String, Decision] =
+    EndpointAuthorization.of(endpoint) match {
+      // Before the disabled-policy short-circuit inside `Rbac.decide`. A service-only endpoint stays
+      // service-only when nobody has configured roles: that is the deployment in which a session would
+      // otherwise be allowed to read connection credentials.
+      case Some(declared) if declared.serviceOnly =>
+        if principal.kind == PrincipalKind.System then
+          servicePrincipalDecision(flags, endpoint, cluster, requestSegments)
+        else
+          Right(
+            Decision.Denied(DenialReason.ServicePrincipalRequired(OperationName(declared.operation)))
+          )
+
+      case _ =>
+        EndpointAuthorization.accessRequest(endpoint, cluster, requestSegments).map { request =>
+          Rbac.decide(policy, principal, flags, request) match {
+            case denied: Decision.Denied => denied
+            case Decision.Allowed => bodyNamedGate(policy, principal, flags, endpoint, cluster)
+          }
+        }
+    }
+
+  /** What a service principal may do on a service-only endpoint.
+    *
+    * Role grants are not consulted. The declaration has already required `PrincipalKind.System`, and a
+    * collector carries no roles. The read-only gate stays: being KUI itself is not a reason to alter a
+    * cluster an operator marked read-only.
+    */
+  private def servicePrincipalDecision(
+      flags: ClusterFlags,
+      endpoint: AnyEndpoint,
+      cluster: Option[ClusterId],
+      requestSegments: List[String]
+  ): Either[String, Decision] =
     EndpointAuthorization.accessRequest(endpoint, cluster, requestSegments).map { request =>
-      Rbac.decide(policy, principal, flags, request) match {
-        case denied: Decision.Denied => denied
-        case Decision.Allowed => bodyNamedGate(policy, principal, flags, endpoint, cluster)
+      val altering = request.resources.flatMap(_.actions).filter(_.isAlter).toSet
+
+      request.cluster match {
+        case Some(id) if flags.readOnly && altering.nonEmpty =>
+          Decision.Denied(DenialReason.ReadOnlyCluster(id, altering))
+        case _ => Decision.Allowed
       }
     }
 

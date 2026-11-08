@@ -63,11 +63,15 @@ final class ClusterApiSuite extends CatsEffectSuite {
         backend <- HttpClientFs2Backend.resource[IO]()
       } yield (binding, backend)).use { (binding, backend) =>
         for {
-          token <- ClusterTestServer.token(digest =
-            kui.security.RequestDigest.ofRequestLine(
+          // The stream is service-only. This used to mint a session token, which is exactly the caller
+          // the route must refuse: a browser session has no business holding the change stream that
+          // tells collectors when connection settings move.
+          token <- ClusterTestServer.token(
+            digest = kui.security.RequestDigest.ofRequestLine(
               "GET",
               ClusterStreamEndpoint.StreamPath
-            )
+            ),
+            kind = kui.security.PrincipalKind.System
           )
           response <- basicRequest
             .get(uri"http://127.0.0.1:${binding.port}/internal/v1/clusters/stream")

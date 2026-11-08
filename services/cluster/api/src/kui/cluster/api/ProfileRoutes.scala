@@ -12,13 +12,13 @@ import sttp.capabilities.fs2.Fs2Streams
 import sttp.tapir.server.ServerEndpoint
 
 import kui.cluster.application.{ClusterRegistry, RegistrySnapshot}
-import kui.cluster.contract.ProfileEndpoints
 import kui.cluster.contract.dto.{ClusterChangeDto, ProfileResult}
+import kui.cluster.contract.{ClusterEndpoints, ProfileEndpoints}
 import kui.http.principal.RbacGuard
 import kui.http.sse.{Sse, SseConfig, SseEvent}
 import kui.kernel.error.KuiError
 import kui.observability.Telemetry
-import kui.security.PrincipalCodec
+import kui.security.{PrincipalCodec, PrincipalKind}
 
 /** How another KUI service reads a cluster's settings, and how it hears that they changed.
   *
@@ -102,16 +102,24 @@ object ProfileRoutes {
       registry: ClusterRegistry[F],
       principal: kui.security.Principal,
       guard: RbacGuard[F]
-  ): Stream[F, SseEvent] =
-    changes[F](registry).evalFilter(event =>
-      event.data.hcursor.get[String]("id") match {
-        case Left(_) => false.pure[F]
-        case Right(id) =>
-          guard
-            .authorize(principal, ProfileEndpoints.profile, s"/internal/v1/clusters/$id/profile")
-            .map(_.isRight)
-      }
-    )
+  ): Stream[F, SseEvent] = {
+    val source = changes[F](registry)
+
+    // The profile endpoint itself is service-only, so filtering a human's frames through it would drop
+    // every event once that declaration is enforced. cluster.get is the same per-cluster question the
+    // list uses. A service principal is not a member of any role and must see the whole stream.
+    if principal.kind == PrincipalKind.System then source
+    else
+      source.evalFilter(event =>
+        event.data.hcursor.get[String]("id") match {
+          case Left(_) => false.pure[F]
+          case Right(id) =>
+            guard
+              .authorize(principal, ClusterEndpoints.getCluster, s"/internal/v1/clusters/$id")
+              .map(_.isRight)
+        }
+      )
+  }
 
   /** The registry's snapshots, as the differences between them.
     *

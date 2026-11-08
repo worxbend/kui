@@ -34,8 +34,9 @@ object ClusterStreamEndpoint {
       .in("internal" / "v1" / ClusterEndpoints.ClustersSegment / ProfileEndpoints.StreamSegment)
       .out(Sse.body[F])
       .name("cluster.stream")
-      // Like the cluster list, the subscription filters each item by the caller's scope in ProfileRoutes.
-      .attribute(EndpointAuthorization.Key, EndpointAuthorization.clusterScoped("cluster.stream"))
+      // Opening the stream is service-only. Humans who already hold a cluster role still receive the
+      // events for those clusters: ProfileRoutes filters each frame with cluster.get, not this declaration.
+      .attribute(EndpointAuthorization.Key, EndpointAuthorization.serviceOnly("cluster.stream"))
       .summary("One event whenever a cluster's profile changes or a cluster is removed")
       .description(
         "Named events: 'clusters' carries {id, version, change, at}; 'heartbeat' keeps proxies from " +

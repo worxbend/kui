@@ -226,6 +226,94 @@ final class EndpointDecisionSuite extends FunSuite {
     )
   }
 
+  private val serviceProfile: Endpoint[?, ?, ErrorEnvelope, ?, Any] =
+    KuiEndpoint.internal.get
+      .in("internal" / "v1" / "clusters" / path[String]("clusterId") / "profile")
+      .name("cluster.profile")
+      .attribute(EndpointAuthorization.Key, EndpointAuthorization.serviceOnly("cluster.profile"))
+
+  private val serviceDelete: Endpoint[?, ?, ErrorEnvelope, ?, Any] =
+    KuiEndpoint.internal.delete
+      .in("internal" / "v1" / "clusters" / path[String]("clusterId") / "topics" / path[String]("topicName"))
+      .name("topic.delete")
+      .attribute(
+        EndpointAuthorization.Key,
+        EndpointAuthorization(
+          "topic.delete",
+          List(ResourceRequirement.named(Resource.Topic, "topicName", Action.TopicDelete)),
+          serviceOnly = true
+        )
+      )
+
+  private def systemPrincipal: Principal =
+    Principal(UserName.unsafe("kui-metrics"), Set.empty, PrincipalKind.System)
+
+  test("a service-only endpoint refuses a session even when RBAC is off and the role would cover it") {
+    val segments = List("internal", "v1", "clusters", "local", "profile")
+
+    assertEquals(
+      EndpointDecision.decide(
+        RbacPolicy.Disabled,
+        principal("reader"),
+        ClusterFlags.Writable,
+        serviceProfile,
+        Some(cluster),
+        segments
+      ),
+      Right(Decision.Denied(DenialReason.ServicePrincipalRequired(OperationName("cluster.profile"))))
+    )
+    assertEquals(
+      EndpointDecision.decide(
+        policyGranting(".*", Action.TopicView),
+        Principal(UserName.unsafe("ada"), Set(RoleName.unsafe("reader")), PrincipalKind.Bearer),
+        ClusterFlags.Writable,
+        serviceProfile,
+        Some(cluster),
+        segments
+      ),
+      Right(Decision.Denied(DenialReason.ServicePrincipalRequired(OperationName("cluster.profile"))))
+    )
+    assertEquals(
+      EndpointDecision.decide(
+        policyGranting(".*", Action.TopicView),
+        Principal.Anonymous,
+        ClusterFlags.Writable,
+        serviceProfile,
+        Some(cluster),
+        segments
+      ),
+      Right(Decision.Denied(DenialReason.ServicePrincipalRequired(OperationName("cluster.profile"))))
+    )
+  }
+
+  test("a role-less system principal is allowed on a service-only endpoint when RBAC is enabled") {
+    assertEquals(
+      EndpointDecision.decide(
+        policyGranting(".*", Action.TopicView),
+        systemPrincipal,
+        ClusterFlags.Writable,
+        serviceProfile,
+        Some(cluster),
+        List("internal", "v1", "clusters", "local", "profile")
+      ),
+      Right(Decision.Allowed)
+    )
+  }
+
+  test("a system principal is still refused a service-only write on a read-only cluster") {
+    assertEquals(
+      EndpointDecision.decide(
+        RbacPolicy.Disabled,
+        systemPrincipal,
+        ClusterFlags(readOnly = true),
+        serviceDelete,
+        Some(cluster),
+        List("internal", "v1", "clusters", "local", "topics", "orders")
+      ),
+      Right(Decision.Denied(DenialReason.ReadOnlyCluster(cluster, Set(Action.TopicDelete))))
+    )
+  }
+
   test("a list endpoint declares cluster scope, which is a declaration and not an absence") {
     val list =
       undeclared.attribute(EndpointAuthorization.Key, EndpointAuthorization.clusterScoped("topic.list"))
