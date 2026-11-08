@@ -177,31 +177,29 @@ object AdminClientPool {
       entries.get.flatMap(_.get(id).fold(Async[F].unit)(entry => remove(id, entry.generation).void))
 
     def evict(id: ClusterId): F[Unit] =
-      gateFor(id)
-        .flatMap(
+      // Uncancelable across the removal and the release. A cancel between them would drop the entry
+      // out of the map and then skip the finalizer, and `closeAll` would never see it again.
+      Async[F].uncancelable(_ =>
+        gateFor(id).flatMap(
           _.permit.use { _ =>
             entries
               .modify(current => (current - id, current.get(id)))
               .flatMap(_.fold(Async[F].unit)(_.release))
           }
-        ) >> logged(_.debug(s"admin client for cluster ${id.value} evicted"))
+        )
+      ) >> logged(_.debug(s"admin client for cluster ${id.value} evicted"))
 
     /** Closes every client the pool still holds. Runs on `Resource` release, including on the cancellation
       * path, which is the only thing standing between a cancelled startup and a process that keeps a Kafka
       * network thread alive for ever.
       *
-      * Calls still pending here are abandoned first. Everything that ran through the pool was acquired inside
-      * its scope and has been released already, so nobody can receive their answers, and `close`'s grace
-      * period would only wait for them: against a broker that never answers that is the whole
+      * [[Entry.release]] abandons calls that are still pending. Everything that ran through the pool was
+      * acquired inside its scope and has been released already, so nobody can receive their answers, and
+      * `close`'s grace period would only wait for them: against a broker that never answers that is the whole
       * [[CloseTimeout]], once per pool, on every shutdown.
       */
     def closeAll: F[Unit] =
-      entries
-        .getAndSet(Map.empty)
-        .flatMap(
-          _.values.toList
-            .traverse_(entry => (abandonPendingCalls(entry.client).attempt >> entry.release).attempt.void)
-        )
+      entries.getAndSet(Map.empty).flatMap(_.values.toList.traverse_(_.release.attempt.void))
 
     /** Moves the client's hard-shutdown deadline to now, which aborts its pending calls.
       *
@@ -281,11 +279,21 @@ object AdminClientPool {
         ).allocated.onError(_ => releaseProperties)
         (client, releaseClient) = allocated
         // Order matters: the client has to stop using the keystore before the keystore is deleted.
+        // The whole chain is uncancelable. `close` blocks, so a cancel cannot interrupt it, and the
+        // cancel takes effect when it returns — which used to skip the keystore finalizer after the
+        // entry had already left the map. Pending calls are abandoned first: the entry is being
+        // thrown away, so waiting out [[CloseTimeout]] only delays the caller for a result nobody
+        // will read. The `close` after that is the I/O-thread join, and it returns at once once the
+        // client is already closed.
         entry = Entry[F](
           client,
           clientId,
           generation,
-          releaseClient.attempt.void >> releaseProperties.attempt.void
+          Async[F]
+            .uncancelable(_ =>
+              abandonPendingCalls(client).attempt >> releaseClient.attempt >> releaseProperties.attempt
+            )
+            .void
         )
         _ <- entries.update(_ + (connection.id -> entry))
         _ <- logged(
@@ -320,17 +328,20 @@ object AdminClientPool {
       }
 
     private def remove(id: ClusterId, generation: Long): F[Boolean] =
-      entries
-        .modify { current =>
-          current.get(id) match {
-            case Some(entry) if entry.generation == generation => (current - id, Some(entry))
-            case _ => (current, None)
+      // Same window as `evict`: the map update and the finalizer are one uncancelable step.
+      Async[F].uncancelable { _ =>
+        entries
+          .modify { current =>
+            current.get(id) match {
+              case Some(entry) if entry.generation == generation => (current - id, Some(entry))
+              case _ => (current, None)
+            }
           }
-        }
-        .flatMap {
-          case Some(entry) => entry.release.attempt.as(true)
-          case None => false.pure[F]
-        }
+          .flatMap {
+            case Some(entry) => entry.release.attempt.as(true)
+            case None => false.pure[F]
+          }
+      }
 
     private def logged(write: Logger[F] => F[Unit]): F[Unit] =
       log.fold(Async[F].unit)(write)

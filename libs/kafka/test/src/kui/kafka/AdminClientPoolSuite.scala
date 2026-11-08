@@ -426,4 +426,69 @@ final class AdminClientPoolSuite extends KuiIOSuite {
       s"release waited ${elapsed.toMillis}ms, the full close grace, for a call whose caller was gone"
     )
   }
+
+  test("cancellingWhileCloseIsBlockedStillDeletesTheKeystore") {
+    // `close` is blocking, so a cancel cannot interrupt it; this wait is uncancelable for the same
+    // reason. The cancel takes effect when close returns, and the keystore finalizer is the next
+    // step. The entry is already out of the map by then, so the pool's own shutdown cannot delete
+    // the directory either.
+    for {
+      closeEntered <- Deferred[IO, Unit]
+      allowClose <- Deferred[IO, Unit]
+      t <- tracker
+      factory = (
+          (_, _, rendered) =>
+            Resource.make(
+              t.properties.update(_ :+ rendered.unsafeValues) >> t.created.update(_ + 1) >> IO(
+                fakeAdmin()
+              )
+            )(_ =>
+              closeEntered.complete(()).void >> IO.uncancelable(_ => allowClose.get) >> t.closed
+                .update(_ + 1)
+            )
+      ): AdminClientPool.Factory[IO]
+      location <- AdminClientPool.resourceWith[IO](AdminMetrics.noop[IO], factory).use { pool =>
+        for {
+          call <- pool
+            .run(withKeystore, "describeCluster")(_ => IO.raiseError[Unit](new TimeoutException("timed out")))
+            .start
+          _ <- closeEntered.get
+          seen <- t.properties.get
+          path = seen.headOption
+            .flatMap(_.get("ssl.truststore.location"))
+            .getOrElse(fail("no truststore was materialized"))
+          // `cancel` waits until the target fiber finishes, and that fiber is inside the
+          // uncancelable close, so the latch has to open on another fiber.
+          canceling <- call.cancel.start
+          _ <- allowClose.complete(())
+          _ <- canceling.join
+        } yield path
+      }
+    } yield assert(!JFiles.exists(JPath.of(location)), s"$location outlived the cancelled close")
+  }
+
+  test("invalidatingDoesNotWaitOutTheCloseGraceForACallNobodyIsWaitingFor") {
+    // Same pending call as the pool-release case, observed through `invalidate` rather than
+    // `closeAll`: the entry is closed while its caller is already gone, and that close must not
+    // sit out the five-second grace.
+    val unreachable = plaintext.copy(bootstrapServers = BootstrapServers.unsafe("127.0.0.1:1"))
+
+    for {
+      allocated <- AdminClientPool.resource[IO](AdminMetrics.noop[IO]).allocated
+      (pool, release) = allocated
+      submitted <- Deferred[IO, Unit]
+      caller <- pool
+        .run(unreachable, "describeCluster")(admin =>
+          IO.blocking(admin.describeCluster()) >> submitted.complete(()) >> IO.never[Unit]
+        )
+        .start
+      _ <- submitted.get
+      _ <- caller.cancel
+      elapsed <- pool.invalidate(id).timed.map(_._1)
+      _ <- release
+    } yield assert(
+      elapsed < 5.seconds,
+      s"invalidate waited ${elapsed.toMillis}ms, the full close grace, for a call whose caller was gone"
+    )
+  }
 }
