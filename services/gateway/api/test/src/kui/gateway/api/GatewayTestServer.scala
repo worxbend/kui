@@ -15,7 +15,7 @@ import kui.gateway.api.auth.SessionMiddleware
 import kui.gateway.application.client.ServiceClient
 import kui.gateway.application.session.{InMemorySessionStore, SessionConfig, SessionStore}
 import kui.http.health.ReadinessCheck
-import kui.http.{ErrorInterceptor, KuiServer}
+import kui.http.{BasePath, ErrorInterceptor, KuiServer}
 import kui.kernel.{Host, Port}
 import kui.observability.Telemetry
 import kui.security.rbac.RbacPolicy
@@ -126,14 +126,25 @@ object GatewayTestServer {
       logger <- Resource.eval(FakeStructuredLogger[IO])
       sessions <- InMemorySessionStore.resource[IO](sessionConfig)
       readiness = List(ReadinessCheck.always[IO]("process"))
-      routes =
-        GatewayApi.routes[IO](configView(basePath, auth, rbac), readiness, sessions, extraRoutes, identity)
+      // Same inputs `GatewayWiring` gives the stamp and the sign-in routes. A raw `"/"` is not empty, so
+      // the stamp would write `Path=//` while logout, which reads the normalised path, would write
+      // `Path=/`. A `Max-Age=0` for a different path does not replace the cookie the browser holds, and
+      // neither does a `Secure` flag the stamp did not set.
+      normalizedBasePath = BasePath.normalize(basePath)
+      secureCookies = !devInsecureCookies
+      routes = GatewayApi.routes[IO](
+        configView(basePath, auth, rbac, secureCookies),
+        readiness,
+        sessions,
+        extraRoutes,
+        identity
+      )
       interceptors = EdgeHeaders.interceptors[IO] ++
         SessionMiddleware.interceptors[IO](
           sessions,
           logger,
-          basePath,
-          secureCookies = !devInsecureCookies,
+          normalizedBasePath,
+          secureCookies = secureCookies,
           authenticationRequired = auth.authType != kui.config.AuthType.Disabled,
           trustedProxies = auth.trustedProxies
         ) ++
@@ -152,13 +163,14 @@ object GatewayTestServer {
   private[api] def configView(
       basePath: String,
       auth: AuthConfig = AuthConfig.Default,
-      rbac: RbacPolicy = RbacPolicy.Disabled
+      rbac: RbacPolicy = RbacPolicy.Disabled,
+      secureCookies: Boolean = true
   ): GatewayServiceConfigView =
     GatewayServiceConfigView(
       ServerConfig(Host.unsafe("localhost"), Port.unsafe(0), basePath),
       GatewayConfig.Default,
       auth,
-      secureCookies = true,
+      secureCookies = secureCookies,
       rbac
     )
 

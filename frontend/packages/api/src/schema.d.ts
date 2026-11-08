@@ -3046,6 +3046,7 @@ export interface operations {
         readonly responses: {
             readonly 200: {
                 headers: {
+                    readonly "Set-Cookie"?: readonly string[];
                     readonly [name: string]: unknown;
                 };
                 content?: never;

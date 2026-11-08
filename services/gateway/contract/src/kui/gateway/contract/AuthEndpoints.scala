@@ -175,9 +175,18 @@ object AuthEndpoints {
       .summary("Complete a sign-in with the configured identity provider")
       .tag("auth")
 
-  val logout: PublicEndpoint[Unit, ErrorEnvelope, Unit, Any] =
+  /** Logout, with the `Set-Cookie` that actually expires `kui_session`.
+    *
+    * The summary has always said the cookie is cleared. The header has to be an output, as on
+    * [[loginWithSession]], because the session middleware only stamps a cookie when the attached session is
+    * not the one the request already carried — and on logout those are the same session. A client that
+    * decodes this response must tolerate `Set-Cookie` being stripped by the browser; nothing in the shell
+    * reads the header, it only needs the `200`.
+    */
+  val logout: PublicEndpoint[Unit, ErrorEnvelope, CookieValueWithMeta, Any] =
     GatewayEndpoints.base.post
       .in("auth" / "logout")
+      .out(setCookie(SessionCookie))
       .name("gateway.auth.logout")
       .summary("Clears the session cookie")
       .tag("auth")

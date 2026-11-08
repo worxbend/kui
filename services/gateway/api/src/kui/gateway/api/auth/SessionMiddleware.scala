@@ -239,11 +239,28 @@ object SessionMiddleware {
     CookieWithMeta.unsafeApply(
       name = CookieName,
       value = session.id.value,
-      path = Some(if basePath.isEmpty then "/" else s"$basePath/"),
+      path = Some(cookiePath(basePath)),
       secure = secure,
       httpOnly = true,
       sameSite = Some(Cookie.SameSite.Lax)
     )
+
+  /** Expires `kui_session` in the browser. Same path and flags as [[setCookie]], or the browser keeps the
+    * cookie: a `Max-Age=0` for a different path does not replace the one that was set.
+    */
+  def clearCookie(basePath: String, secure: Boolean): CookieWithMeta =
+    CookieWithMeta.unsafeApply(
+      name = CookieName,
+      value = "",
+      maxAge = Some(0),
+      path = Some(cookiePath(basePath)),
+      secure = secure,
+      httpOnly = true,
+      sameSite = Some(Cookie.SameSite.Lax)
+    )
+
+  private def cookiePath(basePath: String): String =
+    if basePath.isEmpty then "/" else s"$basePath/"
 
   // -----------------------------------------------------------------------------------------------
   // 1. Attach a session, ahead of any endpoint's own input decoding.

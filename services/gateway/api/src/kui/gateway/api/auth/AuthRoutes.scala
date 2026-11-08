@@ -89,7 +89,7 @@ object AuthRoutes {
       changePassword[F](identity, loginLimiter, auth.trustedProxies),
       oidcStart[F](identity, oidcStates),
       oidcCallback[F](store, identity, basePath, secureCookies, oidcStates),
-      logout[F](store)
+      logout[F](store, basePath, secureCookies)
     )
   }
 
@@ -244,9 +244,15 @@ object AuthRoutes {
         }
       }
 
-  private def logout[F[_]: Sync](store: SessionStore[F]): ServerEndpoint[Any, F] =
+  private def logout[F[_]: Sync](
+      store: SessionStore[F],
+      basePath: String,
+      secureCookies: Boolean
+  ): ServerEndpoint[Any, F] =
     AuthEndpoints.logout.in(request).serverLogicSuccess[F] { req =>
-      sessionOf[F](req).flatMap(session => store.delete(session.id))
+      sessionOf[F](req).flatMap { session =>
+        store.delete(session.id).as(SessionMiddleware.clearCookie(basePath, secureCookies).valueWithMeta)
+      }
     }
 
   // -----------------------------------------------------------------------------------------------

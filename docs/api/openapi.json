@@ -2045,7 +2045,18 @@
         "operationId" : "gateway.auth.logout",
         "responses" : {
           "200" : {
-            "description" : ""
+            "description" : "",
+            "headers" : {
+              "Set-Cookie" : {
+                "required" : false,
+                "schema" : {
+                  "type" : "array",
+                  "items" : {
+                    "type" : "string"
+                  }
+                }
+              }
+            }
           },
           "default" : {
             "description" : "",

@@ -169,6 +169,7 @@ final class SessionMiddlewareSuite extends KuiIOSuite {
       for {
         first <- server.get(meUri)
         cookie = cookieOf(first)
+        issued = first.header("Set-Cookie").getOrElse(fail("no session cookie"))
         token = tokenOf(first)
         loggedOut <- server.post(
           logoutUri,
@@ -182,9 +183,25 @@ final class SessionMiddlewareSuite extends KuiIOSuite {
         // `/auth/me` still says `disabled` whether the old session survived or a new one replaced it.
         // A revoked session that is not revoked is the failure an operator reaches for logout to prevent.
         revoked <- server.sessions.get(SessionId.unsafe(cookie.split('=').last), Instant.now())
+        cleared = loggedOut.headers.filter(_.name.equalsIgnoreCase("Set-Cookie")).map(_.value)
       } yield {
         assertEquals(loggedOut.code.code, 200, loggedOut.body)
         assertEquals(revoked, None, "the session survived the logout that was supposed to delete it")
+        val issuedAttributes = issued.split(';').map(_.trim)
+        val path = issuedAttributes.find(_.startsWith("Path=")).getOrElse(fail(issued))
+        val secure = issuedAttributes.contains("Secure")
+        assert(
+          cleared.exists { value =>
+            val parts = value.split(';').map(_.trim)
+            value.startsWith(s"${SessionMiddleware.CookieName}=") &&
+            parts.contains("Max-Age=0") &&
+            parts.contains(path) &&
+            parts.contains("Secure") == secure &&
+            parts.contains("HttpOnly") &&
+            parts.contains("SameSite=Lax")
+          },
+          s"logout did not expire the session cookie the browser holds ($issued): $cleared"
+        )
         // The old session is gone; a request that presents its cookie again gets a *new* anonymous
         // session rather than an error — anonymous mode has nothing to fail on, and a fresh session is
         // exactly what ADR-019 says happens for a cookie the store no longer recognises.
