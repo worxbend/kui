@@ -134,12 +134,13 @@ object ClusterAdminClients {
           }
       }
 
-    /** `Some` when this generation can be used now. `None` when a different profile has to be published
-      * first, which takes every share and so cannot be done while this one is held.
+    /** `Some` when this generation can be used now. `None` when a different profile has to be published, or
+      * the registry no longer has this id. Both take every share and so cannot be done while this one is
+      * held.
       */
     private def prepared(gate: Gate[F], profile: ClusterProfile): F[Option[ClusterConnection]] =
       ensureOpen >> resolveProfile(profile).flatMap {
-        case None => removed
+        case None => Option.empty[ClusterConnection].pure[F]
         case Some((latest, authoritative)) =>
           gate.decision.permit.use { _ =>
             known.get.flatMap { current =>
@@ -169,7 +170,11 @@ object ClusterAdminClients {
         // every share later and evicting. The release runs only after the acquire has succeeded.
         Async[F].bracketFull[Unit, A](poll => poll(gate.shares.acquireN(ShareCapacity)))(_ =>
           ensureOpen >> resolveProfile(profile).flatMap {
-            case None => removed
+            case None =>
+              // Every share is held, so an in-flight call cannot rebuild a client from the deleted
+              // profile after this eviction. Forget the id before raising so a later openClients is 0.
+              Async[F].uncancelable(_ => pool.evict(profile.id) >> known.update(_ - profile.id)) >>
+                removed
             case Some((latest, authoritative)) =>
               // Every share is held, so no other call is inside `select`. Drop back to one before
               // the call so the waiters enter on the new profile instead of queueing behind it.

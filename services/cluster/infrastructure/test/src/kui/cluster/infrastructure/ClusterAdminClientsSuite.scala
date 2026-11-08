@@ -111,6 +111,32 @@ final class ClusterAdminClientsSuite extends KuiIOSuite {
     }
   }
 
+  test("aRemovedProfileEvictsItsClientAndIsForgotten") {
+    // Deleting a stored cluster reloads the registry and nothing else. The pooled client used to
+    // stay open, keep refreshing metadata with the deleted credentials, and leave the materialized
+    // key files on disk until the process stopped. `openClients` counted the id as well.
+    val profile = TestProfiles.profile()
+
+    for {
+      current <- cats.effect.Ref.of[IO, Option[kui.cluster.domain.ClusterProfile]](Some(profile))
+      pool <- RecordingAdminPool()
+      logger <- FakeStructuredLogger[IO]
+      _ <- ClusterAdminClients.resource[IO](pool, logger, Some(_ => current.get)).use { clients =>
+        for {
+          _ <- clients.withConnection(profile)(_ => IO.unit)
+          _ <- current.set(None)
+          removed <- clients.withConnection(profile)(_ => IO.unit).attempt
+          open <- clients.openClients
+          events <- pool.events.get
+        } yield {
+          assert(removed.isLeft, removed.toString)
+          assertEquals(open, 0)
+          assertEquals(events, List("evict:local"))
+        }
+      }
+    } yield ()
+  }
+
   test("authoritativeRegistryFencesRemovedAndRecreatedProfilesEvenWhenVersionRestarts") {
     val old = TestProfiles.profile(version = 8L)
     val replacement = TestProfiles.profile(version = 1L, bootstrap = "recreated:9092")
