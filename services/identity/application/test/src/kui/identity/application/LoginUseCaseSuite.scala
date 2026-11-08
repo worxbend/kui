@@ -1,9 +1,9 @@
 package kui.identity.application
 
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 
 import kui.identity.application.IdentityFixtures.*
-import kui.identity.domain.{AuthMode, Credentials}
+import kui.identity.domain.{AuthMode, Credentials, UpdateRefused, UserDirectory, UserRecord}
 import kui.kernel.error.ErrorCode
 import kui.kernel.{RoleName, Secret, UserName}
 import kui.security.audit.{AuthenticationEvent, MutationOutcome}
@@ -262,6 +262,75 @@ final class ChangePasswordUseCaseSuite extends KuiIOSuite {
       assertEquals(tooShort.left.toOption.map(_.code), Some(ErrorCode.Validation))
       assertEquals(retried, Right(()))
       assertEquals(stored.get("ada").map(_.mustChangePassword), Some(false))
+    }
+  }
+
+  test("a store conflict and an unreachable store are not reported as unsupported") {
+    // The challenge is spent before the write. A version conflict used to come back as 501
+    // KUI-UNSUPPORTED, and so did a store that could not be reached or a write that timed out.
+    val account = IdentityFixtures.account(mustChangePassword = true)
+    val conflict = UpdateRefused("re-read it and apply the change again", ErrorCode.ConfigVersionConflict)
+    val down = UpdateRefused("the metadata store could not be used", ErrorCode.StoreUnavailable)
+    val timedOut = UpdateRefused(
+      "it may still have been applied, so re-read the record before retrying",
+      ErrorCode.Timeout
+    )
+    val unconfigured = UpdateRefused(
+      "no metadata store is configured; set kui.store.kafka.* to enable it",
+      ErrorCode.StoreNotConfigured
+    )
+
+    def attempt(
+        login: LoginUseCase[IO],
+        change: ChangePasswordUseCase[IO]
+    ): IO[Either[kui.kernel.error.KuiError, Unit]] =
+      login(Credentials("ada", Secret("correct horse battery staple"))).flatMap { first =>
+        change(challengeFrom(first), Secret("a much longer new password"))
+      }
+
+    for {
+      refusals <- Ref.of[IO, List[UpdateRefused]](List(conflict, down, timedOut, unconfigured))
+      users = new UserDirectory[IO] {
+        def find(username: String): IO[Option[UserRecord]] =
+          IO.pure(Option.when(username.trim.equalsIgnoreCase(account.name.value))(account))
+
+        def update(record: UserRecord): IO[Either[UpdateRefused, Unit]] =
+          refusals.modify {
+            case next :: rest => (rest, Left(next))
+            case Nil => (Nil, Left(UpdateRefused("the scripted directory ran out of refusals")))
+          }
+      }
+      audit <- RecordingAudit.make
+      hasher <- FakeHasher.make
+      challenges <- SingleUseTokens.make[IO, UserName]()
+      logger <- FakeStructuredLogger[IO]
+      login = new LoginUseCase[IO](formConfig(), users, hasher, challenges, audit, logger)
+      change = new ChangePasswordUseCase[IO](formConfig(), users, hasher, challenges, audit)
+      conflicted <- attempt(login, change)
+      unavailable <- attempt(login, change)
+      timed <- attempt(login, change)
+      missing <- attempt(login, change)
+      entries <- audit.entries.get
+    } yield {
+      assertEquals(conflicted.left.toOption.map(_.code), Some(ErrorCode.ConfigVersionConflict))
+      assertEquals(
+        conflicted.left.toOption.map(_.message),
+        Some("that account's password changed elsewhere; sign in again")
+      )
+      assertEquals(unavailable.left.toOption.map(_.code), Some(ErrorCode.StoreUnavailable))
+      assert(unavailable.left.exists(_.code.retryable), unavailable.toString)
+      assert(
+        unavailable.left.toOption.exists(_.message.contains("may have been applied")),
+        unavailable.toString
+      )
+      assertEquals(timed.left.toOption.map(_.code), Some(ErrorCode.StoreUnavailable))
+      assert(timed.left.toOption.exists(_.message.contains("may have been applied")), timed.toString)
+      assertEquals(missing.left.toOption.map(_.code), Some(ErrorCode.Unsupported))
+      assert(missing.left.toOption.exists(_.message.contains("kui.store")), missing.toString)
+      assertEquals(
+        entries.filter(_.event == AuthenticationEvent.PasswordChange).map(_.outcome),
+        List.fill(4)(MutationOutcome.Failed)
+      )
     }
   }
 

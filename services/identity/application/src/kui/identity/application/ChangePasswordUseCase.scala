@@ -64,9 +64,9 @@ final class ChangePasswordUseCase[F[_]: Sync](
                 written <- users.update(account.withPassword(hashed))
                 result <- written match {
                   case Left(refused) =>
-                    // The change could not be saved. The audit record says so, and the caller is told the
-                    // deployment's reason — "configure kui.store" — rather than a generic failure, because
-                    // that is the only sentence an operator can act on.
+                    // The challenge is already spent. The audit record says the save failed, and the caller
+                    // is told the store's own reason — a conflict, a store that is down, or no store at all —
+                    // rather than one "unsupported" code for every refusal.
                     audit
                       .record(
                         AuthenticationRecord(
@@ -78,7 +78,7 @@ final class ChangePasswordUseCase[F[_]: Sync](
                           Map.empty
                         )
                       )
-                      .as(ApplicationError.Refused(ErrorCode.Unsupported, refused.message).asLeft[Unit])
+                      .as(ChangePasswordUseCase.refusal(refused).asLeft[Unit])
 
                   case Right(()) =>
                     audit
@@ -107,4 +107,30 @@ object ChangePasswordUseCase {
     */
   val Refusal: KuiError =
     ApplicationError.Unauthenticated("that password change is no longer valid; sign in again")
+
+  /** What the caller is told when the directory could not save the new password.
+    *
+    * The challenge has already been redeemed, so none of these sentences invite repeating this request. A
+    * version conflict means the account changed under this attempt. A store that could not be reached, or a
+    * write whose read-back timed out, may have landed; both use the retryable store-unavailable code, and the
+    * message says to sign in again before another attempt. A deployment with no store keeps the unsupported
+    * refusal whose message says what to configure. Any other store code is passed through.
+    */
+  private def refusal(refused: UpdateRefused): KuiError =
+    refused.code match {
+      case ErrorCode.ConfigVersionConflict =>
+        ApplicationError.Refused(
+          ErrorCode.ConfigVersionConflict,
+          "that account's password changed elsewhere; sign in again"
+        )
+      case ErrorCode.StoreUnavailable | ErrorCode.Timeout =>
+        ApplicationError.Refused(
+          ErrorCode.StoreUnavailable,
+          "the password change may have been applied; sign in again before trying another"
+        )
+      case ErrorCode.StoreNotConfigured | ErrorCode.Unsupported =>
+        ApplicationError.Refused(ErrorCode.Unsupported, refused.message)
+      case other =>
+        ApplicationError.Refused(other, refused.message)
+    }
 }

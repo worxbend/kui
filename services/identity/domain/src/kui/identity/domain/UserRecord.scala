@@ -1,5 +1,6 @@
 package kui.identity.domain
 
+import kui.kernel.error.ErrorCode
 import kui.kernel.{Secret, UserName}
 
 /** One account KUI itself knows about — the form-login mode's whole model of a person.
@@ -73,11 +74,12 @@ trait UserDirectory[F[_]] {
 
 /** Why an account could not be written.
   *
-  * A message and nothing else: the `api` layer turns it into the error envelope, and the reason a directory
-  * cannot write is always something about the *deployment* — no store configured, a store that is read-only,
-  * a broker that is unreachable — rather than something about the request.
+  * `message` is the sentence an operator can act on. `code` is the store's own error when the directory has
+  * one, and [[ErrorCode.Unsupported]] when the deployment simply has nowhere to write. A version conflict and
+  * a broker that is down are different facts; collapsing both into "unsupported" is what made a password
+  * change during a store outage look like a missing feature.
   */
-final case class UpdateRefused(message: String)
+final case class UpdateRefused(message: String, code: ErrorCode = ErrorCode.Unsupported)
 
 object UpdateRefused {
   given CanEqual[UpdateRefused, UpdateRefused] = CanEqual.derived

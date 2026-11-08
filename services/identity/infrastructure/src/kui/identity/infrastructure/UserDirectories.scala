@@ -11,6 +11,7 @@ import org.typelevel.log4cats.StructuredLogger
 import kui.config.FormUserConfig
 import kui.config.store.{ConfigStore, SecretJson, StoreHealth, StoreKey, StoreRecord, StoreSection}
 import kui.identity.domain.{PasswordHash, UpdateRefused, UserDirectory, UserRecord}
+import kui.kernel.error.ErrorCode
 import kui.kernel.{Secret, UserName}
 
 /** The accounts an operator wrote in `kui.auth.users[]`, and nothing else (AU-002).
@@ -215,11 +216,18 @@ object StoredUserDirectory {
             existing.map(_.version),
             record.name.value
           )
-        } yield written.bimap(error => UpdateRefused(error.message), _ => ()))
+        } yield written.bimap(error => UpdateRefused(error.message, error.code), _ => ()))
           .handleErrorWith(error =>
             logger
               .error(error)("identity: a password change could not be written to the metadata store")
-              .as(Left(UpdateRefused("the change could not be saved; KUI's metadata store is not available")))
+              .as(
+                Left(
+                  UpdateRefused(
+                    "the change could not be saved; KUI's metadata store is not available",
+                    ErrorCode.StoreUnavailable
+                  )
+                )
+              )
           )
     }
 

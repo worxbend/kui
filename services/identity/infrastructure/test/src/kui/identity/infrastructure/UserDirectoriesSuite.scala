@@ -23,7 +23,7 @@ import kui.config.store.{
   StoreState
 }
 import kui.identity.domain.{PasswordAlgorithm, PasswordHash, UserDirectory, UserRecord}
-import kui.kernel.error.KuiError
+import kui.kernel.error.{ApplicationError, ErrorCode, KuiError}
 import kui.kernel.{Secret, UserName}
 import kui.testkit.KuiIOSuite
 import kui.testkit.fakes.FakeStructuredLogger
@@ -185,6 +185,38 @@ final class UserDirectoriesSuite extends KuiIOSuite {
     }
   }
 
+  test("a store refusal keeps its error code instead of becoming an unsupported feature") {
+    // StoredUserDirectory.update used to keep only error.message. ChangePasswordUseCase then had nothing
+    // but a sentence, and every store failure left the endpoint as 501 KUI-UNSUPPORTED.
+    val conflict = ApplicationError.Remote(
+      ErrorCode.ConfigVersionConflict,
+      "rbac/user-admin changed since it was read",
+      Nil
+    )
+    val down = StoreError.toKuiError(StoreError.Unreachable("localhost:9092", "no broker answered"))
+
+    for {
+      logger <- FakeStructuredLogger[IO]
+      conflicted <- StoredUserDirectory
+        .make[IO](configured, refusing(conflict), logger)
+        .update(account.copy(hash = changed))
+      lost <- StoredUserDirectory
+        .make[IO](configured, refusing(down), logger)
+        .update(account.copy(hash = changed))
+      raised <- StoredUserDirectory
+        .make[IO](configured, unreachable, logger)
+        .update(account.copy(hash = changed))
+    } yield {
+      assertEquals(conflicted.left.toOption.map(_.code), Some(ErrorCode.ConfigVersionConflict))
+      assertEquals(lost.left.toOption.map(_.code), Some(ErrorCode.StoreUnavailable))
+      assertEquals(raised.left.toOption.map(_.code), Some(ErrorCode.StoreUnavailable))
+      assert(
+        raised.left.toOption.exists(_.message.contains("not available")),
+        raised.toString
+      )
+    }
+  }
+
   test("a slug login name keeps the legacy store key") {
     // Existing overrides were written at rbac/user-<slug>. A digest-only key would orphan them.
     assertEquals(StoredUserDirectory.keyFor("Admin").render, "rbac/user-admin")
@@ -306,6 +338,16 @@ final class UserDirectoriesSuite extends KuiIOSuite {
             )
           )
         )
+    }
+
+  private def refusing(error: KuiError): ConfigStore[IO] =
+    new StubStore {
+      override def put(
+          key: StoreKey,
+          payload: Json,
+          baseVersion: Option[Long],
+          updatedBy: String
+      ): IO[Either[KuiError, StoreRecord]] = IO.pure(Left(error))
     }
 
   private def unreachable: ConfigStore[IO] =
