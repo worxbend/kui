@@ -78,8 +78,8 @@ final class KafkaFuturesSuite extends KuiIOSuite {
   }
 
   test("cancellationCancelsTheKafkaFuture") {
-    // Without this, a caller that gave up leaves a request holding a slot on the admin client's
-    // single I/O thread until `request.timeout.ms` fires.
+    // The finaliser calls `KafkaFuture.cancel`, which is all this assertion can see. The admin
+    // client does not dequeue the call; see `KafkaFutures.fromFuture`.
     for {
       future <- pending[String]
       fiber <- KafkaFutures.fromFuture[IO, String](IO.pure(future)).start

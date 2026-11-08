@@ -27,8 +27,10 @@ object KafkaFutures {
   /** Issues the request and completes when the future does, with the cause unwrapped and execution back on
     * the effect runtime rather than on Kafka's I/O thread.
     *
-    * Cancelling the resulting effect cancels the `KafkaFuture`, so a caller that gave up does not leave a
-    * request holding a slot on that single thread.
+    * Cancelling the resulting effect only stops KUI waiting. The finaliser calls `KafkaFuture.cancel`, which
+    * completes this effect, but kafka-clients 4.3.1 does not dequeue the call: `KafkaAdminClient` never reads
+    * `isCancelled`. The request keeps its place on the admin thread until the broker answers or
+    * `default.api.timeout.ms` expires.
     */
   def fromFuture[F[_]: Async, A](make: F[KafkaFuture[A]]): F[A] =
     make.flatMap { future =>
@@ -43,7 +45,7 @@ object KafkaFutures {
             }
           }
 
-          // The finaliser cats-effect runs if the fiber is cancelled while the future is pending.
+          // Stops KUI waiting. It does not dequeue the call; see the method comment.
           Some(Async[F].delay {
             val _ = future.cancel(true)
           })
