@@ -110,6 +110,33 @@ final class ProfileChangeListenerSuite extends KuiIOSuite {
       ClusterRecordCodec.encode(p)
     )
 
+  test("aRecordWrittenBeforeTheListenerSubscribesIsReconciled") {
+    // The registry's first load and this listener's registration are not the same step. A cluster
+    // write that lands in between is delivered to an empty handler map and is not replayed, so the
+    // list is already different when the listener starts and no change event follows.
+    for {
+      store <- StubConfigStore()
+      logger <- FakeStructuredLogger[IO]
+      seen <- Ref.of[IO, List[List[String]]](Nil)
+      known <- ClusterConfigStoreAdapter.resource[IO](store, logger).use { adapter =>
+        for {
+          _ <- store.hold(recordFor(profile("legacy", 4L), 4L))
+          held <- ProfileChangeListener
+            .resource[IO](
+              adapter,
+              profiles => seen.update(_ :+ profiles.map(_.id.value).sorted),
+              logger
+            )
+            .use(_.known)
+        } yield held
+      }
+      recorded <- seen.get
+    } yield {
+      assertEquals(recorded, List(List("legacy")))
+      assertEquals(known.get(ClusterId.unsafe("legacy")).map(_.value), Some(4L))
+    }
+  }
+
   test("aStoreChangeReachesTheRegistryOnceAndIsPublished") {
     for {
       reconciles <- Ref.of[IO, Int](0)

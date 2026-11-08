@@ -3,7 +3,7 @@ package kui.cluster.infrastructure.store
 import scala.concurrent.duration.*
 
 import cats.effect.kernel.{Async, Ref, Resource}
-import cats.effect.std.Random
+import cats.effect.std.{Random, Semaphore}
 import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.Topic
@@ -74,10 +74,17 @@ object ProfileChangeListener {
       versions <- Resource.eval(Ref.of[F, Map[ClusterId, ProfileVersion]](Map.empty))
       degraded <- Resource.eval(Ref.of[F, Boolean](false))
       random <- Resource.eval(Random.scalaUtilRandom[F])
-      listener = new Impl[F](store, reconcile, logger, topic, versions, degraded, random)
+      // One admission at a time. The change feed and the registration re-read below both call `accept`,
+      // and a stale list applied after a newer one would drop the newer cluster from `versions`.
+      gate <- Resource.eval(Semaphore[F](1))
+      listener = new Impl[F](store, reconcile, logger, topic, versions, degraded, random, gate)
       // Deregistration runs on release, including on the cancellation path: a handler left registered on a
       // store that outlives this resource would keep calling a reconcile whose owner is gone.
       _ <- Resource.make(store.onChange(listener.apply))(deregister => deregister)
+      // The feed does not replay. A write that landed after the registry's first load and before the
+      // handler above was registered was delivered to an empty map. Read the list once, now that a
+      // handler exists, so that write is not stuck until some later cluster change.
+      _ <- Resource.eval(listener.catchUp)
       // Closing the topic wakes every subscriber with an end of stream rather than leaving it parked on a
       // topic nobody will publish to again.
       _ <- Resource.onFinalize(topic.close.void)
@@ -145,7 +152,8 @@ object ProfileChangeListener {
       topic: Topic[F, ProfileChanged],
       versions: Ref[F, Map[ClusterId, ProfileVersion]],
       degraded: Ref[F, Boolean],
-      random: Random[F]
+      random: Random[F],
+      gate: Semaphore[F]
   ) extends ProfileChangeListener[F] {
 
     def changes: Stream[F, ProfileChanged] = topic.subscribeUnbounded
@@ -157,13 +165,55 @@ object ProfileChangeListener {
       * throw that away for no gain, since metadata writes are rare.
       */
     def apply(profiles: List[ClusterProfile]): F[Unit] =
+      gate.permit.use(_ => accept(profiles, publish = true))
+
+    /** The list as it stands when the handler is registered.
+      *
+      * Not published. Every stored cluster would otherwise be logged as added on every start, and nothing
+      * subscribed yet could hear it. `reconcile` re-reads, which is what replaces a registry snapshot taken
+      * before this handler existed. Versions are recorded so the next identical emission is a no-op.
+      */
+    def catchUp: F[Unit] =
+      gate.permit.use { _ =>
+        store.list.flatMap {
+          case Left(error) =>
+            logger.warn(
+              s"could not read the cluster list when subscribing to store changes: ${error.message}"
+            )
+          case Right(profiles) => accept(profiles, publish = false)
+        }
+      }
+
+    private def accept(profiles: List[ClusterProfile], publish: Boolean): F[Unit] =
       for {
         now <- Async[F].realTimeInstant
         current <- versions.get
         (merged, events) = ProfileChangeListener.diff(current, profiles, now)
         _ <- noteHealth
-        _ <- if events.isEmpty then Async[F].unit else applyChange(profiles, merged, events)
+        _ <-
+          if events.isEmpty then Async[F].unit
+          else if publish then applyChange(profiles, merged, events)
+          else catchUpChange(profiles, merged)
       } yield ()
+
+    /** One attempt, not the feed's retry loop.
+      *
+      * This runs while the process is still starting. Retrying with backoff here would hold startup, and the
+      * gate, until the registry accepted the list. A failed attempt leaves the versions unset, so the next
+      * store change reconciles it on the feed, which does retry.
+      */
+    private def catchUpChange(
+        profiles: List[ClusterProfile],
+        merged: Map[ClusterId, ProfileVersion]
+    ): F[Unit] =
+      reconcile(profiles).attempt.flatMap {
+        case Left(failure) =>
+          logger.warn(
+            s"reconciling the cluster registry at subscribe failed (${failure.getClass.getName}); " +
+              "the next store change will retry"
+          )
+        case Right(_) => versions.update(current => ProfileChangeListener.merge(current, merged))
+      }
 
     /** Reconcile first, record afterwards.
       *
