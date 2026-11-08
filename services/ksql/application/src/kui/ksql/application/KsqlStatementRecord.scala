@@ -32,11 +32,13 @@ import kui.security.audit.MutationOutcome
   *
   * ==What the record carries, and what it deliberately does not==
   *
-  * It carries the **statement**, in full, because that is the only thing an incident review can act on: "a
-  * ksqlDB statement was run on production" names nothing, and the statement names the stream, the table and
-  * the topic. It does not carry the rows a query returned — an audit trail is a record of what was done, not
-  * a copy of the data, and a pull query's result in a log line is a copy of somebody's records in a place
-  * nobody expects to find them.
+  * It carries the **statement**, because that is the only thing an incident review can act on: "a ksqlDB
+  * statement was run on production" names nothing, and the statement names the stream, the table and the
+  * topic. It does not carry the rows a query returned — an audit trail is a record of what was done, not a
+  * copy of the data, and a pull query's result in a log line is a copy of somebody's records in a place
+  * nobody expects to find them. The same rule applies to literals inside the statement: the logging sink
+  * writes [[kui.ksql.domain.KsqlStatement.forAudit]] rather than this field verbatim, so a `WITH` property or
+  * a `VALUES` cell is not copied into the log.
   */
 final case class KsqlStatementRecord(
     at: Instant,

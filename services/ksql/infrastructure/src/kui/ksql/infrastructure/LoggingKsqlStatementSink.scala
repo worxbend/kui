@@ -5,6 +5,7 @@ import cats.syntax.all.*
 import org.typelevel.log4cats.StructuredLogger
 
 import kui.ksql.application.{KsqlStatementRecord, KsqlStatementSink}
+import kui.ksql.domain.KsqlStatement
 import kui.observability.audit.LoggingAuditSink
 import kui.security.audit.AuditPrincipal
 
@@ -21,11 +22,12 @@ import kui.security.audit.AuditPrincipal
   *
   * ==The statement is a detail field, and it is the point of the line==
   *
-  * `audit.detail.statement` carries the whole statement. "A ksqlDB statement was run on production" names
-  * nothing an incident review can follow; the statement names the stream, the table and — for the one
-  * statement in ksqlDB's language that destroys records — the topic. `audit.detail.destructive` carries
-  * whether it was that one, so the trail can be filtered to the statements that deleted something without
-  * re-parsing every line's SQL.
+  * `audit.detail.statement` carries the statement with quoted literals inside `WITH (...)` and `VALUES (...)`
+  * replaced by `'***'` (`KsqlStatement.forAudit`). "A ksqlDB statement was run on production" names nothing
+  * an incident review can follow; the statement names the stream, the table and — for the one statement in
+  * ksqlDB's language that destroys records — the topic. It does not name a connector password or the cells of
+  * an `INSERT`. `audit.detail.destructive` carries whether it was that one destructive statement, so the
+  * trail can be filtered without re-parsing every line's SQL.
   *
   * `audit.before` and `audit.after` are absent, and their absence is a fact rather than an omission. The two
   * fields hold a scalar the operation moved, and a ksqlDB statement moves no scalar: a `CREATE STREAM`
@@ -50,7 +52,7 @@ object LoggingKsqlStatementSink {
       def record(entry: KsqlStatementRecord): F[Unit] = {
         val details =
           Map(
-            StatementDetail -> entry.statement,
+            StatementDetail -> KsqlStatement.forAudit(entry.statement),
             ShapeDetail -> entry.shape.wire,
             DestructiveDetail -> entry.destructive.toString
           ) ++ entry.detail

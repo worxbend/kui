@@ -191,6 +191,18 @@ object KsqlStatement {
     )
   }
 
+  /** The statement as it may be written to a log.
+    *
+    * Quoted literals inside a `WITH (...)` property list and a `VALUES (...)` tuple become `'***'`. A
+    * connector password and an `INSERT` payload are not an audit line; the connector name and the target
+    * stay, which is what an incident review follows. Text this lexer cannot scan is withheld outright. The
+    * audit record stores text rather than a re-parsed statement, so this takes the string the record holds.
+    */
+  def forAudit(text: String): String =
+    StatementLexer
+      .redactForAudit(text)
+      .getOrElse("ksql statement withheld; its literals could not be scanned")
+
   given CanEqual[KsqlStatement, KsqlStatement] = CanEqual.derived
 }
 
