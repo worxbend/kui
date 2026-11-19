@@ -609,7 +609,7 @@ services:
   # M7 needs: a cluster that answers `ok` with numbers, and a cluster on the same deployment that
   # answers `not_configured`.
   kafka-metrics:
-    image: soldevelo/jmx-exporter:1.4.0
+    image: soldevelo/jmx-exporter:1.7.0
     container_name: kui-compose-kafka-metrics
     command: ["5556", "/etc/jmx-exporter/kafka-jmx-exporter.yml"]
     depends_on:
